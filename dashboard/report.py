@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import aw
 
-STATUS_MARK = {"done": "✓", "dropped": "✗", "planned": "·"}
+STATUS_MARK = {"done": "✓", "dropped": "✗", "planned": "·", "doing": "▸"}
 BAR_WIDTH = 24
 
 

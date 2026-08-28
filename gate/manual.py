@@ -12,7 +12,7 @@ class Draft:
     tasks: list[str]
 
 
-def elicit() -> Draft:
+def elicit(allow_empty: bool = False) -> Draft:
     statement = ""
     while not statement:
         statement = ui.ask("What do you want to get done this session?\n> ")
@@ -27,7 +27,7 @@ def elicit() -> Draft:
         title = ui.ask("> ")
         if title:
             tasks.append(title)
-        elif tasks:
+        elif tasks or allow_empty:
             break
         else:
             print("At least one task.")

@@ -18,7 +18,7 @@ def run(conn, session_id: int) -> None:
 
 
 def resolve_tasks(conn, session_id: int) -> None:
-    tasks = [t for t in store.get_tasks(conn, session_id) if t["status"] == "planned"]
+    tasks = [t for t in store.get_tasks(conn, session_id) if t["status"] in store.UNFINISHED]
     if not tasks:
         print("  No open tasks.")
         return
@@ -26,7 +26,8 @@ def resolve_tasks(conn, session_id: int) -> None:
     print("  [d] done   [n] not done   [s] skip")
     done = 0
     for task in tasks:
-        choice = ui.confirm_choice(f"  {task['position']}. {task['title']}  > ", "dns")
+        doing = " (doing)" if task["status"] == "doing" else ""
+        choice = ui.confirm_choice(f"  {task['position']}. {task['title']}{doing}  > ", "dns")
         if choice == "d":
             store.resolve_task(conn, task["id"], "done")
             done += 1

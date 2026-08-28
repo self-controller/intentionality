@@ -1,38 +1,27 @@
 import sys
 
 from . import config, debrief, flow, handoff, store
-from .provider import ProviderUnavailable
 from .ui import GateAborted
-
-
-def _load_provider():
-    """Build the AI provider, or return None so the gate runs on manual entry.
-
-    A missing anthropic package, a missing key, or any construction failure
-    must degrade the gate, never break it.
-    """
-    try:
-        from .claude import ClaudeProvider
-    except ModuleNotFoundError as exc:
-        if exc.name != "anthropic":  # a missing SDK is expected; a broken gate is not
-            print(f"AI unavailable (import failed: {exc}) — manual entry.")
-        return None
-    try:
-        return ClaudeProvider()
-    except ProviderUnavailable as exc:
-        print(f"AI unavailable ({exc}) — manual entry.")
-        return None
 
 
 def gate(conn) -> int:
     try:
         for row in store.get_open_sessions(conn):
             store.mark_recovered(conn, row["id"])
-            print(f"Previous session {row['id']} was never closed — marked recovered.")
+            ended = store.get_session(conn, row["id"])["ended_at"]
+            if ended:
+                print(f"Session {row['id']} ended around {ended} (from heartbeat).")
+            else:
+                print(f"Session {row['id']} was never closed — no heartbeat, end time unknown.")
             if ui_yes("Resolve its tasks now? [y/n] > "):
                 debrief.resolve_tasks(conn, row["id"])
+            # Carry AFTER the debrief: what the user just resolved must not
+            # reappear in the backlog.
+            carried = store.carry_unfinished(conn, row["id"])
+            if carried:
+                print(f"{carried} unfinished task(s) moved to the backlog.")
 
-        session_id = flow.run(conn, provider=_load_provider())
+        session_id = flow.run(conn)
     except GateAborted:
         print("\nNothing saved.")
         return 0
@@ -43,13 +32,13 @@ def gate(conn) -> int:
         print("No desktop command configured — run `gate close` to end the session.")
         return 0
 
-    # HANDOFF: the desktop runs as a child; the gate waits, then closes and
-    # debriefs. The closing write happens before the debrief so a skipped
-    # debrief still leaves a complete record.
+    # HANDOFF: the desktop runs as a child; the gate waits. In a real console
+    # login this wait rarely returns — logind tears the whole scope down when
+    # GNOME exits — so the close below is best-effort. The desktop app's
+    # heartbeat plus the recovery block above are the real close mechanism.
     if handoff.launch_and_wait(session_id) is None:
         return 1
-    store.close_session(conn, session_id)
-    _debrief_politely(conn, session_id)
+    _close_debrief_carry(conn, session_id)
     return 0
 
 
@@ -58,17 +47,29 @@ def close_cmd(conn) -> int:
     if row is None:
         print("No open session.")
         return 0
-    store.close_session(conn, row["id"])
-    _debrief_politely(conn, row["id"])
+    _close_debrief_carry(conn, row["id"])
     return 0
 
 
-def _debrief_politely(conn, session_id: int) -> None:
-    # The session is already closed; skipping the debrief loses nothing.
+def migrate_cmd(conn) -> int:
+    # store.init() already migrated on connect; this subcommand exists so the
+    # desktop app can print one actionable instruction when the schema is old.
+    print(f"store is at schema v{store.get_setting(conn, 'schema_version')}.")
+    return 0
+
+
+def _close_debrief_carry(conn, session_id: int) -> None:
+    # Close first (a skipped debrief still leaves a complete record); carry
+    # last, so what the debrief just resolved doesn't land in the backlog.
+    store.close_session(conn, session_id)
     try:
         debrief.run(conn, session_id)
     except GateAborted:
         print("\nDebrief skipped.")
+    finally:
+        carried = store.carry_unfinished(conn, session_id)
+        if carried:
+            print(f"{carried} unfinished task(s) moved to the backlog.")
 
 
 def ui_yes(prompt: str) -> bool:
@@ -82,8 +83,10 @@ def main(argv: list[str]) -> int:
     store.init(conn)
     if argv[1:] == ["close"]:
         return close_cmd(conn)
+    if argv[1:] == ["migrate"]:
+        return migrate_cmd(conn)
     if argv[1:]:
-        print(f"usage: {argv[0]} [close]", file=sys.stderr)
+        print(f"usage: {argv[0]} [close | migrate]", file=sys.stderr)
         return 2
     return gate(conn)
 

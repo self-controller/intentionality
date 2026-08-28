@@ -11,9 +11,8 @@ set -l repo (dirname (dirname (realpath (status filename))))
 # session (e.g. by a session leader collecting env) must not re-run the gate.
 set -x INTENTIONALITY_GATE 1
 
-# AI conversation needs the venv; fall back to stdlib-only manual gate.
-set -l py $repo/.venv/bin/python
-test -x $py; or set py python3
+# The gate is stdlib-only — a broken .venv can never break login.
+set -l py python3
 
 # The desktop is launched via bin/desktop-session (systemd user bus +
 # logging — see that script). Declare the session type or mutter guesses X11.

@@ -41,3 +41,19 @@ def show_tasks(statement: str, intended_minutes: int | None, titles: list[str]) 
     for pos, title in enumerate(titles, start=1):
         print(f"  {pos}. {title}")
     print()
+
+
+def pick_numbers(prompt: str, upper: int) -> list[int]:
+    """Space/comma-separated 1-based picks within [1, upper]; blank = none."""
+    while True:
+        raw = ask(prompt)
+        if not raw:
+            return []
+        try:
+            picks = [int(part) for part in raw.replace(",", " ").split()]
+        except ValueError:
+            print("Numbers only, e.g. 1 3")
+            continue
+        if all(1 <= p <= upper for p in picks):
+            return list(dict.fromkeys(picks))  # dedupe, keep order
+        print(f"Numbers must be between 1 and {upper}.")
