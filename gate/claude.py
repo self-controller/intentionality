@@ -44,11 +44,12 @@ PROPOSE_TASKS = {
         "properties": {
             "statement": {"type": "string"},
             "intended_minutes": {"type": ["integer", "null"]},
+            # The API's strict-tool schema subset rejects minItems/maxItems;
+            # the 1-7 bound lives in the system prompt, non-empty is enforced
+            # in _accept_proposal.
             "tasks": {
                 "type": "array",
                 "items": {"type": "string"},
-                "minItems": 1,
-                "maxItems": 7,
             },
         },
         "required": ["statement", "intended_minutes", "tasks"],

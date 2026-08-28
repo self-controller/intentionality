@@ -8,8 +8,13 @@ is looked up from the store.
 
 import os
 import subprocess
+import time
 
 from . import config
+
+# A desktop that exits this fast never really started; without a warning the
+# gate would fall straight through to the debrief, which reads as a glitch.
+MIN_SESSION_SECONDS = 15
 
 
 def launch_and_wait(session_id: int) -> int | None:
@@ -18,6 +23,7 @@ def launch_and_wait(session_id: int) -> int | None:
     Returns its exit code, or None if it could not be launched at all.
     """
     env = dict(os.environ, INTENTIONALITY_SESSION_ID=str(session_id))
+    started = time.monotonic()
     try:
         proc = subprocess.Popen(config.DESKTOP_CMD, env=env)
     except OSError as exc:
@@ -28,6 +34,15 @@ def launch_and_wait(session_id: int) -> int | None:
     # console must not kill the supervisor while the desktop is running.
     while True:
         try:
-            return proc.wait()
+            code = proc.wait()
+            break
         except KeyboardInterrupt:
             continue
+
+    elapsed = time.monotonic() - started
+    if elapsed < MIN_SESSION_SECONDS:
+        print(
+            f"desktop exited after {elapsed:.0f}s (exit {code}) — it likely "
+            "failed to start; check ~/.local/state/intentionality/desktop.log"
+        )
+    return code

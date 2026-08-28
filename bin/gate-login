@@ -1,0 +1,26 @@
+#!/usr/bin/env fish
+# Run the intentionality gate, then hand off to a full GNOME session.
+#
+# This is what the tty1 login block in config.fish calls, but it's safe to
+# run by hand from any text console (Ctrl+Alt+F3, log in, run it) — that's
+# also how you test it without touching the boot target.
+
+set -l repo (dirname (dirname (realpath (status filename))))
+
+# Seen by the config.fish gate block: any login shell started *inside* the
+# session (e.g. by a session leader collecting env) must not re-run the gate.
+set -x INTENTIONALITY_GATE 1
+
+# AI conversation needs the venv; fall back to stdlib-only manual gate.
+set -l py $repo/.venv/bin/python
+test -x $py; or set py python3
+
+# The desktop is launched via bin/desktop-session (systemd user bus +
+# logging — see that script). Declare the session type or mutter guesses X11.
+set -q INTENTIONALITY_DESKTOP_CMD
+or set -x INTENTIONALITY_DESKTOP_CMD $repo/bin/desktop-session
+set -q XDG_SESSION_TYPE; and test $XDG_SESSION_TYPE != tty
+or set -x XDG_SESSION_TYPE wayland
+
+cd $repo
+and $py -m gate

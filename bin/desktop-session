@@ -1,0 +1,39 @@
+#!/usr/bin/env fish
+# What the gate launches as "the desktop". GNOME 50's gnome-session is a
+# session *leader*: it uploads the environment to the systemd user manager,
+# starts gnome-session@gnome.target, and blocks until the session tears down
+# (a FIFO to gnome-session-monitor.service) — which is exactly the wait
+# semantic the gate needs.
+#
+# Two obstacles to launching it from a bare tty, both handled here:
+#
+# 1. The leader denylists XDG_SESSION_ID from the environment upload, but
+#    mutter's *first* session-lookup path reads exactly that variable — and
+#    it is the only path that accepts a non-graphical (tty) logind session.
+#    So we hand the ID to org.gnome.Shell via a drop-in's EnvironmentFile
+#    (service-level env, immune to the manager-level unset).
+# 2. The leader re-execs through a login shell to collect env; on tty1 that
+#    login shell would fire the gate block in config.fish *recursively*.
+#    --no-reexec skips it (our login shell already has the full env).
+#
+# Output goes to a log so a dead-on-arrival desktop leaves an explanation.
+set -l log ~/.local/state/intentionality/desktop.log
+mkdir -p (dirname $log)
+
+set -q DBUS_SESSION_BUS_ADDRESS
+or set -x DBUS_SESSION_BUS_ADDRESS unix:path=$XDG_RUNTIME_DIR/bus
+
+set -l envfile $XDG_RUNTIME_DIR/intentionality/session-env
+if set -q XDG_SESSION_ID
+    mkdir -p (dirname $envfile)
+    echo "XDG_SESSION_ID=$XDG_SESSION_ID" > $envfile
+end
+
+begin
+    echo "=== "(date -Is)" tty="(tty)" session=$XDG_SESSION_ID ==="
+    gnome-session --no-reexec 2>&1
+    echo "=== gnome-session exited: $status ==="
+end >> $log
+
+# Stale IDs must not leak into a later GDM login's shell startup.
+rm -f $envfile
