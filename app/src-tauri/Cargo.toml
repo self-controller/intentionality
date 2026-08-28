@@ -21,3 +21,9 @@ thiserror = "1"
 
 [profile.release]
 strip = true
+
+[features]
+# The tauri CLI enables this for production builds; without it the binary is
+# a dev build that tries to load the Vite dev server. Build with
+# `npm run tauri build`, not raw `cargo build --release`.
+custom-protocol = ["tauri/custom-protocol"]
