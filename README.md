@@ -1,61 +1,55 @@
 # intentionality
 
-A gate that sits between login and your desktop: you have a short conversation
-about what you intend to do, it becomes a task list, and at the end of the
-session you debrief against it. All data stays in a local SQLite database.
+A gate that sits between login and your desktop: you type a short list of
+what you intend to do, it becomes the session's task list, and at the end of
+the session you debrief against it. Inside the session, a desktop app shows
+those tasks as a kanban board next to what
+[ActivityWatch](https://activitywatch.net/) actually observed, and a model
+periodically writes a short productivity note. All data stays in a local
+SQLite database.
 
-Current status: **v0.4**. The gate can elicit intent (via Claude, or manually
-when offline), commit a session, hand off to your desktop, wait, and run a
-debrief when it exits — and it can be wired into a real console login (see
-"Login-time wiring" below).
+Current status: **v0.5**. The gate is deliberately conversation-free — you
+type the list yourself (the AI chat of v0.4 is gone from the gate; git has
+it). Unfinished tasks carry into a backlog the next gate offers back to you.
+The Tauri desktop app is the in-session interface: kanban board, activity
+dashboard, and randomized-interval analyses.
 
 ## Requirements
 
-- Python 3.11+ (tested on 3.14)
-- No dependencies for the manual-only path — everything is stdlib.
-- For the AI conversation: a virtualenv with the `anthropic` package, and an
-  API key.
+- Python 3.11+ (tested on 3.14), stdlib only — the gate and CLI dashboard
+  have zero dependencies.
+- For the desktop app: Rust + Node (see `app/` below), webkit2gtk, and — for
+  the analysis feature only — an Anthropic API key in
+  `~/.config/intentionality/api_key` (chmod 600) or `ANTHROPIC_API_KEY`.
+  Without a key the app still works; analyses are skipped with a log line.
 
 ## Setup
 
 ```bash
 git clone <this repo> && cd intentionality
+python3 -m gate            # that's the whole gate setup
 
-# Optional — only needed for the AI conversation, not for manual entry:
-python3 -m venv .venv
-.venv/bin/pip install anthropic
-mkdir -p ~/.config/intentionality
-echo "sk-ant-..." > ~/.config/intentionality/api_key
-chmod 600 ~/.config/intentionality/api_key
+# Desktop app (one-time):
+sudo dnf install gcc gcc-c++ make cmake perl-core pkgconf-pkg-config \
+     webkit2gtk4.1-devel javascriptcoregtk4.1-devel libsoup3-devel \
+     gtk3-devel librsvg2-devel nodejs npm
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+cd app && npm install && npm run tauri build
 ```
-
-No `pip install` step is required to just try it — see below.
-
-**You need your own Anthropic API key** to use the AI conversation — one
-isn't bundled with this repo. Get one from
-[console.anthropic.com](https://console.anthropic.com), then paste it in
-place of `sk-ant-...` above. The key file lives outside the repo (`~/.config/intentionality/api_key`, per
-`gate/config.py`) and is read only by `gate/claude.py` — it's never part of
-this checkout and won't get committed by accident. Keep it `chmod 600`; it's
-the only credential the gate stores. Without a key, the gate still works
-fully via manual entry (`python3 -m gate`, no venv needed).
 
 ## Running it
 
 From the repo root:
 
 ```bash
-# Manual entry, no dependencies, no key needed:
 python3 -m gate
-
-# AI-driven conversation (falls back to manual automatically if the key
-# is missing, the network is down, or the model is unreachable):
-.venv/bin/python -m gate
 ```
 
-The gate asks what you want to get done, turns it into a numbered task list,
-and lets you confirm, revise, or quit before anything is written. Once
-confirmed, the session is committed to the local store.
+If the backlog holds tasks carried from earlier sessions, the gate offers
+them first (`Pull in? (numbers, blank for none)`). Then it asks what you want
+to get done, you type tasks one per line, and you confirm, revise, or quit
+before anything is written. Once confirmed, the session is committed to the
+local store.
 
 ### Ending a session
 
@@ -67,10 +61,12 @@ whenever your session is actually done:
 python3 -m gate close
 ```
 
-This is the normal way to use it today: run `python -m gate` in the morning,
+This is the dev-mode way to use it: run `python -m gate` in the morning,
 work as usual, run `python -m gate close` when you're done. The debrief walks
-through each planned task — `d` done, `n` not done, `s` skip — then shows how
-long the session ran versus what you intended.
+through each task still open — `d` done, `n` not done, `s` skip — and then
+whatever is still unfinished is carried into the backlog for the next gate.
+(With the kanban app most tasks are already resolved by dragging, so the
+debrief is usually one or two keystrokes.)
 
 ### Full handoff (launches a program and waits on it)
 
@@ -84,16 +80,19 @@ console/login-time setup uses (eventually pointed at something like
 INTENTIONALITY_DESKTOP_CMD="xterm" python3 -m gate
 ```
 
-If the session was left open by a crash or a hard reboot, the next `gate` run
-notices, marks it `recovered`, and offers to resolve its tasks before
-starting a new one.
+When GNOME exits, logind tears down the whole login scope — the waiting gate
+included — so in a real console login the closing write happens at the *next*
+gate run: it notices the open session, stamps its end from the desktop app's
+last heartbeat (or marks it `recovered` with an honest unknown end when the
+app wasn't running), offers the debrief, and carries what's left into the
+backlog.
 
 ### Login-time wiring (the real thing)
 
 `bin/gate-login` is the launcher for running the gate at an actual text
-console: it picks the venv Python if present, points
-`INTENTIONALITY_DESKTOP_CMD` at `bin/desktop-session`, and declares the
-session type Wayland so mutter doesn't guess X11. `desktop-session` runs
+console: it runs the stdlib-only gate with the system `python3` (nothing to
+break at login), points `INTENTIONALITY_DESKTOP_CMD` at `bin/desktop-session`,
+and declares the session type Wayland so mutter doesn't guess X11. `desktop-session` runs
 GNOME 50's `gnome-session` leader over the systemd user bus with
 `--no-reexec` (its login-shell re-exec would fire the gate block again,
 recursively) and logs everything to
@@ -150,7 +149,45 @@ Escape hatches are deliberate: `Ctrl+Alt+F2`+ are normal consoles, the skip
 file above bypasses the gate, and reverting the boot target restores GDM
 exactly as before. This is commitment, not security.
 
-## The dashboard
+## The desktop app
+
+```bash
+cd app && npm run tauri dev      # development
+npm run tauri build              # release binary + rpm
+```
+
+Runs inside the session (it is deliberately not the gate — a window inside
+GNOME can always be alt-tabbed away; the lockout lives at the console). Three
+surfaces, all bare-bones for now:
+
+- **Board** — To Do / Doing / Done lanes over the current session's tasks
+  (drag to move), a collapsed dropped tray, and the backlog in a sidebar:
+  pull items into today, add new ones, delete stale ones. Session cards are
+  history — they can be dropped but never deleted.
+- **Dashboard** — recent sessions, their task outcomes, and per-app active
+  time from ActivityWatch with AFK subtracted.
+- **Analyses** — at randomized intervals (mean `analysis_mean_minutes` in the
+  store's `meta` table, default 60) the app sends the session statement, the
+  board state, and per-app activity totals to Claude and stores a short
+  observation: headline, 0-100 alignment, a sentence or two. Notification is
+  a badge inside the app, never an OS notification. Quiet windows (< 5 min
+  active) are skipped.
+
+The app also writes `session.last_heartbeat` every 30 s — that is what turns
+"session never closed" into an accurate end time at the next gate. Autostart
+it (path must be absolute):
+
+```ini
+# ~/.config/autostart/intentionality.desktop
+[Desktop Entry]
+Type=Application
+Name=Intentionality
+Exec=/home/david/Desktop/projects/intentionality/app/src-tauri/target/release/intentionality
+Terminal=false
+X-GNOME-Autostart-enabled=true
+```
+
+## The CLI dashboard
 
 ```bash
 python3 -m dashboard          # latest session in detail + recent list
@@ -174,10 +211,13 @@ unavailable.
 
 ## Where your data lives
 
-A single SQLite file: `~/.local/share/intentionality/store.db`. Two tables —
-`session` and `task` — plus a `meta` table for schema versioning. Nothing
-else touches this file; inspect it anytime with the `sqlite3` CLI or Python's
-built-in `sqlite3` module.
+A single SQLite file: `~/.local/share/intentionality/store.db`. Tables:
+`session`, `task` (rows with `session_id NULL` are the backlog), `analysis`,
+and `meta` (schema version + settings). Only `gate/store.py` and the app's
+`db.rs` touch this file; migrations belong to Python alone — `store.init()`
+upgrades old stores (after an online self-backup to `store.db.v1.bak`), and
+the app refuses politely with `python3 -m gate migrate` when the schema is
+older than it understands. Inspect it anytime with the `sqlite3` CLI.
 
 ## Environment variables
 
@@ -185,10 +225,12 @@ built-in `sqlite3` module.
 |---|---|---|
 | `INTENTIONALITY_STORE` | Path to the SQLite store | `~/.local/share/intentionality/store.db` |
 | `INTENTIONALITY_DESKTOP_CMD` | Command to launch and wait on after commit | *(none — no handoff)* |
+| `INTENTIONALITY_AW_URL` | ActivityWatch API base URL | `http://localhost:5600` |
+| `INTENTIONALITY_SESSION_ID` | Set by the gate for the desktop; the app trusts it only if that session is still open | *(set by handoff)* |
 
-The API key path (`~/.config/intentionality/api_key`) and model
-(`claude-opus-5`) are not environment-configurable yet — see `gate/config.py`
-if you need to change them.
+The analysis model (`claude-opus-5`) lives in `app/src-tauri/src/claude.rs`;
+the key comes from `~/.config/intentionality/api_key` or `ANTHROPIC_API_KEY`
+and never reaches the webview.
 
 ## Project layout
 
@@ -198,31 +240,33 @@ bin/
 └── desktop-session  # starts GNOME via the systemd user bus, logs output
 
 gate/
-├── __main__.py    # entry point: gate / gate close
-├── flow.py        # ELICIT -> CONFIRM -> COMMIT state machine
-├── manual.py      # dependency-free elicitation (also the AI fallback path)
-├── provider.py    # the model boundary (Protocol) — what claude.py implements
-├── claude.py       # AI elicitation via the Claude API, strict tool-use
-├── handoff.py      # launches the desktop as a child, waits
-├── debrief.py      # end-of-session summary + per-task resolution
-├── store.py        # the only module that touches sqlite3
-├── schema.sql      # session / task / meta tables
-├── ui.py           # terminal prompt helpers
-└── config.py       # paths, env var names, model id, timeouts
+├── __main__.py    # entry point: gate / gate close / gate migrate
+├── flow.py        # PULL -> ELICIT -> CONFIRM -> COMMIT state machine
+├── manual.py      # the elicitation: type your list
+├── handoff.py     # launches the desktop as a child, waits
+├── debrief.py     # end-of-session per-task resolution
+├── store.py       # the only Python module that touches sqlite3; owns migrations
+├── schema.sql     # session / task / analysis / meta tables (v2)
+├── ui.py          # terminal prompt helpers
+└── config.py      # paths and env var names
 
-dashboard/
-├── __main__.py     # entry point: dashboard / dashboard N / dashboard list
-├── aw.py           # ActivityWatch REST client (stdlib urllib)
-└── report.py       # intention-vs-observed rendering, AFK subtraction
+dashboard/          # the CLI dashboard (stdlib only)
+app/                # the Tauri desktop app
+├── src/            # React frontend: Board, Dashboard, AnalysisPanel
+└── src-tauri/src/  # Rust: db, aw, observed, claude, scheduler, commands
+
+tests/
+└── test_store.py   # data-layer tests: migration, carry, close idempotency
 ```
 
 `flow.py` never imports `sqlite3` or the network — it only calls into
-`store` and the elicitation source. That boundary is what keeps the manual
-path, the AI path, and the storage layer independently testable.
+`store` and `manual`. Run the data-layer tests with
+`python3 -m unittest discover tests`.
 
 ## Not yet built
 
-- Mid-session task additions.
-- Long-range dashboard views (per-week/month trends, category mapping).
+- Long-range dashboard views (per-week/month trends, category mapping) —
+  the `analysis` table already accumulates the data for them.
+- In-column drag reordering on the board (cross-column moves work).
 - Production install mode (gate as the login shell itself; needs a rescue
   account first — the fish-config wiring above is the dev mode).
