@@ -66,7 +66,6 @@ fn main() {
     tauri::Builder::default()
         .manage(AppState::new(conn, session_id))
         .setup(|app| {
-            use tauri::Manager;
             scheduler::spawn(app.handle().clone());
             Ok(())
         })
