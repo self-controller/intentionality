@@ -1,0 +1,43 @@
+# The gate itself, on a spare virtual terminal.
+#
+# Why a system unit for a user program: /dev/tty9 is root:tty 0600, so an
+# unprivileged process cannot open it. TTYPath= plus StandardInput=tty-force
+# has systemd open it as root and hand the fd down to User=david, and the
+# ExecStartPre=/ExecStopPost=+ prefix runs chvt with full privileges under the
+# same User=. No polkit rule, no setuid, no sudo at runtime.
+#
+# VT9 because logind's NAutoVTs=6 autospawns gettys on VT1-6 only: VT7-12 are
+# free, and Ctrl+Alt+F2..F6 stay untouched as escape hatches. Ctrl+Alt+F1
+# returns to GNOME at any point, including out of a half-answered gate.
+#
+# No PAMName=: the gate needs no logind session, and not having one keeps
+# logind from tearing anything down over a VT switch.
+#
+# Started on demand by intentionality-resume.service, so no [Install].
+[Unit]
+Description=intentionality gate on a spare console
+
+[Service]
+Type=oneshot
+User=david
+WorkingDirectory=/home/david/Desktop/projects/intentionality
+Environment=TERM=linux
+
+TTYPath=/dev/tty9
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=tty
+TTYReset=yes
+TTYVHangup=yes
+
+# Exit 1 means "not away long enough" (or the skip file is there). systemd
+# treats that as a skip, not a failure, and nothing after it runs -- so the
+# screen never flickers to VT9 on a lid-close you didn't think of as leaving.
+ExecCondition=/usr/bin/python3 -m gate resume-needed
+
+ExecStartPre=+/bin/sh -c 'cat /sys/class/tty/tty0/active > /run/intentionality.prevvt; exec /usr/bin/chvt 9'
+ExecStart=/home/david/Desktop/projects/intentionality/bin/resume-gate
+# Also runs when ExecCondition= skipped the unit, so it reads-then-deletes the
+# marker and switches only if it actually found one. A stale marker left from
+# an earlier run would otherwise send a later skip to the wrong VT.
+ExecStopPost=+/bin/sh -c 'v=$(tr -dc 0-9 < /run/intentionality.prevvt 2>/dev/null); rm -f /run/intentionality.prevvt; [ -n "$v" ] && exec /usr/bin/chvt "$v"; exit 0'

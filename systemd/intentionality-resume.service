@@ -1,0 +1,21 @@
+# Fires the resume gate when the machine comes back from sleep.
+#
+# Deliberately tiny and decoupled: ordering After=systemd-suspend.service
+# inside suspend.target is what makes a unit run on *resume* rather than
+# before sleep, but the job stays part of the sleep transaction until it
+# exits. A gate you take ten minutes to answer would hold that transaction
+# open and block the next suspend, so this starts the real unit --no-block
+# and gets out of the way.
+#
+# Install: sudo cp to /etc/systemd/system/, systemctl daemon-reload,
+#          systemctl enable intentionality-resume.service
+[Unit]
+Description=Fire the intentionality gate after resume
+After=systemd-suspend.service systemd-hibernate.service systemd-hybrid-sleep.service systemd-suspend-then-hibernate.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl start --no-block intentionality-resume-gate.service
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

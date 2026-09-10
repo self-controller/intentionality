@@ -5,14 +5,18 @@ what you intend to do, it becomes the session's task list, and at the end of
 the session you debrief against it. Inside the session, a desktop app shows
 those tasks as a kanban board next to what
 [ActivityWatch](https://activitywatch.net/) actually observed, and a model
-periodically writes a short productivity note. All data stays in a local
-SQLite database.
+periodically writes a short productivity note. It also transcribes meetings on
+demand and turns them into notes with action items. All data stays in a local
+SQLite database, with two exceptions spelled out below: if you configure API
+keys, each analysis sends that stretch's activity summary — window titles
+included — to the Anthropic API, and each meeting you record sends its audio to
+the OpenAI transcription API and the resulting transcript to Anthropic.
 
 Current status: **v0.5**. The gate is deliberately conversation-free — you
 type the list yourself (the AI chat of v0.4 is gone from the gate; git has
 it). Unfinished tasks carry into a backlog the next gate offers back to you.
 The Tauri desktop app is the in-session interface: kanban board, activity
-dashboard, and randomized-interval analyses.
+dashboard, randomized-interval analyses, and the meeting note taker.
 
 ## Requirements
 
@@ -22,6 +26,18 @@ dashboard, and randomized-interval analyses.
   the analysis feature only — an Anthropic API key in
   `~/.config/intentionality/api_key` (chmod 600) or `ANTHROPIC_API_KEY`.
   Without a key the app still works; analyses are skipped with a log line.
+  With one, each analysis sends the board — your task list and where each
+  task stands — and the observed activity — app names **and the window titles under them** — to the
+  Anthropic API. Titles carry document names, page titles and URLs, which is a
+  good deal more than app names do; without a key none of it leaves the
+  machine.
+- For the meeting note taker only: `pipewire-utils` (for `pw-record` and
+  `pw-dump`, already present on a standard Fedora desktop) and an OpenAI API
+  key in
+  `~/.config/intentionality/openai_key` (chmod 600) or `OPENAI_API_KEY`.
+  Without a key the rest of the app is unaffected and Start transcribing
+  reports the missing key. See "The meeting note taker" below for what leaves
+  the machine when you use it.
 
 ## Setup
 
@@ -46,10 +62,11 @@ python3 -m gate
 ```
 
 If the backlog holds tasks carried from earlier sessions, the gate offers
-them first (`Pull in? (numbers, blank for none)`). Then it asks what you want
-to get done, you type tasks one per line, and you confirm, revise, or quit
+them first (`Pull in? (numbers, blank for none)`). Then it asks how long you
+will be here, you type tasks one per line, and you confirm, revise, or quit
 before anything is written. Once confirmed, the session is committed to the
-local store.
+local store. There is no "what do you want to get done?" question — the list
+is that answer.
 
 ### Ending a session
 
@@ -63,10 +80,12 @@ python3 -m gate close
 
 This is the dev-mode way to use it: run `python -m gate` in the morning,
 work as usual, run `python -m gate close` when you're done. The debrief walks
-through each task still open — `d` done, `n` not done, `s` skip — and then
-whatever is still unfinished is carried into the backlog for the next gate.
-(With the kanban app most tasks are already resolved by dragging, so the
-debrief is usually one or two keystrokes.)
+through each task still open — `d` done, `n` not done, `x` drop for good —
+and then whatever is still unfinished is carried into the backlog for the next
+gate. `n` is a carry: the task comes back next time. `x` is the only answer
+that ends a task here, and Ctrl-C bails out of the rest, carrying every task
+you never answered. (With the kanban app most tasks are already resolved by
+dragging, so the debrief is usually one or two keystrokes.)
 
 ### Full handoff (launches a program and waits on it)
 
@@ -149,6 +168,72 @@ Escape hatches are deliberate: `Ctrl+Alt+F2`+ are normal consoles, the skip
 file above bypasses the gate, and reverting the boot target restores GDM
 exactly as before. This is commitment, not security.
 
+### Waking from sleep
+
+Login is not the only way back to a desktop. Close the lid at 15:00, open it at
+21:00, and without this you land in a session you stated six hours ago, still
+counting. So the gate has a second trigger: **wake the machine after 30 minutes
+or more away and it runs again**, on its own virtual terminal, and hands you
+back to GNOME once you have committed a new session.
+
+It is the same program, not an imitation — the recovery sweep closes the old
+session at its last heartbeat, offers to resolve its tasks, and carries the
+unfinished ones into the backlog the new session then offers back.
+
+Two units do it, both in `systemd/`:
+
+```bash
+sudo cp systemd/intentionality-resume.service \
+        systemd/intentionality-resume-gate.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable intentionality-resume.service   # apply
+sudo systemctl disable intentionality-resume.service  # revert
+```
+
+`intentionality-resume.service` is pulled into `suspend.target` and ordered
+`After=systemd-suspend.service`, which is what makes a unit run on *resume*
+rather than before sleep. It does one thing — starts the other unit
+`--no-block` — because a `suspend.target` job stays open until its units exit,
+and a gate you take ten minutes to answer would block the next suspend.
+
+`intentionality-resume-gate.service` runs the gate on **VT9**. It has to be a
+system unit for one reason: `/dev/tty9` is `root:tty 0600`, so nothing you run
+as yourself can open it. `TTYPath=` with `StandardInput=tty-force` has systemd
+open it as root and hand the fd down to `User=david`, and the `+` prefix on
+`ExecStartPre=`/`ExecStopPost=` runs `chvt` with full privileges under that
+same `User=`. No polkit rule, no setuid, no sudo at runtime. VT9 because
+logind's `NAutoVTs=6` autospawns gettys on VT1–6 only, so 7–12 are free and the
+`Ctrl+Alt+F2`–`F6` escape hatches stay exactly as they were.
+
+**How long counts as away** is `now - session.last_heartbeat`: the store
+already records when the machine stopped being used — it is the timestamp the
+recovery sweep turns into `ended_at` — so a suspend needs no stamp of its own.
+The threshold is the `meta` setting `resume_min_away_minutes`, default 30:
+
+```bash
+sqlite3 ~/.local/share/intentionality/store.db \
+  "INSERT INTO meta (key, value) VALUES ('resume_min_away_minutes', '45')
+   ON CONFLICT(key) DO UPDATE SET value = excluded.value;"
+```
+
+The check is the unit's `ExecCondition=`, so a short nap is a clean *skip* —
+the screen never flickers to VT9 on a lid-close you did not think of as
+leaving. With no open session, or one the app never heartbeated, it fires:
+waking a machine with no stated intention is what the gate is for.
+
+Escape hatches, as everywhere: `Ctrl+Alt+F1` returns to GNOME from a
+half-answered gate, `touch ~/.config/intentionality/skip` disables this along
+with the login gate, and disabling the unit reverts it entirely. Quitting with
+`q` is allowed and leaves you with no open session — you declined to state an
+intention, and the record says so.
+
+Test it by hand before trusting it to a real lid-close:
+
+```bash
+sudo systemctl start intentionality-resume-gate.service   # the whole VT dance
+journalctl -u intentionality-resume-gate -b               # what it decided
+```
+
 ## The desktop app
 
 ```bash
@@ -165,13 +250,41 @@ surfaces, all bare-bones for now:
   pull items into today, add new ones, delete stale ones. Session cards are
   history — they can be dropped but never deleted.
 - **Dashboard** — recent sessions, their task outcomes, and per-app active
-  time from ActivityWatch with AFK subtracted.
+  time from ActivityWatch with AFK subtracted, each app expandable to the
+  window titles that made up its time.
 - **Analyses** — at randomized intervals (mean `analysis_mean_minutes` in the
-  store's `meta` table, default 60) the app sends the session statement, the
-  board state, and per-app activity totals to Claude and stores a short
-  observation: headline, 0-100 alignment, a sentence or two. Notification is
-  a badge inside the app, never an OS notification. Quiet windows (< 5 min
-  active) are skipped.
+  store's `meta` table, default 60) the app sends the board state and per-app
+  activity totals — the busiest 8 apps, each with
+  its 5 longest-running window titles — to Claude and stores a short
+  observation: headline, 0-100 alignment, a sentence or two. Titles are what
+  let it tell research from drift; on app names alone a browser is
+  unreadable. It lands as an
+  unread badge in the app *and* a desktop notification. Quiet windows (< 5 min
+  active) are skipped. "Run a check now" deliberately does not notify — you
+  are already looking at the tab that answers it.
+- **Checkpoint** — when the time you said you would be here runs out
+  (`intended_minutes`, set at the gate), the app runs an analysis of its own,
+  raises a desktop notification, and puts a full-screen checkpoint in front of
+  you: what the last stretch looked like, and one recommendation for what to
+  do from here. `Got it` dismisses it; `+15 min` / `+30 min` re-arm it. It
+  never closes the session — that stays the gate's job.
+
+  Recommendations come from a fixed catalog in
+  `src-tauri/src/recommendations.rs`; the model picks one id from it and
+  writes a sentence saying why it fits. Only the id is stored, so rewording an
+  entry applies to every checkpoint already recorded. Every entry's `source`
+  is currently `None` and the screen says so — these are sensible defaults,
+  not research findings, and that is the slot real citations go in.
+
+  Open-ended sessions (blank minutes at the gate) get no checkpoint: a NULL
+  `intended_minutes` is already you saying not to hold you to a clock. The
+  due time lives in `session.checkpoint_due_at`, so a checkpoint that came due
+  while the app was closed fires on its next start rather than being lost.
+
+  Two notifications, in total, are all this app ever raises. It was built with
+  none at all on the rule that an OS notification should be *structurally*
+  impossible; the checkpoint is why that changed, and the plugin is still
+  reachable from exactly one file (`src-tauri/src/notify.rs`).
 
 The app also writes `session.last_heartbeat` every 30 s — that is what turns
 "session never closed" into an accurate end time at the next gate. Autostart
@@ -187,6 +300,202 @@ Terminal=false
 X-GNOME-Autostart-enabled=true
 ```
 
+Note what that `Exec` points at: a **build artifact**. It changes only when you
+run `npm run tauri build`, so an old binary keeps autostarting at login until
+you rebuild — and on 2026-08-29 that meant a day-old app started at login with
+nothing on screen to say so.
+
+So the app names its own build. The header always shows
+`v0.5.0 · built 21:44 Aug 29`, and when any file under `app/src`,
+`app/src-tauri/src`, `app/src-tauri/Cargo.toml`, `app/index.html` or
+`app/package.json` is newer than the binary it adds
+`build is behind your source — run npm run tauri build`. The same line goes to
+stderr at startup, which at autostart means the journal:
+
+```bash
+journalctl --user -b | grep '^intentionality v'
+```
+
+The comparison is file timestamps, not the git commit: this tree is dirty most
+of the time, and a commit check would report "up to date" all the way through.
+`gate/` is deliberately not watched — editing `store.py` or `schema.sql` needs
+no app rebuild, and warning about it would only teach you to ignore the warning.
+
+On GNOME 50 the autostart entry is launched by `gnome-session-service` itself,
+as a transient scope (`app-gnome-intentionality-NNNN.scope`), **not** through
+systemd's `xdg-desktop-autostart.target`. That target has `RefuseManualStart=yes`
+and nothing pulls it in, so every generated `app-*@autostart.service` on the
+machine sits inactive. That is normal here, not a fault to chase.
+
+Autostart fires **once**, at session start, and closing the window quits the
+app — `main.rs` sets no `on_window_event` and there is no tray icon, so Tauri's
+default applies and the last window closing ends the process. Nothing in
+`~/.config/autostart` shows up in the GNOME overview, so for a while that
+combination meant a closed window was gone until the next login. Hence a second
+entry, this one an ordinary launcher:
+
+```ini
+# ~/.local/share/applications/intentionality.desktop
+[Desktop Entry]
+Type=Application
+Name=Intentionality
+Comment=Session board, activity dashboard, and heartbeats
+Exec=/home/david/Desktop/projects/intentionality/app/src-tauri/target/release/intentionality
+Icon=/home/david/Desktop/projects/intentionality/app/src-tauri/icons/icon.png
+StartupWMClass=intentionality
+Terminal=false
+Categories=Utility;
+```
+
+Two files, two jobs: `~/.config/autostart` handles login, this one handles the
+rest of the session (Super, type "Intentionality"). GNOME scans the two
+directories separately, so nothing launches twice. `StartupWMClass` is what
+makes the running window bind to this entry in the dash instead of appearing
+beside it as a second, iconless item. gnome-shell watches the directory, so the
+entry appears without a relog.
+
+Worth knowing what a closed window costs, since it is easy to do by reflex: the
+30 s heartbeat stops with it, and `last_heartbeat` is what the next gate reads
+to infer `ended_at`. Close the window at 19:07 and keep working until the next
+day, and the session is recorded as ending at 19:07. That is not a bug — the app
+genuinely stopped watching — but it is a quiet way to lose an evening of
+session history, and it happened on 2026-08-31 (session 16). Clicking the app
+open again while it is already running starts a *second* process, with its own
+analysis timer; if that ever becomes a real annoyance the fix is
+`tauri-plugin-single-instance`.
+
+## The meeting note taker
+
+The Meetings tab records a meeting, transcribes it as it goes, and turns the
+transcript into a summary, key points and action items.
+
+Pick a microphone, press **Start transcribing** and it opens; press **Stop**
+and it shuts at once, with the button reading **Writing the notes…** until
+they land. Nothing else starts a recording — there is no timer, no scheduler
+and no startup path that can, which is the one hard rule this feature has.
+While the microphone is open the tab shows a red pulsing indicator, the
+elapsed time, and the level meter described below.
+
+How it works: one `pw-record` process writes raw 16 kHz mono PCM to its stdout,
+Rust processes that stream 20 ms at a time and slices it into two-minute
+chunks, and each chunk is sent to OpenAI's transcription API as it is cut. That
+is why the transcript appears during the meeting, and why Stop has only the
+final part-chunk left to transcribe before the notes can be written. Stop
+returns as soon as the microphone is shut, and that last chunk and the summary
+are finished behind it — which is what the **Writing the notes…** button is
+reporting. Each chunk's audio is held in memory, uploaded, and dropped; **no
+audio is ever written to disk or to the store.** That is unchanged by
+everything below: the meter and the source selector add no file, no recording
+and no new row.
+
+### Choosing a microphone
+
+The dropdown above Start lists PipeWire's capture sources; **System default
+microphone** is the entry that changes nothing. Your choice is remembered
+across restarts by node *name*, not by PipeWire's object serial, because a
+serial is reassigned when a device is unplugged and plugged back in. If the
+remembered device is not there when the tab loads — or has gone by the time you
+press Start — the selector falls back to the system default and says so. It
+does not forget your choice: the backend reports a `pw-dump` that failed and a
+`pw-dump` that found nothing the same way, so a momentary hiccup would
+otherwise throw away a deliberate pick. Plug the device back in and it is
+selected again; only choosing something yourself changes what is remembered.
+
+That check is the app's own, and it has to be: `pw-record` does **not** refuse
+an unknown `--target`. It falls back to the default source, streams happily and
+reports nothing until it exits, so an unplugged microphone would otherwise
+produce a recording from the wrong device rather than an error. The
+selector is disabled while a recording is running — `pw-record` is given its
+source when it starts, so changing it mid-meeting could only mislead.
+
+An empty list is not a failure. If PipeWire is unavailable or `pw-dump` says
+nothing, only System default is offered and the detail goes to the journal.
+
+### Reading the level meter
+
+The bars beside the recording clock are the **raw** microphone level, before
+any gain: 24 bars, one per 100 ms window, scrolling right to left over the last
+2.4 seconds. Height is mapped from dBFS, not linear amplitude — speech across a
+room is invisible on a linear scale. The small line under them reports input,
+output and peak levels plus the gain currently applied.
+
+Nothing about the strip is decorative. Every bar is a measurement that arrived
+from the capture thread; there is no timer and no interpolation, so a strip
+that stops moving means the levels stopped, and a strip resting at its floor
+means the microphone is hearing nothing. After about four seconds of sustained
+low *raw* level it says **very quiet — check the mic or move closer**. That
+warning tracks the raw level only, never the gain. Under
+`prefers-reduced-motion` the bars lose their smoothing between values but keep
+updating at the same rate.
+
+The red indicator, not the meter, remains the answer to "is this recording?".
+
+### Automatic gain, and what it cannot do
+
+A speaker across a room arrives far below what the transcription model wants,
+and the internal laptop microphone is already at its hardware ceiling
+(`amixer -c0 sget Dmic0` reads `Capture 70 [100%] [20.00dB]` against a limit of
+70; `pw-record --volume` caps at 1.0). So the capture path applies bounded
+digital gain: up to +30 dB toward a conservative -20 dBFS target, held rather
+than raised whenever the raw input is below a noise floor, with a soft limiter
+before the 16-bit conversion so a sudden loud frame compresses instead of
+clipping.
+
+**Gain increases amplitude, not information.** If distant speech and room noise
+arrive at the same signal-to-noise ratio, both are raised together, and
+over-amplified room noise is a known way to make these models hallucinate. A
+USB boundary microphone, a lavalier, or anything else closer to the speaker is
+the real fix for a lecture; this is what makes the room *audible*, not what
+makes it *clear*.
+
+Set `INTENTIONALITY_AGC=off` to capture without it. The meter still runs, so
+this is a controlled A/B and not a different program — which matters precisely
+because no audio is kept to compare afterwards.
+
+### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `INTENTIONALITY_AGC` | on | `off` disables automatic gain; metering is unaffected. |
+| `INTENTIONALITY_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | Also accepts `whisper-1`. Anything else is refused at Start. |
+| `INTENTIONALITY_TRANSCRIBE_LANGUAGE` | `en` | An ISO-639-1 code. **Recording another language needs this set.** |
+
+Both transcription variables are validated before the microphone opens, so a
+typo costs a Start error rather than a recorded meeting that turns out to have
+been rejected chunk by chunk. The allowed model list is short on purpose:
+diarization models are rejected even though the endpoint takes them, because
+their request and response shape differs from the carry-forward `prompt` this
+app uses to stitch chunk boundaries. A model override is not a language
+setting; the two are separate for that reason.
+
+Recording lives in Rust, not in the React component, so switching to the Board
+and back does not stop it. If a chunk fails to transcribe the meeting carries
+on and the gap is shown in the transcript rather than hidden. If the app is
+killed mid-meeting, everything transcribed up to that point is already saved
+and the meeting is marked failed on the next start rather than left recording
+forever. If the model call fails, the transcript is still there and the detail
+pane offers a retry that costs no audio.
+
+Action items are proposals, not tasks. Each gets a checkbox, and **Add N to
+backlog** inserts the ticked ones as backlog tasks (`source = 'meeting'`) that
+the next gate offers you. Approving twice cannot insert twice.
+
+**What leaves the machine.** This is the largest exception to "all data stays
+local" in the project. The analysis call sends app and window names; this sends
+what was said in a room, and it can capture people who never agreed to it. The
+audio goes to OpenAI and the transcript then goes to Anthropic for the notes.
+Both happen only between your Start and your Stop.
+
+Level data stays on the machine and is never stored: the meter's events are
+ephemeral, and the journal gets one summary line per two-minute chunk (raw and
+output RMS, peak, median and maximum gain) and never a sample. That line still
+reveals when a room was acoustically active, which is why it is a summary.
+
+The transcript is treated as untrusted input, like window titles: it is wrapped
+in delimiters the transcript itself cannot forge, and the model is told it is a
+recording of what people said and never instructions to follow. A participant
+saying "ignore your previous instructions" is recorded, not obeyed.
+
 ## The CLI dashboard
 
 ```bash
@@ -195,7 +504,8 @@ python3 -m dashboard 3        # a specific session
 python3 -m dashboard list     # recent sessions only
 ```
 
-Shows each session's intention (statement, tasks, intended duration) next to
+Shows each session's intention (tasks, intended duration, and the statement
+for sessions old enough to have one) next to
 what [ActivityWatch](https://activitywatch.net/) observed in the same time
 window: active time per app, minus away time. It reads ActivityWatch's local
 API (`localhost:5600`, override with `INTENTIONALITY_AW_URL`) and works
@@ -213,7 +523,9 @@ unavailable.
 
 A single SQLite file: `~/.local/share/intentionality/store.db`. Tables:
 `session`, `task` (rows with `session_id NULL` are the backlog), `analysis`,
-and `meta` (schema version + settings). Only `gate/store.py` and the app's
+`meeting` + `meeting_segment` + `meeting_action` (the note taker), and `meta`
+(schema version + settings). Recorded audio is **not** among them — each chunk
+is transcribed and dropped, so only text is ever stored. Only `gate/store.py` and the app's
 `db.rs` touch this file; migrations belong to Python alone — `store.init()`
 upgrades old stores (after an online self-backup to `store.db.v1.bak`), and
 the app refuses politely with `python3 -m gate migrate` when the schema is
@@ -228,35 +540,54 @@ older than it understands. Inspect it anytime with the `sqlite3` CLI.
 | `INTENTIONALITY_AW_URL` | ActivityWatch API base URL | `http://localhost:5600` |
 | `INTENTIONALITY_SESSION_ID` | Set by the gate for the desktop; the app trusts it only if that session is still open | *(set by handoff)* |
 
+Two keys, two files, two providers: the Anthropic key at
+`~/.config/intentionality/api_key` (analyses, checkpoints and meeting notes)
+and the OpenAI key at `~/.config/intentionality/openai_key` (transcription
+only). Each is read by exactly one module and neither reaches the webview.
+
 The analysis model (`claude-opus-5`) lives in `app/src-tauri/src/claude.rs`;
 the key comes from `~/.config/intentionality/api_key` or `ANTHROPIC_API_KEY`
-and never reaches the webview.
+and never reaches the webview. Window titles are the least trustworthy input in
+that prompt — a page can title itself anything, including something addressed
+to the model — so each one is flattened to a single line, quoted, and
+length-capped before it goes in, and the system prompt says outright that
+titles are data to judge and never instructions to follow.
 
 ## Project layout
 
 ```
 bin/
 ├── gate-login       # console launcher: runs the gate at a text login
+├── resume-gate      # the gate again, on a spare VT after the machine wakes
 └── desktop-session  # starts GNOME via the systemd user bus, logs output
 
+systemd/
+├── intentionality-resume.service       # fires on resume, starts the next unit
+└── intentionality-resume-gate.service  # the gate on VT9 (TTYPath + chvt)
+
 gate/
-├── __main__.py    # entry point: gate / gate close / gate migrate
+├── __main__.py    # entry point: gate / close / migrate / resume / resume-needed
 ├── flow.py        # PULL -> ELICIT -> CONFIRM -> COMMIT state machine
+├── resume.py      # was the machine away long enough to re-gate?
 ├── manual.py      # the elicitation: type your list
 ├── handoff.py     # launches the desktop as a child, waits
 ├── debrief.py     # end-of-session per-task resolution
 ├── store.py       # the only Python module that touches sqlite3; owns migrations
-├── schema.sql     # session / task / analysis / meta tables (v2)
+├── schema.sql     # session / task / analysis / meeting / meta tables (v4)
 ├── ui.py          # terminal prompt helpers
 └── config.py      # paths and env var names
 
 dashboard/          # the CLI dashboard (stdlib only)
 app/                # the Tauri desktop app
-├── src/            # React frontend: Board, Dashboard, AnalysisPanel
-└── src-tauri/src/  # Rust: db, aw, observed, claude, scheduler, commands
+├── src/            # React frontend: Board, Analyses, Meetings, Dashboard
+└── src-tauri/src/  # Rust: db, aw, observed, claude, scheduler, commands,
+                    #       meeting + record + gain + level + audio
+                    #       + transcribe (the note taker)
 
 tests/
-└── test_store.py   # data-layer tests: migration, carry, close idempotency
+├── test_store.py   # data-layer tests: migration, carry, close idempotency
+├── test_debrief.py # what d/n/x do, and that nothing is stranded on Ctrl-C
+└── test_resume.py  # the away-time threshold that decides a resume gate
 ```
 
 `flow.py` never imports `sqlite3` or the network — it only calls into

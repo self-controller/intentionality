@@ -52,14 +52,18 @@ input {
   margin-left: 6px;
   font-size: 12px;
 }
-.aw-warn { color: #e0af68; font-size: 12px; }
+/* Right-hand side of the header: environmental problems the app cannot fix
+   itself, then the build stamp. */
+.header-status { display: flex; align-items: center; gap: 12px; }
+.header-warn { color: #e0af68; font-size: 12px; }
+.header-warn code { font-size: 12px; }
+.build-stamp { color: var(--muted); font-size: 12px; }
 .muted { color: var(--muted); }
 
 /* board */
 .board-screen { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
 .board-main { flex: 1; min-width: 0; }
 .session-line { margin-bottom: 12px; display: flex; align-items: center; gap: 10px; }
-.panel-toggle { margin-left: auto; }
 .lanes { display: flex; gap: 12px; }
 .lane {
   flex: 1;
@@ -105,23 +109,32 @@ input {
 .backlog-item button:hover { color: var(--text); }
 .backlog input { margin-top: 8px; }
 
-/* analysis panel */
-.analysis-panel {
-  width: 300px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 10px;
-  max-height: 80vh;
-  overflow-y: auto;
-}
-.analysis-panel header { display: flex; justify-content: space-between; align-items: center; border: none; padding: 0 0 8px; }
-.analysis-panel h2 { margin: 0; font-size: 13px; text-transform: uppercase; color: var(--muted); }
-.analysis-panel article { border-top: 1px solid var(--border); padding: 8px 0; }
-.analysis-panel article.unseen .headline { color: var(--accent); }
-.analysis-panel .headline { font-weight: 600; display: flex; justify-content: space-between; }
-.analysis-panel .alignment { color: var(--muted); font-weight: 400; }
-.analysis-panel time { color: var(--muted); font-size: 12px; }
+/* analyses */
+.analyses { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
+.analysis-list { width: 260px; max-height: calc(100vh - 90px); overflow-y: auto; }
+.analysis-day { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.analysis-day h3 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.analysis-list button { text-align: left; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.analysis-list button.unseen { font-weight: 600; }
+.analysis-list button.unseen .muted { color: var(--accent); }
+.analysis-list .align { float: right; margin-left: 8px; font-weight: 400; }
+.analysis-detail { flex: 1; min-width: 0; max-width: 720px; }
+.detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.detail-head h2 { margin: 0 0 4px; }
+.detail-head p { margin: 0; font-size: 12px; }
+.detail-body { max-width: 60ch; }
+/* Alignment is a status: the glyph and the word carry the band, colour only
+   reinforces it — green and amber are near-identical to a deutan reader. */
+.align-stat { display: flex; flex-direction: column; align-items: flex-end; flex: none; }
+.align-stat .value { font-size: 24px; line-height: 1.1; }
+.align-stat .label { font-size: 12px; }
+.align.good { color: #9ece6a; }
+.align.warn { color: #e0af68; }
+.align.bad { color: #f7768e; }
+.align.none { color: var(--muted); }
+.analysis-detail h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 6px; }
+.run-row { margin-top: 20px; display: flex; align-items: center; gap: 10px; }
+.run-row button:disabled { color: var(--muted); cursor: default; }
 
 /* dashboard */
 .dashboard { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
@@ -135,9 +148,167 @@ input {
 .mark.done { color: #9ece6a; }
 .mark.dropped { color: #f7768e; }
 .mark.doing { color: var(--accent); }
-.bars { display: flex; flex-direction: column; gap: 6px; max-width: 560px; }
+.bars { display: flex; flex-direction: column; gap: 10px; max-width: 560px; }
+.bar-group { display: flex; flex-direction: column; gap: 4px; }
 .bar-row { display: flex; align-items: center; gap: 10px; }
 .bar-label { width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 .bar-track { flex: 1; background: var(--panel); border-radius: 4px; height: 14px; }
 .bar-fill { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
 .bar-value { width: 64px; color: var(--muted); }
+/* title rows: 16px indent + 144px label keeps their tracks aligned with the app bars */
+.bar-row.sub { padding-left: 16px; font-size: 12px; }
+.bar-row.sub .bar-label { width: 144px; color: var(--muted); }
+.bar-row.sub .bar-track { height: 8px; }
+.bar-row.sub .bar-fill { opacity: 0.5; }
+/* Titles past the model's cut: shown because the record should be complete,
+   dimmed because the pane's heading is a claim about what the model saw. */
+.bar-row.sub.unsent .bar-label,
+.bar-row.sub.unsent .bar-value { opacity: 0.55; font-style: italic; }
+.bar-row.sub.unsent .bar-fill { opacity: 0.25; }
+.bar-more { align-self: flex-start; border: none; padding: 0 0 0 16px; color: var(--muted); font-size: 12px; }
+.bar-more:hover { color: var(--text); }
+
+/* --- the time-up checkpoint ------------------------------------------- */
+/* An overlay, not a screen in the nav: it is a moment, not a place. The
+   scrim dims what is behind rather than hiding it — the board is still the
+   thing being talked about. */
+.checkpoint-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 11, 14, 0.78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow-y: auto;
+}
+.checkpoint {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 24px 28px;
+  width: 100%;
+  max-width: 560px;
+  max-height: 100%;
+  overflow-y: auto;
+}
+.checkpoint h1 { margin: 0 0 12px; font-size: 20px; font-weight: 600; }
+.checkpoint h1 .muted { font-weight: 400; }
+.checkpoint h2 { margin: 0 0 6px; font-size: 16px; }
+.checkpoint-read { display: flex; align-items: baseline; gap: 10px; margin-bottom: 16px; }
+.checkpoint-read .align { font-size: 20px; }
+.checkpoint-read .align.label { font-size: 13px; }
+.checkpoint .detail-body { margin: 0 0 4px; }
+.checkpoint-actions { display: flex; align-items: center; gap: 10px; margin-top: 20px; }
+.checkpoint-actions button:first-child { border-color: var(--accent); color: var(--accent); }
+.checkpoint-actions button:disabled { color: var(--muted); border-color: var(--border); cursor: default; }
+
+/* Shared by the checkpoint screen and the Analyses detail pane, so a
+   checkpoint reads the same way when you come back to it in the history. */
+.recommend {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  max-width: 60ch;
+}
+.recommend h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.recommend .advice { margin: 0 0 6px; font-size: 15px; }
+.recommend .note { margin: 0 0 8px; font-size: 13px; }
+.recommend .why { margin: 0 0 6px; color: var(--text); }
+.recommend .source { margin: 0; font-size: 12px; font-style: italic; }
+
+/* The list marker for a checkpoint row, so history distinguishes the two
+   kinds without opening them. */
+.kind {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 5px;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* meetings */
+.meetings { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
+.meeting-list { width: 280px; max-height: calc(100vh - 90px); overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.meeting-detail { flex: 1; min-width: 0; max-width: 720px; }
+.meeting-detail h2 { margin: 0 0 4px; }
+.meeting-detail h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 6px; }
+.meeting-detail section { margin-top: 20px; }
+.meeting-detail p { max-width: 60ch; }
+
+.record-bar { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.record-start, .record-stop, .record-wrap { width: 100%; padding: 10px; font-size: 14px; }
+.record-stop { border-color: #f7768e; color: #f7768e; }
+/* A disabled record button used to look exactly like an enabled one, so a Stop
+   that was already working read as a click that had missed. */
+.record-start:disabled, .record-stop:disabled, .record-wrap:disabled {
+  color: var(--muted); border-color: var(--border); cursor: default;
+}
+.record-error { color: #f7768e; font-size: 12px; margin: 0; }
+.source-select { width: 100%; padding: 6px 8px; font-size: 12px; }
+.source-note { font-size: 12px; margin: 0; }
+
+/* The capture meter. Every bar is one measured 100 ms window pushed straight
+   into `transform` from the event handler — there is no animation here, and
+   deliberately so: a strip that moved on a timer would look alive while the
+   room was inaudible, which is the exact failure this exists to catch. The
+   transition below only smooths between two real measurements. */
+.level-meter { display: flex; flex-direction: column; gap: 4px; }
+.level-bars { display: flex; align-items: center; gap: 2px; height: 26px; }
+.level-bar {
+  flex: 1;
+  height: 100%;
+  border-radius: 1px;
+  background: #9ece6a;
+  transform: scaleY(0.04);
+  transform-origin: center;
+  transition: transform 90ms linear;
+}
+.level-readout { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.level-quiet { font-size: 12px; color: #e0af68; }
+/* Reduced motion removes the smoothing, not the measurements: the bars still
+   update ten times a second, they just stop easing between values. */
+@media (prefers-reduced-motion: reduce) { .level-bar { transition: none; } }
+
+/* The recording indicator is deliberately loud and always on screen while the
+   microphone is open: this is the one feature that can capture other people. */
+.recording-now { display: flex; align-items: center; gap: 8px; color: #f7768e; font-size: 13px; }
+.rec-dot { width: 9px; height: 9px; border-radius: 50%; background: #f7768e; animation: rec-pulse 1.4s ease-in-out infinite; }
+@keyframes rec-pulse { 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .rec-dot { animation: none; } }
+
+.day-head { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 14px 0 6px; }
+.meeting-row { text-align: left; display: block; width: 100%; overflow: hidden; }
+.meeting-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meeting-meta { display: block; font-size: 12px; color: var(--muted); }
+.meeting-bad { color: #f7768e; }
+.meeting-live { color: #f7768e; }
+
+.meeting-failed { border: 1px solid #f7768e; border-radius: 6px; padding: 10px 12px; margin-top: 16px; }
+.meeting-failed p { margin: 4px 0 10px; font-size: 13px; }
+
+.key-points { margin: 0; padding-left: 18px; max-width: 60ch; }
+.key-points li { margin-bottom: 4px; }
+
+.action-row { display: flex; align-items: baseline; gap: 8px; padding: 4px 0; max-width: 60ch; }
+.action-row input { margin: 0; }
+.action-row.done { color: var(--muted); }
+.action-row .tick { color: #9ece6a; }
+.approve { margin-top: 8px; }
+.approve:disabled { color: var(--muted); cursor: default; }
+
+.transcript { max-width: 68ch; max-height: 340px; overflow-y: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
+.transcript p { margin: 0 0 8px; }
+.seg-time { color: var(--muted); font-size: 12px; margin-right: 6px; }
+.seg-gap { color: var(--muted); font-style: italic; }
+
+.danger { margin-top: 24px; border-color: var(--border); color: var(--muted); }
+.danger:hover { border-color: #f7768e; color: #f7768e; }

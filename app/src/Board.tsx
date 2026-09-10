@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 import { DndContext, DragEndEvent, useDraggable, useDroppable } from "@dnd-kit/core";
 import * as api from "./api";
 import type { Board as BoardData, Status, Task } from "./types";
-import AnalysisPanel from "./AnalysisPanel";
 
 const LANES: { status: Status; label: string }[] = [
   { status: "planned", label: "To Do" },
@@ -45,12 +44,11 @@ function Lane({ status, label, tasks }: { status: Status; label: string; tasks: 
   );
 }
 
-export default function Board({ onSeen }: { onSeen: () => void }) {
+export default function Board() {
   const [board, setBoard] = useState<BoardData | null>(null);
   const [newTitle, setNewTitle] = useState("");
   const [backlogTitle, setBacklogTitle] = useState("");
   const [showDropped, setShowDropped] = useState(false);
-  const [showPanel, setShowPanel] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
@@ -98,13 +96,15 @@ export default function Board({ onSeen }: { onSeen: () => void }) {
         {board.session ? (
           <>
             <div className="session-line">
-              <strong>{board.session.statement}</strong>
+              {/* Sessions committed since the gate stopped asking have no
+                  statement; the lanes below are the intention. */}
+              {board.session.statement && <strong>{board.session.statement}</strong>}
               {board.session.intended_minutes != null && (
-                <span className="muted"> · intended {board.session.intended_minutes} min</span>
+                <span className="muted">
+                  {board.session.statement ? " · " : ""}
+                  intended {board.session.intended_minutes} min
+                </span>
               )}
-              <button className="panel-toggle" onClick={() => setShowPanel((v) => !v)}>
-                analyses{board.unseen > 0 ? ` (${board.unseen})` : ""}
-              </button>
             </div>
             <DndContext onDragEnd={onDragEnd}>
               <div className="lanes">
@@ -167,10 +167,6 @@ export default function Board({ onSeen }: { onSeen: () => void }) {
           onKeyDown={(e) => e.key === "Enter" && add(true)}
         />
       </aside>
-
-      {showPanel && board.session && (
-        <AnalysisPanel sessionId={board.session.id} onSeen={onSeen} onClose={() => setShowPanel(false)} />
-      )}
     </div>
   );
 }

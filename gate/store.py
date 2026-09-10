@@ -1,13 +1,13 @@
 """The session/task store. Only module that imports sqlite3."""
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import config
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 # Statuses that mean "still open" — what the debrief asks about and the
 # close paths carry into the backlog.
@@ -42,13 +42,20 @@ def init(conn: sqlite3.Connection) -> None:
     version = int(
         conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
     )
-    if version < 2:
-        _backup(conn, suffix=f".v{version}.bak")
-        _migrate_v1_to_v2(conn)
-    elif version > SCHEMA_VERSION:
+    if version > SCHEMA_VERSION:
         raise RuntimeError(
             f"store is schema v{version}, this code understands up to v{SCHEMA_VERSION}"
         )
+    # Sequential, not exclusive: a v1 store has to walk all the way up.
+    if version < 2:
+        _backup(conn, suffix=f".v{version}.bak")
+        _migrate_v1_to_v2(conn)
+    if version < 3:
+        _backup(conn, suffix=".pre-v3.bak")
+        _migrate_v2_to_v3(conn)
+    if version < 4:
+        _backup(conn, suffix=".pre-v4.bak")
+        _migrate_v3_to_v4(conn)
 
 
 def _backup(conn: sqlite3.Connection, suffix: str) -> None:
@@ -136,6 +143,176 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
         conn.isolation_level = saved_isolation
 
 
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """v2 -> v3: session.checkpoint_due_at, and analysis gains kind plus the
+    two recommendation columns.
+
+    session takes a plain ADD COLUMN. analysis has to be rebuilt: `kind`
+    carries a CHECK constraint and SQLite cannot ALTER one in. Same shape as
+    _migrate_v1_to_v2 -- foreign_keys OFF outside the transaction (it cannot
+    change mid-transaction), one IMMEDIATE transaction under manual control.
+    """
+    saved_isolation = conn.isolation_level
+    conn.isolation_level = None  # autocommit: we manage the transaction
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("ALTER TABLE session ADD COLUMN checkpoint_due_at TEXT")
+        # Sessions still running when the migration lands get the checkpoint
+        # they would have been given at commit. strftime, not datetime():
+        # datetime() returns "YYYY-MM-DD HH:MM:SS" with no offset, and every
+        # other timestamp in this store is now()'s isoformat.
+        conn.execute(
+            "UPDATE session"
+            " SET checkpoint_due_at = strftime('%Y-%m-%dT%H:%M:%S+00:00',"
+            "     started_at, '+' || intended_minutes || ' minutes')"
+            " WHERE ended_at IS NULL AND intended_minutes IS NOT NULL"
+        )
+        conn.execute(
+            """
+            CREATE TABLE analysis_v3 (
+                id                  INTEGER PRIMARY KEY,
+                session_id          INTEGER NOT NULL REFERENCES session(id),
+                created_at          TEXT NOT NULL,
+                window_start        TEXT NOT NULL,
+                window_end          TEXT NOT NULL,
+                headline            TEXT NOT NULL,
+                alignment           INTEGER,
+                body                TEXT NOT NULL,
+                observed_json       TEXT NOT NULL,
+                seen_at             TEXT,
+                kind                TEXT NOT NULL DEFAULT 'check'
+                                    CHECK (kind IN ('check', 'checkpoint')),
+                recommendation_id   TEXT,
+                recommendation_note TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO analysis_v3 (id, session_id, created_at, window_start,"
+            " window_end, headline, alignment, body, observed_json, seen_at)"
+            " SELECT id, session_id, created_at, window_start, window_end,"
+            " headline, alignment, body, observed_json, seen_at FROM analysis"
+        )
+        conn.execute("DROP TABLE analysis")
+        conn.execute("ALTER TABLE analysis_v3 RENAME TO analysis")
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(f"migration broke foreign keys: {violations[:3]}")
+        conn.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.isolation_level = saved_isolation
+
+
+def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
+    """v3 -> v4: the meeting note taker's three tables, and task.source gains
+    'meeting' so an approved action item can become a backlog task.
+
+    task has to be rebuilt rather than altered: `source` carries a CHECK and
+    SQLite cannot ALTER one in -- the same wall _migrate_v2_to_v3 hit on
+    analysis.kind. Dropping the table drops its indexes too, so
+    task_carried_once is recreated by hand; without it the double-carry
+    guarantee would silently disappear.
+
+    The rebuild runs first so meeting_action's task_id references the final
+    table. Same shape as the migrations above: foreign_keys OFF outside the
+    transaction (it cannot change mid-transaction), one IMMEDIATE transaction
+    under manual control.
+    """
+    saved_isolation = conn.isolation_level
+    conn.isolation_level = None  # autocommit: we manage the transaction
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            CREATE TABLE task_v4 (
+                id           INTEGER PRIMARY KEY,
+                session_id   INTEGER REFERENCES session(id),
+                title        TEXT NOT NULL,
+                position     INTEGER NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'planned'
+                             CHECK (status IN ('planned', 'doing', 'done', 'dropped')),
+                source       TEXT NOT NULL DEFAULT 'gate'
+                             CHECK (source IN ('gate', 'mid-session', 'meeting')),
+                carried_from INTEGER REFERENCES task(id) ON DELETE SET NULL,
+                created_at   TEXT NOT NULL,
+                started_at   TEXT,
+                resolved_at  TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO task_v4 (id, session_id, title, position, status, source,"
+            " carried_from, created_at, started_at, resolved_at)"
+            " SELECT id, session_id, title, position, status, source,"
+            " carried_from, created_at, started_at, resolved_at FROM task"
+        )
+        conn.execute("DROP TABLE task")
+        conn.execute("ALTER TABLE task_v4 RENAME TO task")
+        conn.execute(
+            "CREATE UNIQUE INDEX task_carried_once"
+            " ON task (carried_from) WHERE carried_from IS NOT NULL"
+        )
+        conn.execute(
+            """
+            CREATE TABLE meeting (
+                id           INTEGER PRIMARY KEY,
+                session_id   INTEGER REFERENCES session(id),
+                started_at   TEXT NOT NULL,
+                ended_at     TEXT,
+                title        TEXT NOT NULL DEFAULT '',
+                summary      TEXT,
+                key_points   TEXT,
+                state        TEXT NOT NULL DEFAULT 'recording'
+                             CHECK (state IN ('recording', 'summarizing', 'done', 'failed')),
+                error        TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE meeting_segment (
+                id         INTEGER PRIMARY KEY,
+                meeting_id INTEGER NOT NULL REFERENCES meeting(id) ON DELETE CASCADE,
+                seq        INTEGER NOT NULL,
+                started_at TEXT NOT NULL,
+                text       TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX meeting_segment_seq ON meeting_segment (meeting_id, seq)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE meeting_action (
+                id         INTEGER PRIMARY KEY,
+                meeting_id INTEGER NOT NULL REFERENCES meeting(id) ON DELETE CASCADE,
+                position   INTEGER NOT NULL,
+                text       TEXT NOT NULL,
+                task_id    INTEGER REFERENCES task(id) ON DELETE SET NULL
+            )
+            """
+        )
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(f"migration broke foreign keys: {violations[:3]}")
+        conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.isolation_level = saved_isolation
+
+
 def commit_draft(
     conn: sqlite3.Connection,
     statement: str,
@@ -157,12 +334,24 @@ def commit_draft(
 def create_session(
     conn: sqlite3.Connection, statement: str, intended_minutes: int | None, mode: str
 ) -> int:
+    started_at = now()
     cur = conn.execute(
-        "INSERT INTO session (started_at, statement, intended_minutes, mode)"
-        " VALUES (?, ?, ?, ?)",
-        (now(), statement, intended_minutes, mode),
+        "INSERT INTO session (started_at, statement, intended_minutes, mode,"
+        " checkpoint_due_at) VALUES (?, ?, ?, ?, ?)",
+        (started_at, statement, intended_minutes, mode,
+         checkpoint_due(started_at, intended_minutes)),
     )
     return cur.lastrowid
+
+
+def checkpoint_due(started_at: str, intended_minutes: int | None) -> str | None:
+    """When the time-up checkpoint should fire, or None for an open-ended
+    session. A NULL intended_minutes is the user saying "don't hold me to a
+    clock", so it earns no checkpoint."""
+    if intended_minutes is None:
+        return None
+    start = datetime.fromisoformat(started_at)
+    return (start + timedelta(minutes=intended_minutes)).isoformat(timespec="seconds")
 
 
 def add_tasks(conn: sqlite3.Connection, session_id: int, titles: list[str]) -> None:
@@ -303,6 +492,24 @@ def get_tasks(conn: sqlite3.Connection, session_id: int) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM task WHERE session_id = ? ORDER BY position", (session_id,)
     ).fetchall()
+
+
+def session_label(conn: sqlite3.Connection, session: sqlite3.Row) -> str:
+    """What identifies a session in a listing.
+
+    Its statement if it has one — sessions from before the gate stopped
+    asking for one do — and otherwise its tasks, which are the intention now.
+    """
+    if session["statement"]:
+        return session["statement"]
+    titles = conn.execute(
+        "SELECT title FROM task WHERE session_id = ? ORDER BY position",
+        (session["id"],),
+    ).fetchall()
+    if not titles:
+        return "(no tasks)"
+    more = f" +{len(titles) - 1}" if len(titles) > 1 else ""
+    return f"{titles[0]['title']}{more}"
 
 
 def resolve_task(conn: sqlite3.Connection, task_id: int, status: str) -> None:

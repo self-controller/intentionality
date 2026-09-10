@@ -56,7 +56,7 @@ def observed(start_iso: str, end_iso: str) -> tuple[dict[str, float], float, flo
     return per_app, sum(per_app.values()), afk_total
 
 
-def print_session(session, tasks) -> None:
+def print_session(session, tasks, label: str) -> None:
     start = parse_ts(session["started_at"])
     end_iso = session["ended_at"]
     open_note = ""
@@ -70,7 +70,7 @@ def print_session(session, tasks) -> None:
         if session["intended_minutes"] is not None
         else ""
     )
-    print(f"\nSession {session['id']} — {session['statement']}")
+    print(f"\nSession {session['id']} — {label}")
     print(f"  {start.astimezone():%a %b %d %H:%M} · {minutes} min{intended}{open_note}")
 
     done = sum(1 for t in tasks if t["status"] == "done")
@@ -97,12 +97,12 @@ def print_session(session, tasks) -> None:
         print(f"    {'(other)':<{width}}  {_fmt(rest):>7}")
 
 
-def print_session_list(rows) -> None:
+def print_session_list(rows, labels: dict[int, str]) -> None:
     print("recent sessions:")
     for s in rows:
         start = parse_ts(s["started_at"])
         state = s["close_reason"] or "open"
-        print(f"  {s['id']:>3}  {start.astimezone():%b %d %H:%M}  [{state:<9}]  {s['statement']}")
+        print(f"  {s['id']:>3}  {start.astimezone():%b %d %H:%M}  [{state:<9}]  {labels[s['id']]}")
 
 
 def _dur(event) -> timedelta:

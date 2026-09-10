@@ -1,17 +1,20 @@
-//! Two background loops: the 30s heartbeat and the randomized analysis
-//! timer. Both live only while a session is open; both stop themselves the
-//! moment the store says the session closed elsewhere.
+//! Three background loops: the 30s heartbeat, the randomized analysis timer,
+//! and the time-up checkpoint. All live only while a session is open; all
+//! stop themselves the moment the store says the session closed elsewhere.
 //!
-//! The analysis timer ticks every minute against a wall-clock next_fire_at
-//! instead of one long sleep: CLOCK_MONOTONIC pauses during suspend, so a
-//! single 60-minute sleep silently stretches by however long the lid was
-//! closed.
+//! Both timers tick every minute against a wall-clock target instead of one
+//! long sleep: CLOCK_MONOTONIC pauses during suspend, so a single 60-minute
+//! sleep silently stretches by however long the lid was closed.
+//!
+//! The checkpoint's target is the store's session.checkpoint_due_at rather
+//! than a value held here, which is what makes one that came due while the app
+//! was down fire on the next start instead of being lost.
 
 use crate::state::AppState;
-use crate::{analysis, db};
+use crate::{analysis, db, notify};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rand::Rng;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 const HEARTBEAT_SECS: u64 = 30;
@@ -22,26 +25,72 @@ const MAX_INTERVAL_MIN: f64 = 180.0;
 /// screen produces a confidently wrong "unfocused" note.
 pub const MIN_ACTIVE_SECS: f64 = 300.0;
 
+/// How often the checkpoint condition is re-read. Also the worst-case lateness
+/// of a checkpoint, which is the right trade: a minute of slack costs nothing,
+/// and a tighter tick would hammer the store all session for it.
+const CHECKPOINT_TICK_SECS: u64 = 60;
+
+/// A wall-clock tick this many seconds longer than the monotonic one means the
+/// machine was suspended, not merely busy. CLOCK_MONOTONIC pauses across
+/// suspend and the wall clock does not, so over one tick their difference *is*
+/// the sleep. Well clear of ordinary scheduling slop at a 30s tick.
+const SUSPEND_JUMP_SECS: i64 = 60;
+
 pub fn spawn(app: AppHandle) {
     tauri::async_runtime::spawn(heartbeat_loop(app.clone()));
-    tauri::async_runtime::spawn(analysis_loop(app));
+    tauri::async_runtime::spawn(analysis_loop(app.clone()));
+    tauri::async_runtime::spawn(checkpoint_loop(app));
 }
 
 async fn heartbeat_loop(app: AppHandle) {
+    let mut last_wall = Utc::now();
+    let mut last_mono = Instant::now();
     loop {
         tokio::time::sleep(Duration::from_secs(HEARTBEAT_SECS)).await;
+        let (wall, mono) = (Utc::now(), Instant::now());
+        let slept =
+            (wall - last_wall).num_seconds() - mono.duration_since(last_mono).as_secs() as i64;
+        last_wall = wall;
+        last_mono = mono;
+
         let state = app.state::<AppState>();
-        let Some(session_id) = state.session_id() else { continue };
+        let Some(session_id) = state.session_id() else {
+            readopt(&app, &state);
+            continue;
+        };
+        if slept >= SUSPEND_JUMP_SECS {
+            // The machine was asleep, and last_heartbeat is meant to be the
+            // moment you walked away — it is what the gate turns into
+            // ended_at. Stamping it now would date the session's end to the
+            // moment you came back, six hours late. Stay quiet and let the
+            // resume gate close the session at the real time.
+            continue;
+        }
         let alive = {
             let conn = state.conn.lock().unwrap();
             db::heartbeat(&conn, session_id).unwrap_or(false)
         };
         if !alive {
-            // Closed elsewhere (gate close / next gate). Flip to no-session
-            // mode rather than resurrecting the row.
+            // Closed elsewhere (gate close / next gate / the resume gate's
+            // recovery sweep). Flip to no-session mode rather than
+            // resurrecting the row; the next tick looks for its successor.
             state.clear_session();
             let _ = app.emit("session:closed", session_id);
         }
+    }
+}
+
+/// Look for a session that started after this app did — what the resume gate
+/// leaves behind on its spare VT. Adoption used to happen once, at startup, so
+/// a session begun while the app was running stayed invisible to it.
+fn readopt(app: &AppHandle, state: &AppState) {
+    let adopted = {
+        let conn = state.conn.lock().unwrap();
+        crate::adopt_session_after(&conn, state.app_started_at())
+    };
+    if let Some(id) = adopted {
+        state.set_session(id);
+        let _ = app.emit("session:opened", id);
     }
 }
 
@@ -76,10 +125,61 @@ async fn analysis_loop(app: AppHandle) {
         match analysis::run(&app).await {
             Ok(Some(id)) => {
                 let _ = app.emit("analysis:new", id);
+                // Scheduled checks notify; the manual "Run a check now" button
+                // does not — you are already looking at the tab that answers it.
+                notify_check(&app, id);
             }
             Ok(None) => {} // quiet window — skipped, redrawn below
             Err(err) => eprintln!("analysis skipped: {err}"), // a log line, never a dialog
         }
         next_fire = draw_next(mean_minutes(&app));
+    }
+}
+
+/// Reads the row back rather than threading the text out of analysis::run:
+/// one round trip, and the notification then says exactly what the Analyses
+/// tab will say.
+fn notify_check(app: &AppHandle, id: i64) {
+    let state = app.state::<AppState>();
+    let Some(session_id) = state.session_id() else { return };
+    let row = {
+        let conn = state.conn.lock().unwrap();
+        db::list_analyses(&conn, session_id)
+            .ok()
+            .and_then(|list| list.into_iter().find(|a| a.id == id))
+    };
+    if let Some(a) = row {
+        let band = match a.alignment {
+            Some(v) if v >= 67 => "aligned",
+            Some(v) if v >= 34 => "drifting",
+            Some(_) => "off track",
+            None => "not judged",
+        };
+        notify::send(
+            app,
+            &a.headline,
+            &notify::clip(&format!("{band} · {}", a.body), 160),
+        );
+    }
+}
+
+async fn checkpoint_loop(app: AppHandle) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(CHECKPOINT_TICK_SECS)).await;
+        let due = {
+            let state = app.state::<AppState>();
+            let Some(session_id) = state.session_id() else { continue };
+            let conn = state.conn.lock().unwrap();
+            db::checkpoint_due(&conn, session_id).unwrap_or(false)
+        };
+        if !due {
+            continue;
+        }
+        // run_checkpoint clears the pending checkpoint itself, so this cannot
+        // loop: either the row lands and the column is cleared, or the write
+        // failed and it is right to try again next tick.
+        if let Err(err) = analysis::run_checkpoint(&app).await {
+            eprintln!("checkpoint failed: {err}");
+        }
     }
 }

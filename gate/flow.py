@@ -19,7 +19,7 @@ def run(conn) -> int | None:
 
         # CONFIRM
         titles = draft.tasks + [f"{t['title']}  (carried)" for t in pulled]
-        ui.show_tasks(draft.statement, draft.intended_minutes, titles)
+        ui.show_tasks(draft.intended_minutes, titles)
         choice = ui.confirm_choice("[y] commit  [r] revise  [q] quit without saving > ", "yrq")
 
         if choice == "q":
@@ -29,8 +29,11 @@ def run(conn) -> int | None:
             continue
 
         # COMMIT
+        # Empty statement: the gate no longer asks for one. The column stays
+        # for the sessions that have one, and store.session_label falls back
+        # to the tasks for the ones that don't.
         session_id = store.commit_draft(
-            conn, draft.statement, draft.intended_minutes, "manual", draft.tasks,
+            conn, "", draft.intended_minutes, "manual", draft.tasks,
             backlog_ids=[t["id"] for t in pulled],
         )
         print(f"Session {session_id} started — {len(titles)} task(s).")

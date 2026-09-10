@@ -11,6 +11,8 @@ use crate::models::Observed;
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use std::collections::BTreeMap;
 
+const MAX_TITLES_PER_APP: usize = 15;
+
 pub fn parse_ts(s: &str) -> Result<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Ok(dt.with_timezone(&Utc));
@@ -43,6 +45,21 @@ fn secs(d: Duration) -> f64 {
     d.num_milliseconds() as f64 / 1000.0
 }
 
+/// A browser alone can produce hundreds of distinct titles in one session, so
+/// keep only the longest-running ones. The tail collapses into "(other)" rather
+/// than being dropped, so an app's titles still sum to its total.
+fn cap_titles(titles: BTreeMap<String, f64>, keep: usize) -> BTreeMap<String, f64> {
+    if titles.len() <= keep {
+        return titles;
+    }
+    let mut ranked: Vec<(String, f64)> = titles.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let tail: f64 = ranked[keep..].iter().map(|(_, s)| s).sum();
+    let mut kept: BTreeMap<String, f64> = ranked.into_iter().take(keep).collect();
+    *kept.entry("(other)".to_string()).or_insert(0.0) += tail;
+    kept
+}
+
 pub async fn observed(start_iso: &str, end_iso: &str) -> Result<Observed> {
     let (window_bucket, afk_bucket) = aw::find_buckets().await?;
     let window_bucket =
@@ -68,6 +85,7 @@ pub async fn observed(start_iso: &str, end_iso: &str) -> Result<Observed> {
     let afk_seconds: f64 = afk_spans.iter().map(|(s, e)| secs(*e - *s)).sum();
 
     let mut per_app: BTreeMap<String, f64> = BTreeMap::new();
+    let mut per_title: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
     for ev in aw::events(&window_bucket, start_iso, end_iso).await? {
         let ev_start = parse_ts(&ev.timestamp)?;
         let ev_end = ev_start + dur(&ev);
@@ -89,10 +107,26 @@ pub async fn observed(start_iso: &str, end_iso: &str) -> Result<Observed> {
                 .and_then(|v| v.as_str())
                 .filter(|a| !a.is_empty())
                 .unwrap_or("unknown");
+            let title = ev
+                .data
+                .get("title")
+                .and_then(|v| v.as_str())
+                .filter(|t| !t.is_empty())
+                .unwrap_or("unknown");
             *per_app.entry(app.to_string()).or_insert(0.0) += active;
+            *per_title
+                .entry(app.to_string())
+                .or_default()
+                .entry(title.to_string())
+                .or_insert(0.0) += active;
         }
     }
 
+    let per_title = per_title
+        .into_iter()
+        .map(|(app, titles)| (app, cap_titles(titles, MAX_TITLES_PER_APP)))
+        .collect();
+
     let active_seconds = per_app.values().sum();
-    Ok(Observed { per_app, active_seconds, afk_seconds })
+    Ok(Observed { per_app, per_title, active_seconds, afk_seconds })
 }

@@ -1,15 +1,11 @@
 import { useEffect, useState } from "react";
 import * as api from "./api";
+import { fmt, rankTitles, sessionLabel } from "./format";
 import type { Observed, Session, Task } from "./types";
 
 const MARK: Record<string, string> = { done: "✓", dropped: "✗", planned: "·", doing: "▸" };
 
-function fmt(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  if (m >= 60) return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
-  if (m > 0) return `${m}m`;
-  return `${Math.floor(seconds)}s`;
-}
+const TOP_TITLES = 3;
 
 export default function Dashboard() {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -17,6 +13,7 @@ export default function Dashboard() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [observed, setObserved] = useState<Observed | null>(null);
   const [awError, setAwError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     api.listSessions(15).then((list) => {
@@ -29,6 +26,7 @@ export default function Dashboard() {
     if (selected == null) return;
     setObserved(null);
     setAwError(null);
+    setExpanded(new Set());
     api.getSessionTasks(selected).then(setTasks);
     api.getObserved(selected).then(setObserved).catch((e) => setAwError(String(e)));
   }, [selected]);
@@ -39,6 +37,15 @@ export default function Dashboard() {
     : [];
   const max = apps.length > 0 ? apps[0][1] : 1;
 
+  const titlesFor = (app: string) => rankTitles(observed, app);
+
+  const toggle = (app: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(app)) next.add(app);
+      return next;
+    });
+
   return (
     <div className="dashboard">
       <aside className="session-list">
@@ -48,7 +55,7 @@ export default function Dashboard() {
             className={s.id === selected ? "active" : ""}
             onClick={() => setSelected(s.id)}
           >
-            <span className="muted">#{s.id}</span> {s.statement || "(no statement)"}
+            <span className="muted">#{s.id}</span> {sessionLabel(s)}
             <span className="state">{s.close_reason ?? "open"}</span>
           </button>
         ))}
@@ -56,7 +63,7 @@ export default function Dashboard() {
       <section className="session-detail">
         {session && (
           <>
-            <h2>{session.statement}</h2>
+            <h2>{sessionLabel(session)}</h2>
             <p className="muted">
               {new Date(session.started_at).toLocaleString()} ·{" "}
               {session.intended_minutes != null ? `intended ${session.intended_minutes} min` : "open-ended"}
@@ -77,15 +84,36 @@ export default function Dashboard() {
                   {fmt(observed.active_seconds)} active, {fmt(observed.afk_seconds)} away
                 </p>
                 <div className="bars">
-                  {apps.map(([app, secs]) => (
-                    <div key={app} className="bar-row">
-                      <span className="bar-label">{app}</span>
-                      <span className="bar-track">
-                        <span className="bar-fill" style={{ width: `${(secs / max) * 100}%` }} />
-                      </span>
-                      <span className="bar-value">{fmt(secs)}</span>
-                    </div>
-                  ))}
+                  {apps.map(([app, secs]) => {
+                    const titles = titlesFor(app);
+                    const open = expanded.has(app);
+                    const shown = open ? titles : titles.slice(0, TOP_TITLES);
+                    return (
+                      <div key={app} className="bar-group">
+                        <div className="bar-row">
+                          <span className="bar-label" title={app}>{app}</span>
+                          <span className="bar-track">
+                            <span className="bar-fill" style={{ width: `${(secs / max) * 100}%` }} />
+                          </span>
+                          <span className="bar-value">{fmt(secs)}</span>
+                        </div>
+                        {shown.map(([t, tsecs]) => (
+                          <div key={t} className="bar-row sub">
+                            <span className="bar-label" title={t}>{t}</span>
+                            <span className="bar-track">
+                              <span className="bar-fill" style={{ width: `${(tsecs / max) * 100}%` }} />
+                            </span>
+                            <span className="bar-value">{fmt(tsecs)}</span>
+                          </div>
+                        ))}
+                        {titles.length > TOP_TITLES && (
+                          <button className="bar-more" onClick={() => toggle(app)}>
+                            {open ? "▾ show less" : `▸ +${titles.length - TOP_TITLES} more`}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </>
             )}

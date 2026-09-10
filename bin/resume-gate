@@ -1,0 +1,20 @@
+#!/usr/bin/env fish
+# The gate, run on a spare console after the machine wakes from sleep.
+#
+# intentionality-resume-gate.service owns the VT: it opens /dev/tty9 as root,
+# hands the fd down, and switches to and from it. This script only builds the
+# environment the gate expects, mirroring bin/gate-login.
+
+set -l repo (dirname (dirname (realpath (status filename))))
+
+# No handoff. GNOME is already running on the VT we came from, and a non-empty
+# desktop command here would launch a SECOND gnome-session.
+set -x INTENTIONALITY_DESKTOP_CMD ""
+
+# Nothing below starts a login shell, but the config.fish block keys on this
+# and must never fire inside a running gate.
+set -x INTENTIONALITY_GATE 1
+
+# System python3, like the login path: a broken .venv must never wedge a VT.
+cd $repo
+and python3 -m gate resume

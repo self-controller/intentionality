@@ -35,9 +35,9 @@ def confirm_choice(prompt: str, choices: str) -> str:
         print(f"Choose one of: {', '.join(choices)}")
 
 
-def show_tasks(statement: str, intended_minutes: int | None, titles: list[str]) -> None:
+def show_tasks(intended_minutes: int | None, titles: list[str]) -> None:
     duration = f"{intended_minutes} min" if intended_minutes is not None else "open-ended"
-    print(f"\n  {statement}  ({duration})")
+    print(f"\n  {duration}")
     for pos, title in enumerate(titles, start=1):
         print(f"  {pos}. {title}")
     print()

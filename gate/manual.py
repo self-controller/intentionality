@@ -7,16 +7,13 @@ from . import ui
 
 @dataclass
 class Draft:
-    statement: str
     intended_minutes: int | None
     tasks: list[str]
 
 
 def elicit(allow_empty: bool = False) -> Draft:
-    statement = ""
-    while not statement:
-        statement = ui.ask("What do you want to get done this session?\n> ")
-
+    # No "what do you want to get done?" question: the task list below is
+    # that answer, written out.
     intended_minutes = ui.ask_int_or_blank(
         "How long will you be here? (minutes, blank = open-ended)\n> "
     )
@@ -32,4 +29,4 @@ def elicit(allow_empty: bool = False) -> Draft:
         else:
             print("At least one task.")
 
-    return Draft(statement=statement, intended_minutes=intended_minutes, tasks=tasks)
+    return Draft(intended_minutes=intended_minutes, tasks=tasks)

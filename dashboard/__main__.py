@@ -14,6 +14,12 @@ from gate import store
 from . import report
 
 
+def labels(conn, rows) -> dict[int, str]:
+    # report.py deliberately never touches the store, so the labels are
+    # resolved here and handed to it.
+    return {row["id"]: store.session_label(conn, row) for row in rows}
+
+
 def main(argv: list[str]) -> int:
     conn = store.connect()
     store.init(conn)
@@ -27,7 +33,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     if arg == "list":
-        report.print_session_list(sessions)
+        report.print_session_list(sessions, labels(conn, sessions))
         return 0
 
     if arg is not None:
@@ -42,10 +48,12 @@ def main(argv: list[str]) -> int:
     else:
         session = sessions[0]
 
-    report.print_session(session, store.get_tasks(conn, session["id"]))
+    report.print_session(
+        session, store.get_tasks(conn, session["id"]), store.session_label(conn, session)
+    )
     if arg is None and len(sessions) > 1:
         print()
-        report.print_session_list(sessions[1:])
+        report.print_session_list(sessions[1:], labels(conn, sessions[1:]))
     return 0
 
 
