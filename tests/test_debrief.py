@@ -60,7 +60,7 @@ class DebriefCase(unittest.TestCase):
         self._tmp.cleanup()
 
     def answer(self, *answers: str) -> Answers:
-        # debrief and __main__.ui_yes both reach it through the ui module.
+        # debrief reaches it through the ui module.
         scripted = Answers(*answers)
         ui.confirm_choice = scripted
         return scripted
@@ -127,13 +127,15 @@ class TestResolveTasks(DebriefCase):
 
 
 class TestRecoverySweep(DebriefCase):
-    def test_ctrl_c_mid_debrief_still_carries(self):
-        """mark_recovered has already run by then, so the session is never
-        offered again — an abort that skipped the carry would strand it."""
-        sid = self.session("stranded otherwise", "also stranded")
-        self.answer("y", "abort")  # resolve? yes; then Ctrl-C on task 1
+    """The sweep asks nothing: what it carries is the first thing the welcome
+    screen shows, and resolving happens there."""
 
-        gate_main.recover_open_sessions(self.conn)  # must not raise
+    def test_asks_nothing_and_carries_everything_unfinished(self):
+        sid = self.session("stranded otherwise", "also stranded", "finished")
+        store.resolve_task(self.conn, store.get_tasks(self.conn, sid)[2]["id"], "done")
+        self.answer()  # an empty script: any question would fail the test
+
+        notes = gate_main.recover_open_sessions(self.conn)
 
         self.assertEqual(store.get_session(self.conn, sid)["close_reason"], "recovered")
         self.assertEqual(store.get_open_sessions(self.conn), [])
@@ -141,22 +143,51 @@ class TestRecoverySweep(DebriefCase):
             [t["title"] for t in store.get_backlog(self.conn)],
             ["stranded otherwise", "also stranded"],
         )
+        self.assertEqual(
+            notes,
+            [
+                f"Session {sid} was never closed — no heartbeat, end time unknown.",
+                "2 unfinished tasks carried over.",
+            ],
+        )
+        # The notes are what was printed, so the terminal needs no second copy.
+        self.assertEqual(self.out.getvalue().splitlines(), notes)
 
-    def test_ctrl_c_at_the_offer_still_carries(self):
+    def test_end_time_from_the_heartbeat_in_local_time(self):
+        sid = self.session("a task")
+        self.conn.execute(
+            "UPDATE session SET last_heartbeat = '2026-09-16T23:37:05+00:00' WHERE id = ?",
+            (sid,),
+        )
+        self.conn.commit()
+        self.answer()
+
+        notes = gate_main.recover_open_sessions(self.conn)
+
+        stamp = gate_main.local_time("2026-09-16T23:37:05+00:00")
+        self.assertEqual(notes[0], f"Session {sid} ended around {stamp}.")
+        self.assertRegex(stamp, r"^\d{1,2}:37 [AP]M, Sep 1[67]$")
+
+    def test_nothing_open_says_nothing(self):
+        self.assertEqual(gate_main.recover_open_sessions(self.conn), [])
+
+    def test_a_failing_note_still_carries(self):
+        """mark_recovered has already run by then, so the session is never
+        offered again — anything that skipped the carry would strand it."""
         sid = self.session("stranded otherwise")
-        self.answer("abort")  # Ctrl-C at "Resolve its tasks now?"
+        real = store.get_session
+        self.addCleanup(setattr, store, "get_session", real)
 
-        gate_main.recover_open_sessions(self.conn)
+        def broken(conn, session_id):
+            raise RuntimeError("boom")
 
+        store.get_session = broken
+
+        with self.assertRaises(RuntimeError):
+            gate_main.recover_open_sessions(self.conn)
+
+        store.get_session = real
         self.assertEqual(store.get_session(self.conn, sid)["close_reason"], "recovered")
-        self.assertEqual(len(store.get_backlog(self.conn)), 1)
-
-    def test_declining_the_debrief_still_carries(self):
-        self.session("untouched")
-        self.answer("n")  # "Resolve its tasks now? [y/n]" -> no
-
-        gate_main.recover_open_sessions(self.conn)
-
         self.assertEqual(len(store.get_backlog(self.conn)), 1)
 
 

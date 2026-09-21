@@ -14,6 +14,19 @@ export interface Session {
 
 export type Status = "planned" | "doing" | "done" | "dropped";
 
+// A tag a task wears. The colour was fixed when the label was first created,
+// so the same word looks the same on every card.
+export interface Label {
+  name: string;
+  color: string;
+}
+
+// Every label there is, as the labels panel and the editor list them. A label
+// nothing wears (uses 0) is a preset: it stays until it is deleted.
+export interface LabelSummary extends Label {
+  uses: number;
+}
+
 export interface Task {
   id: number;
   session_id: number | null;
@@ -21,6 +34,13 @@ export interface Task {
   position: number;
   status: Status;
   carry_count: number;
+  // Plain text the user wrote. Deliberately not markdown: this is a scratch
+  // pad on a card, not a document.
+  notes: string;
+  // The day it is due, "YYYY-MM-DD" on the local calendar; null = none. A day,
+  // not an instant, so it never drifts with the timezone.
+  due_date: string | null;
+  labels: Label[];
 }
 
 export interface Board {
@@ -80,6 +100,9 @@ export interface Health {
   session: Session | null;
   aw_ok: boolean;
   build: BuildInfo;
+  // Set when the resume gate's systemd units are missing or differ from the
+  // repo copies — the install is a sudo step, easy to leave undone unnoticed.
+  resume_gate: string | null;
 }
 
 export interface Arrangement {
@@ -108,7 +131,25 @@ export interface Level {
   gain_db: number;
 }
 
-export type MeetingState = "recording" | "summarizing" | "done" | "failed";
+// Two wrap-up states, not one: the transcript is repaired before the notes are
+// written, and the repair is the long half.
+export type MeetingState =
+  | "recording"
+  | "cleaning"
+  | "summarizing"
+  | "done"
+  | "failed";
+
+// A file attached as context. No path and no extracted text: the webview does
+// not learn where the copy lives, and never gets the contents back out.
+export interface MeetingFile {
+  id: number;
+  position: number;
+  name: string;
+  kind: "text" | "pdf" | "image" | "office";
+  bytes: number;
+  added_at: string;
+}
 
 export interface Meeting {
   id: number;
@@ -116,11 +157,19 @@ export interface Meeting {
   started_at: string;
   ended_at: string | null;
   title: string;
-  summary: string | null;
-  key_points: string[]; // [] until the model has run
   state: MeetingState;
   error: string | null;
   segment_count: number;
+  file_count: number;
+  has_clean: boolean;
+}
+
+// The microphone is open on this meeting, and has been since `since`. Not the
+// meeting's started_at: a meeting picked back up a day later has been
+// recording for minutes, not a day.
+export interface RecordingNow {
+  meeting_id: number;
+  since: string;
 }
 
 export interface MeetingSegment {
@@ -139,8 +188,27 @@ export interface MeetingAction {
   task_id: number | null;
 }
 
+// What attaching returned: the meeting's full chip list, plus one readable
+// line per file that was refused. Partial success is the normal outcome.
+export interface AttachOutcome {
+  files: MeetingFile[];
+  rejected: string[];
+}
+
 export interface MeetingDetail {
   meeting: Meeting;
   segments: MeetingSegment[];
   actions: MeetingAction[];
+  // What the user typed. Never model output.
+  notes: string;
+  // The write-up: one markdown document, the model's draft until the user
+  // edits it. null until the model has run.
+  summary: string | null;
+  // When the user last saved an edit to `summary`; null while it is as the
+  // model wrote it. Re-run asks before overwriting an edited document.
+  summary_edited_at: string | null;
+  // The repair pass's output; null until it has run. The segments above stay
+  // the record of what was actually heard.
+  clean_transcript: string | null;
+  files: MeetingFile[];
 }

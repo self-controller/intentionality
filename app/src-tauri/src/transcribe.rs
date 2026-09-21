@@ -101,17 +101,26 @@ pub fn config() -> Result<Config> {
     Ok(Config { model, language })
 }
 
-/// The tail of what has been transcribed so far, on a character boundary.
-/// Slicing a String by bytes would panic mid-codepoint the first time someone
-/// says a word with an accent in it.
-pub fn carry(transcript: &str) -> String {
-    let trimmed = transcript.trim();
-    match trimmed.char_indices().nth_back(CARRY_CHARS.saturating_sub(1)) {
+/// The last `chars` characters, on a character boundary. Slicing a String by
+/// bytes would panic mid-codepoint the first time someone says a word with an
+/// accent in it.
+///
+/// Shared with the meeting cleaning pass, which stitches its windows together
+/// the same way this stitches audio chunks — the seam problem is identical, so
+/// the fix should be too.
+pub fn tail(text: &str, chars: usize) -> String {
+    let trimmed = text.trim();
+    match trimmed.char_indices().nth_back(chars.saturating_sub(1)) {
         // The cut can land mid-word, so trim again: a leading fragment is
         // context the model can use, a leading space is just noise.
         Some((i, _)) => trimmed[i..].trim_start().to_string(),
         None => trimmed.to_string(),
     }
+}
+
+/// The tail of what has been transcribed so far, for the next chunk's prompt.
+pub fn carry(transcript: &str) -> String {
+    tail(transcript, CARRY_CHARS)
 }
 
 /// Transcribe one WAV. `context` is the tail of the previous chunk.

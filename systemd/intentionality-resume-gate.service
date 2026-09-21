@@ -10,8 +10,14 @@
 # free, and Ctrl+Alt+F2..F6 stay untouched as escape hatches. Ctrl+Alt+F1
 # returns to GNOME at any point, including out of a half-answered gate.
 #
-# No PAMName=: the gate needs no logind session, and not having one keeps
-# logind from tearing anything down over a VT switch.
+# PAMName= gives the run a logind session of its own (the stack is
+# systemd/pam.d/intentionality-gate: account + session, no auth, no password).
+# The text gate never needed one. The graphical gate does: a compositor can
+# only open the GPU and the input devices through logind, and logind only
+# hands them to the active session on that VT. It also supplies
+# XDG_RUNTIME_DIR, which cage requires. A session on tty9 ends when this unit
+# does and never touches GNOME's session on tty1 beyond the pause/resume any
+# VT switch already causes.
 #
 # Started on demand by intentionality-resume.service, so no [Install].
 [Unit]
@@ -20,6 +26,7 @@ Description=intentionality gate on a spare console
 [Service]
 Type=oneshot
 User=david
+PAMName=intentionality-gate
 WorkingDirectory=/home/david/Desktop/projects/intentionality
 Environment=TERM=linux
 
@@ -36,7 +43,13 @@ TTYVHangup=yes
 ExecCondition=/usr/bin/python3 -m gate resume-needed
 
 ExecStartPre=+/bin/sh -c 'cat /sys/class/tty/tty0/active > /run/intentionality.prevvt; exec /usr/bin/chvt 9'
-ExecStart=/home/david/Desktop/projects/intentionality/bin/resume-gate
+# Through the interpreter, never the script itself: SELinux labels the repo
+# user_home_t, and systemd (init_t) may not execute user_home_t files -- a bare
+# path here dies with status=203/EXEC after the chvt above, so VT9 flashes and
+# no gate appears. /usr/bin/fish is bin_t, which transitions to
+# unconfined_service_t, and that domain may read the script. The same rule is
+# why ExecCondition= names /usr/bin/python3. tests/test_units.py enforces it.
+ExecStart=/usr/bin/fish /home/david/Desktop/projects/intentionality/bin/resume-gate
 # Also runs when ExecCondition= skipped the unit, so it reads-then-deletes the
 # marker and switches only if it actually found one. A stale marker left from
 # an earlier run would otherwise send a later skip to the wrong VT.

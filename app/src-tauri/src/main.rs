@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod analysis;
+mod attach;
 mod audio;
 mod aw;
 mod build_info;
@@ -17,6 +18,7 @@ mod notify;
 mod observed;
 mod recommendations;
 mod record;
+mod resume_units;
 mod scheduler;
 mod state;
 mod transcribe;
@@ -95,6 +97,11 @@ fn main() {
             .map(|at| format!(" — STALE, source changed {at}"))
             .unwrap_or_default(),
     );
+    // Same reasoning: "was the resume gate installed back then?" should be
+    // answerable from the journal, not only from a header nobody screenshotted.
+    if let Some(warning) = resume_units::warning() {
+        eprintln!("intentionality: {warning}");
+    }
 
     let conn = db::open().expect("cannot open the store");
     // Schema too old is NOT fatal here: health() reports it and the frontend
@@ -111,6 +118,13 @@ fn main() {
                 Err(err) => eprintln!("intentionality: meeting sweep failed: {err}"),
                 _ => {}
             }
+            // The other half of that: a copy staged for an attachment that
+            // never got its row, or a whole directory whose meeting has since
+            // been deleted. Only ever under the directory this app owns.
+            let swept = attach::sweep_orphans(&conn);
+            if swept > 0 {
+                eprintln!("intentionality: removed {swept} orphaned attachment file(s)");
+            }
             adopt_session(&conn)
         }
         Err(_) => None,
@@ -118,6 +132,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new(conn, session_id))
         .setup(|app| {
             scheduler::spawn(app.handle().clone());
@@ -128,7 +143,11 @@ fn main() {
             commands::get_board,
             commands::apply_board,
             commands::add_task,
-            commands::rename_task,
+            commands::create_task,
+            commands::update_task,
+            commands::list_labels,
+            commands::create_label,
+            commands::delete_label,
             commands::delete_task,
             commands::pull_task,
             commands::list_sessions,
@@ -144,12 +163,17 @@ fn main() {
             commands::run_checkpoint_now,
             commands::list_audio_sources,
             commands::start_meeting,
+            commands::resume_meeting,
             commands::stop_meeting,
             commands::recording_meeting,
             commands::list_meetings,
             commands::get_meeting,
             commands::approve_actions,
-            commands::resummarize_meeting,
+            commands::set_meeting_notes,
+            commands::set_meeting_summary,
+            commands::rerun_meeting_notes,
+            commands::attach_meeting_files,
+            commands::remove_meeting_file,
             commands::delete_meeting,
         ])
         .run(tauri::generate_context!())

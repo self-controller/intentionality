@@ -1,4 +1,5 @@
 use crate::db;
+use crate::models::RecordingNow;
 use crate::record;
 use rusqlite::Connection;
 use std::sync::Mutex;
@@ -22,6 +23,9 @@ pub struct AppState {
 
 pub struct MeetingHandle {
     pub id: i64,
+    /// When the microphone opened for this recording — the meeting's start
+    /// for a new one, the moment it was picked back up for a resumed one.
+    pub since: String,
     stopper: Option<record::Stopper>,
     /// The task draining the microphone. Stop awaits it so the final chunk is
     /// transcribed and stored before the transcript is handed to the model.
@@ -29,8 +33,13 @@ pub struct MeetingHandle {
 }
 
 impl MeetingHandle {
-    pub fn new(id: i64, stopper: Option<record::Stopper>, capture: tokio::task::JoinHandle<()>) -> Self {
-        Self { id, stopper, capture: Some(capture) }
+    pub fn new(
+        id: i64,
+        since: String,
+        stopper: Option<record::Stopper>,
+        capture: tokio::task::JoinHandle<()>,
+    ) -> Self {
+        Self { id, since, stopper, capture: Some(capture) }
     }
     /// Close the microphone. The capture task then sees EOF, flushes its tail
     /// chunk and finishes.
@@ -57,21 +66,39 @@ impl AppState {
     pub fn session_id(&self) -> Option<i64> {
         *self.session_id.lock().unwrap()
     }
-    pub fn clear_session(&self) {
-        *self.session_id.lock().unwrap() = None;
-    }
-    /// Adopt a session that did not exist at startup — what the resume gate
-    /// creates on its spare VT after the machine wakes. Without this the app
-    /// could only ever lose a session, never gain one.
-    pub fn set_session(&self, id: i64) {
-        *self.session_id.lock().unwrap() = Some(id);
-    }
-    pub fn app_started_at(&self) -> &str {
-        &self.app_started_at
+    /// Make the held session match the store: let go of one closed elsewhere
+    /// and, in the same step, adopt its successor — what the resume gate
+    /// leaves behind on its spare VT. Doing both before anyone is told is what
+    /// keeps the board from showing "No open session" for a whole heartbeat
+    /// while the new session already exists.
+    ///
+    /// Returns (the session let go of, the session adopted). Runs under the
+    /// connection lock, so two callers cannot both swap.
+    pub fn sync_session(&self) -> (Option<i64>, Option<i64>) {
+        let conn = self.conn.lock().unwrap();
+        let mut held = self.session_id.lock().unwrap();
+        let mut closed = None;
+        if let Some(id) = *held {
+            // An error is not evidence of a close; the next tick asks again.
+            if db::session_is_open(&conn, id).unwrap_or(true) {
+                return (None, None);
+            }
+            closed = Some(id);
+        }
+        let opened = crate::adopt_session_after(&conn, &self.app_started_at);
+        *held = opened;
+        (closed, opened)
     }
 
     pub fn meeting_id(&self) -> Option<i64> {
         self.meeting.lock().unwrap().as_ref().map(|m| m.id)
+    }
+    pub fn recording(&self) -> Option<RecordingNow> {
+        self.meeting
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|m| RecordingNow { meeting_id: m.id, since: m.since.clone() })
     }
     pub fn set_meeting(&self, handle: MeetingHandle) {
         *self.meeting.lock().unwrap() = Some(handle);
@@ -80,5 +107,68 @@ impl AppState {
     /// two concurrent Stops safe: only one of them gets the handle.
     pub fn take_meeting(&self) -> Option<MeetingHandle> {
         self.meeting.lock().unwrap().take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::params;
+
+    fn open_session(conn: &Connection) -> i64 {
+        conn.execute(
+            "INSERT INTO session (started_at, mode) VALUES (?1, 'manual')",
+            [db::now()],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn close(state: &AppState, id: i64) {
+        state
+            .conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE session SET ended_at = ?1 WHERE id = ?2", params![db::now(), id])
+            .unwrap();
+    }
+
+    #[test]
+    fn an_open_session_is_kept() {
+        let conn = db::tests::store();
+        let id = open_session(&conn);
+        let state = AppState::new(conn, Some(id));
+        assert_eq!(state.sync_session(), (None, None));
+        assert_eq!(state.session_id(), Some(id));
+    }
+
+    /// The empty board after a resume gate: letting go of the closed session
+    /// and finding its successor used to take two heartbeat ticks, 30 s apart.
+    #[test]
+    fn a_closed_session_hands_over_to_its_successor_in_one_step() {
+        let conn = db::tests::store();
+        let old = open_session(&conn);
+        let state = AppState::new(conn, Some(old));
+        close(&state, old);
+        let new = open_session(&state.conn.lock().unwrap());
+        assert_eq!(state.sync_session(), (Some(old), Some(new)));
+        assert_eq!(state.session_id(), Some(new));
+    }
+
+    #[test]
+    fn a_closed_session_with_no_successor_leaves_none() {
+        let conn = db::tests::store();
+        let old = open_session(&conn);
+        let state = AppState::new(conn, Some(old));
+        close(&state, old);
+        assert_eq!(state.sync_session(), (Some(old), None));
+        assert_eq!(state.session_id(), None);
+    }
+
+    #[test]
+    fn nothing_held_and_nothing_open_changes_nothing() {
+        let state = AppState::new(db::tests::store(), None);
+        assert_eq!(state.sync_session(), (None, None));
+        assert_eq!(state.session_id(), None);
     }
 }

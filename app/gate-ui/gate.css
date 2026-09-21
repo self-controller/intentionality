@@ -1,0 +1,50 @@
+@import "../src/ui/theme.css";
+
+/* Tailwind v4 detects sources relative to this file; the shared components
+   live outside it, so name both roots. */
+@source "./";
+@source "../src/ui/";
+
+/* Sizing lives in exactly one place: the webview's zoom, computed in
+   gate/webview.py as (INTENTIONALITY_GATE_FONT_PX / 16) / monitor_scale.
+   That makes one rem the same number of *physical* pixels under cage as it is
+   nested inside GNOME, so what is tested is what appears at the gate. The
+   root font size therefore stays at the browser default and nothing here
+   scales itself. */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  /* Not system-ui: WebKit resolves that through GTK settings which arrive via
+     XSettings or the desktop portal, and under cage there is neither. On this
+     machine `fc-match system-ui` already falls back to Noto Sans, so name the
+     stack rather than let the fallback be a surprise. */
+  font-family: "Cantarell", "Noto Sans", "DejaVu Sans", sans-serif;
+  /* A console, not a document. */
+  user-select: none;
+  -webkit-user-select: none;
+  overflow: hidden;
+}
+
+/* Typing is the one place selection should work. */
+input,
+textarea {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+@keyframes gate-rise {
+  from { opacity: 0; transform: translateY(0.5rem); }
+  to { opacity: 1; transform: none; }
+}
+
+.gate-rise { animation: gate-rise 0.45s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .gate-rise { animation: none; }
+}

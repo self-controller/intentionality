@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import * as api from "./api";
-import { band, dayKey, dayLabel, fmt, hhmm, OTHER, rankTitles } from "./format";
+import { ALIGN_TEXT, band, dayKey, dayLabel, fmt, hhmm, OTHER, rankTitles } from "./format";
+import { BarGroup, BarMore, BarRow, Bars } from "./ui/Bars";
 import type { Analysis, Observed } from "./types";
 
 const TOP_APPS = 8;
@@ -137,23 +138,34 @@ export default function Analyses({
   }
 
   return (
-    <div className="analyses">
-      <aside className="analysis-list">
+    <div className="flex items-start gap-4 p-4">
+      <aside className="max-h-[calc(100vh-90px)] w-[260px] flex-none overflow-y-auto">
         {groups.map((g) => (
-          <div key={g.key} className="analysis-day">
+          <div key={g.key} className="mb-3.5 flex flex-col gap-1.5">
             <h3>{g.label}</h3>
             {g.items.map((a) => {
               const b = band(a.alignment);
+              // On the accent fill every child has to inherit the dark text;
+              // a muted grey or a band colour on cyan is unreadable.
+              const on = a.id === selected;
               return (
                 <button
                   key={a.id}
-                  className={`${a.id === selected ? "active" : ""}${a.seen_at ? "" : " unseen"}`}
+                  className={
+                    "block w-full overflow-hidden text-ellipsis whitespace-nowrap rounded-md " +
+                    "border px-2.5 py-1.5 text-left transition-colors duration-150 " +
+                    (a.id === selected
+                      ? "border-accent bg-accent text-black "
+                      : "border-line text-text hover:border-muted ") +
+                    // Unread checks are the ones worth returning to.
+                    (a.seen_at ? "" : "font-semibold")
+                  }
                   onClick={() => select(a)}
                 >
-                  <span className="muted">{hhmm(a.created_at)}</span>{" "}
-                  {a.kind === "checkpoint" && <span className="kind">time's up</span>}{" "}
+                  <span className={on ? "opacity-70" : "text-muted"}>{hhmm(a.created_at)}</span>{" "}
+                  {a.kind === "checkpoint" && <span className={"rounded px-1 text-[11px] " + (on ? "bg-black/20" : "bg-raised text-muted")}>time&rsquo;s up</span>}{" "}
                   {a.headline}
-                  <span className={`align ${b.cls}`} title={b.label}>
+                  <span className={"float-right ml-2 font-normal " + (on ? "" : ALIGN_TEXT[b.cls])} title={b.label}>
                     {b.glyph} {a.alignment ?? "—"}
                   </span>
                 </button>
@@ -161,58 +173,58 @@ export default function Analyses({
             })}
           </div>
         ))}
-        {items.length === 0 && <p className="muted">No checks yet.</p>}
+        {items.length === 0 && <p className="text-muted">No checks yet.</p>}
       </aside>
 
-      <section className="analysis-detail">
+      <section className="min-w-0 max-w-[720px] flex-1">
         {current ? (
           <>
-            <div className="detail-head">
+            <div className="flex items-start justify-between gap-4">
               <div>
                 <h2>{current.headline}</h2>
-                <p className="muted">
+                <p className="text-muted">
                   {dayLabel(current.created_at)} {hhmm(current.created_at)} · covers{" "}
                   {hhmm(current.window_start)}–{hhmm(current.window_end)} ({fmt(windowSeconds)})
                 </p>
               </div>
-              <div className={`align-stat align ${band(current.alignment).cls}`}>
-                <span className="value">
+              <div className={"flex flex-none flex-col items-end " + ALIGN_TEXT[band(current.alignment).cls]}>
+                <span className="text-2xl leading-tight">
                   {band(current.alignment).glyph} {current.alignment ?? "—"}
                 </span>
-                <span className="label">{band(current.alignment).label}</span>
+                <span className="text-xs">{band(current.alignment).label}</span>
               </div>
             </div>
-            <p className="detail-body">{current.body}</p>
+            <p className="max-w-[60ch]">{current.body}</p>
             {current.recommendation && (
-              <div className="recommend">
+              <div className="mt-5 max-w-[60ch] rounded-lg border border-line bg-surface px-4 py-3.5">
                 <h3>Recommended</h3>
-                <p className="advice">
+                <p className="mb-1.5 text-[15px]">
                   {current.recommendation.advice}
                   {current.recommendation.minutes > 0 && (
-                    <span className="muted"> · about {current.recommendation.minutes} min</span>
+                    <span className="text-muted"> · about {current.recommendation.minutes} min</span>
                   )}
                 </p>
                 {current.recommendation_note && (
-                  <p className="muted note">{current.recommendation_note}</p>
+                  <p className="mb-2 text-[13px] text-muted">{current.recommendation_note}</p>
                 )}
-                <p className="why">{current.recommendation.why}</p>
-                <p className="muted source">
+                <p className="mb-1.5 text-text">{current.recommendation.why}</p>
+                <p className="text-xs italic text-muted">
                   {current.recommendation.source ?? "Not yet backed by a cited study."}
                 </p>
               </div>
             )}
-            <p className="muted">
+            <p className="text-muted">
               #{current.session_id}
               {current.session_statement ? ` · ${current.session_statement}` : ""}
             </p>
 
             <h3>What the model saw</h3>
             {observed && (
-              <p className="muted">
+              <p className="text-muted">
                 {fmt(observed.active_seconds)} active, {fmt(observed.afk_seconds)} away
               </p>
             )}
-            <div className="bars">
+            <Bars>
               {apps.map(([app, secs]) => {
                 const titles = rankTitles(observed, app);
                 // "(other)" reaches the model too — as the prompt's remainder
@@ -229,55 +241,46 @@ export default function Analyses({
                   ...other.map(([t, s]) => ({ t, s, unsent: false })),
                 ];
                 return (
-                  <div key={app} className="bar-group">
-                    <div className="bar-row" title={`${app} — ${fmt(secs)}`}>
-                      <span className="bar-label">{app}</span>
-                      <span className="bar-track">
-                        <span className="bar-fill" style={{ width: `${(secs / max) * 100}%` }} />
-                      </span>
-                      <span className="bar-value">{fmt(secs)}</span>
-                    </div>
+                  <BarGroup key={app}>
+                    <BarRow label={app} value={fmt(secs)} pct={(secs / max) * 100} />
                     {rows.map((r) => (
-                      <div
+                      <BarRow
                         key={r.t}
-                        className={`bar-row sub${r.unsent ? " unsent" : ""}`}
-                        title={r.unsent ? `${r.t} — not sent to the model` : r.t}
-                      >
-                        <span className="bar-label">{r.t}</span>
-                        <span className="bar-track">
-                          <span className="bar-fill" style={{ width: `${(r.s / max) * 100}%` }} />
-                        </span>
-                        <span className="bar-value">{fmt(r.s)}</span>
-                      </div>
+                        label={r.t}
+                        value={fmt(r.s)}
+                        pct={(r.s / max) * 100}
+                        sub
+                        unsent={r.unsent}
+                      />
                     ))}
                     {hidden.length > 0 && (
-                      <button className="bar-more" onClick={() => toggle(app)}>
+                      <BarMore onClick={() => toggle(app)}>
                         {open
                           ? "▾ hide the rest"
                           : `▸ +${hidden.length} more — recorded, not sent to the model`}
-                      </button>
+                      </BarMore>
                     )}
-                  </div>
+                  </BarGroup>
                 );
               })}
-              {observed && apps.length === 0 && <p className="muted">nothing recorded</p>}
-            </div>
+              {observed && apps.length === 0 && <p className="text-muted">nothing recorded</p>}
+            </Bars>
           </>
         ) : (
-          <p className="muted">
+          <p className="text-muted">
             No checks yet — they land at random intervals, and quiet windows are skipped.
           </p>
         )}
 
-        <div className="run-row">
+        <div className="mt-5 flex items-center gap-2.5">
           <button onClick={runNow} disabled={running != null || !hasSession}>
             {running === "check" ? "checking…" : "Run a check now"}
           </button>
           <button onClick={runCheckpoint} disabled={running != null || !hasSession}>
             {running === "checkpoint" ? "checking…" : "Run a checkpoint now"}
           </button>
-          {!hasSession && <span className="muted">no open session</span>}
-          {runNote && <span className="muted">{runNote}</span>}
+          {!hasSession && <span className="text-muted">no open session</span>}
+          {runNote && <span className="text-muted">{runNote}</span>}
         </div>
       </section>
     </div>

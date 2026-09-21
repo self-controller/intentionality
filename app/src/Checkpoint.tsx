@@ -1,6 +1,7 @@
 import { useState } from "react";
 import * as api from "./api";
-import { band, hhmm } from "./format";
+import { ALIGN_TEXT, band, hhmm } from "./format";
+import { Button } from "./ui/primitives";
 import type { Analysis, Session } from "./types";
 
 // What "+N min" offers. Deliberately short: this is a nudge past the line you
@@ -51,11 +52,13 @@ export default function Checkpoint({
   };
 
   return (
-    <div className="checkpoint-scrim">
-      <section className="checkpoint" role="dialog" aria-modal="true" aria-label="Time is up">
+    <div className="fixed inset-0 z-30 flex items-center justify-center overflow-y-auto bg-black/85 p-6">
+      <section
+      className="max-h-full w-full max-w-[560px] overflow-y-auto rounded-[10px] border border-line bg-surface px-7 py-6"
+      role="dialog" aria-modal="true" aria-label="Time is up">
         <h1>
           Time's up
-          <span className="muted">
+          <span className="text-muted">
             {intended != null && elapsed != null
               ? ` — ${intended} min intended, ${elapsed} elapsed`
               : elapsed != null
@@ -64,48 +67,50 @@ export default function Checkpoint({
           </span>
         </h1>
 
-        <div className="checkpoint-read">
-          <span className={`align ${b.cls}`}>
+        <div className="mb-4 flex items-baseline gap-2.5">
+          <span className={"text-xl " + ALIGN_TEXT[b.cls]}>
             {b.glyph} {analysis.alignment ?? "—"}
           </span>
-          <span className={`align ${b.cls} label`}>{b.label}</span>
-          <span className="muted">
+          <span className={"text-[13px] " + ALIGN_TEXT[b.cls]}>{b.label}</span>
+          <span className="text-muted">
             covers {hhmm(analysis.window_start)}–{hhmm(analysis.window_end)}
           </span>
         </div>
 
         <h2>{analysis.headline}</h2>
-        <p className="detail-body">{analysis.body}</p>
+        <p className="mb-1 max-w-[60ch]">{analysis.body}</p>
 
         {rec && (
-          <div className="recommend">
+          <div className="mt-5 rounded-lg border border-line bg-raised px-4 py-3.5">
             <h3>Recommended</h3>
-            <p className="advice">
+            <p className="mb-1.5 text-[15px]">
               {rec.advice}
-              {rec.minutes > 0 && <span className="muted"> · about {rec.minutes} min</span>}
+              {rec.minutes > 0 && <span className="text-muted"> · about {rec.minutes} min</span>}
             </p>
             {analysis.recommendation_note && (
-              <p className="muted note">{analysis.recommendation_note}</p>
+              <p className="mb-2 text-[13px] text-muted">{analysis.recommendation_note}</p>
             )}
-            <p className="why">{rec.why}</p>
+            <p className="mb-1.5 text-text">{rec.why}</p>
             {/* Said plainly rather than left to be assumed: these are
                 defaults, and the day one of them earns a citation it says so. */}
-            <p className="muted source">
+            <p className="text-xs italic text-muted">
               {rec.source ? rec.source : "Not yet backed by a cited study."}
             </p>
           </div>
         )}
 
-        <div className="checkpoint-actions">
-          <button onClick={() => finish()} disabled={busy}>
+        <div className="mt-5 flex items-center gap-2.5">
+          {/* Got it is the one that closes the moment; the extensions are
+              the alternatives to it. */}
+          <Button tone="primary" onClick={() => finish()} disabled={busy}>
             Got it
-          </button>
+          </Button>
           {EXTENSIONS.map((m) => (
-            <button key={m} onClick={() => finish(m)} disabled={busy}>
+            <Button key={m} onClick={() => finish(m)} disabled={busy}>
               +{m} min
-            </button>
+            </Button>
           ))}
-          {error && <span className="muted">{error}</span>}
+          {error && <span className="text-muted">{error}</span>}
         </div>
       </section>
     </div>

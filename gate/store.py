@@ -1,17 +1,25 @@
 """The session/task store. Only module that imports sqlite3."""
 
+import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import config
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 8
 
 # Statuses that mean "still open" — what the debrief asks about and the
 # close paths carry into the backlog.
 UNFINISHED = ("planned", "doing")
+
+# The desktop app's palette (LABEL_COLORS in app/src-tauri/src/db.rs), picked
+# the same way, so a label is the same colour whichever program made it. A
+# test keeps the two lists equal.
+LABEL_COLORS = (
+    "#7aa2f7", "#9ece6a", "#e0af68", "#f7768e", "#bb9af7", "#2ac3de", "#ff9e64", "#41a6b5",
+)
 
 
 def now() -> str:
@@ -56,6 +64,18 @@ def init(conn: sqlite3.Connection) -> None:
     if version < 4:
         _backup(conn, suffix=".pre-v4.bak")
         _migrate_v3_to_v4(conn)
+    if version < 5:
+        _backup(conn, suffix=".pre-v5.bak")
+        _migrate_v4_to_v5(conn)
+    if version < 6:
+        _backup(conn, suffix=".pre-v6.bak")
+        _migrate_v5_to_v6(conn)
+    if version < 7:
+        _backup(conn, suffix=".pre-v7.bak")
+        _migrate_v6_to_v7(conn)
+    if version < 8:
+        _backup(conn, suffix=".pre-v8.bak")
+        _migrate_v7_to_v8(conn)
 
 
 def _backup(conn: sqlite3.Connection, suffix: str) -> None:
@@ -313,6 +333,270 @@ def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
         conn.isolation_level = saved_isolation
 
 
+def _v5_key_points(raw: str | None) -> str:
+    """v4's flat ["a", "b"] -> v5's [{"text": "a", "subpoints": []}, ...].
+
+    Deliberately forgiving. This runs once, unattended, over rows written by
+    an older binary, and the only thing worse than losing a key point is
+    refusing to migrate the store at all: anything that is not recognisably a
+    list of strings becomes [], which is exactly what the UI already renders
+    for a meeting that was never summarized.
+    """
+    if raw is None:
+        return "[]"
+    try:
+        points = json.loads(raw)
+    except (ValueError, TypeError):
+        return "[]"
+    if not isinstance(points, list):
+        return "[]"
+    converted = []
+    for point in points:
+        if isinstance(point, str) and point.strip():
+            converted.append({"text": point.strip(), "subpoints": []})
+        elif isinstance(point, dict) and isinstance(point.get("text"), str):
+            # Already v5-shaped: idempotent, so a half-applied migration that
+            # was rolled back and retried cannot double-wrap.
+            subpoints = point.get("subpoints")
+            converted.append({
+                "text": point["text"],
+                "subpoints": [s for s in subpoints if isinstance(s, str)]
+                if isinstance(subpoints, list)
+                else [],
+            })
+    return json.dumps(converted)
+
+
+def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
+    """v4 -> v5: the two-pass meeting pipeline, plus attached context files.
+
+    meeting gains notes (what the user typed), clean_transcript (the repair
+    pass's output) and details, and `state` gains 'cleaning' -- which is a
+    CHECK change, so the table is rebuilt rather than altered, the same wall
+    _migrate_v3_to_v4 hit on task.source. meeting has no indexes of its own so
+    there is nothing to recreate by hand this time; meeting_file's index is new.
+
+    key_points is converted in the same transaction, from a flat array of
+    strings to objects carrying subpoints. Row conversion belongs here and
+    nowhere else: the desktop app must never find a shape it cannot read.
+
+    meeting_file is created now even though only the desktop app's attachment
+    feature writes it, so the store crosses this version boundary once.
+    """
+    saved_isolation = conn.isolation_level
+    conn.isolation_level = None  # autocommit: we manage the transaction
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            CREATE TABLE meeting_v5 (
+                id           INTEGER PRIMARY KEY,
+                session_id   INTEGER REFERENCES session(id),
+                started_at   TEXT NOT NULL,
+                ended_at     TEXT,
+                title        TEXT NOT NULL DEFAULT '',
+                notes        TEXT NOT NULL DEFAULT '',
+                clean_transcript TEXT,
+                summary      TEXT,
+                key_points   TEXT,
+                details      TEXT,
+                state        TEXT NOT NULL DEFAULT 'recording'
+                             CHECK (state IN ('recording', 'cleaning', 'summarizing',
+                                              'done', 'failed')),
+                error        TEXT
+            )
+            """
+        )
+        # Read before the drop, convert in Python, write back. The row count
+        # here is meetings-ever-recorded, so materialising them is fine.
+        rows = conn.execute(
+            "SELECT id, session_id, started_at, ended_at, title, summary,"
+            " key_points, state, error FROM meeting"
+        ).fetchall()
+        conn.executemany(
+            "INSERT INTO meeting_v5 (id, session_id, started_at, ended_at, title,"
+            " notes, clean_transcript, summary, key_points, details, state, error)"
+            " VALUES (?, ?, ?, ?, ?, '', NULL, ?, ?, NULL, ?, ?)",
+            # Positional, not by name: this must not depend on the caller
+            # having set a row_factory.
+            [
+                (
+                    row[0],  # id
+                    row[1],  # session_id
+                    row[2],  # started_at
+                    row[3],  # ended_at
+                    row[4],  # title
+                    row[5],  # summary
+                    _v5_key_points(row[6]),  # key_points
+                    row[7],  # state
+                    row[8],  # error
+                )
+                for row in rows
+            ],
+        )
+        conn.execute("DROP TABLE meeting")
+        conn.execute("ALTER TABLE meeting_v5 RENAME TO meeting")
+        conn.execute(
+            """
+            CREATE TABLE meeting_file (
+                id         INTEGER PRIMARY KEY,
+                meeting_id INTEGER NOT NULL REFERENCES meeting(id) ON DELETE CASCADE,
+                position   INTEGER NOT NULL,
+                name       TEXT NOT NULL,
+                path       TEXT NOT NULL,
+                kind       TEXT NOT NULL CHECK (kind IN ('text', 'pdf', 'image', 'office')),
+                bytes      INTEGER NOT NULL,
+                extracted  TEXT,
+                added_at   TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX meeting_file_meeting ON meeting_file (meeting_id, position)"
+        )
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(f"migration broke foreign keys: {violations[:3]}")
+        conn.execute("UPDATE meta SET value = '5' WHERE key = 'schema_version'")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.isolation_level = saved_isolation
+
+
+def _v6_document(
+    summary: str | None, key_points: str | None, details: str | None
+) -> str | None:
+    """v5's three write-up columns -> v6's one markdown document.
+
+    The paragraph first with no heading, then the key points as a bullet list
+    with their subpoints nested under them, then the details under their own
+    heading -- the same shape the model is now asked to write directly, so a
+    migrated meeting and a new one read the same on screen.
+
+    As forgiving as _v5_key_points, and for the same reason: this runs once,
+    unattended, over rows an older binary wrote, and junk in key_points is
+    dropped rather than refusing the migration. None when all three are
+    empty, so a meeting that was never summarized stays `summary IS NULL`,
+    which is what the app reads as "no notes yet".
+    """
+    parts = []
+    if summary and summary.strip():
+        parts.append(summary.strip())
+    lines = []
+    for point in json.loads(_v5_key_points(key_points)):  # tolerant, v5-shaped
+        text = point["text"].strip()
+        if not text:
+            continue
+        lines.append(f"- {text}")
+        lines.extend(f"  - {s.strip()}" for s in point["subpoints"] if s.strip())
+    if lines:
+        parts.append("## Key points\n" + "\n".join(lines))
+    if details and details.strip():
+        parts.append("## Additional information\n" + details.strip())
+    return "\n\n".join(parts) if parts else None
+
+
+def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
+    """v5 -> v6: the write-up becomes one editable markdown document.
+
+    summary absorbs key_points and details (folded by _v6_document, in the
+    same transaction), those two columns go, and summary_edited_at arrives to
+    record that the user has changed the document since the model wrote it.
+
+    No CHECK changes this time, so no table rebuild: ALTER TABLE does all of
+    it. DROP COLUMN needs SQLite 3.35 (2021). ADD COLUMN appends, which is why
+    schema.sql lists summary_edited_at last -- the parity test compares column
+    order.
+    """
+    saved_isolation = conn.isolation_level
+    conn.isolation_level = None  # autocommit: we manage the transaction
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT id, summary, key_points, details FROM meeting"
+        ).fetchall()
+        conn.executemany(
+            "UPDATE meeting SET summary = ? WHERE id = ?",
+            # Positional: this must not depend on the caller's row_factory.
+            [(_v6_document(row[1], row[2], row[3]), row[0]) for row in rows],
+        )
+        conn.execute("ALTER TABLE meeting DROP COLUMN key_points")
+        conn.execute("ALTER TABLE meeting DROP COLUMN details")
+        conn.execute("ALTER TABLE meeting ADD COLUMN summary_edited_at TEXT")
+        conn.execute("UPDATE meta SET value = '6' WHERE key = 'schema_version'")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = saved_isolation
+
+
+def _migrate_v6_to_v7(conn: sqlite3.Connection) -> None:
+    """v6 -> v7: a task becomes an editable object -- notes and labels.
+
+    task.notes is plain text the user writes on a card. Labels are free text
+    shared across tasks, so they are their own table with a join rather than a
+    column: reusing "billing" on a second card has to mean the same label.
+
+    No CHECK changes, so no rebuild -- ALTER TABLE ADD COLUMN does it, and it
+    appends, which is why schema.sql lists notes last (the parity test compares
+    column order). The two new tables are created inside the same transaction.
+    """
+    saved_isolation = conn.isolation_level
+    conn.isolation_level = None  # autocommit: we manage the transaction
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("ALTER TABLE task ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            "CREATE TABLE label ("
+            " id    INTEGER PRIMARY KEY,"
+            " name  TEXT NOT NULL COLLATE NOCASE UNIQUE,"
+            " color TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE task_label ("
+            " task_id  INTEGER NOT NULL REFERENCES task(id) ON DELETE CASCADE,"
+            " label_id INTEGER NOT NULL REFERENCES label(id) ON DELETE CASCADE,"
+            " PRIMARY KEY (task_id, label_id))"
+        )
+        conn.execute("UPDATE meta SET value = '7' WHERE key = 'schema_version'")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = saved_isolation
+
+
+def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
+    """v7 -> v8: task.due_date, the day a task is due. NULL = none.
+
+    One nullable column, no CHECK, so ALTER TABLE ADD COLUMN is the whole
+    migration -- the _migrate_v6_to_v7 idiom. It appends, which is why
+    schema.sql lists due_date after notes. Both writers (the app's
+    db::update_task, the gate's _set_details) accept the canonical form only;
+    every existing task starts with none.
+    """
+    saved_isolation = conn.isolation_level
+    conn.isolation_level = None  # autocommit: we manage the transaction
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("ALTER TABLE task ADD COLUMN due_date TEXT")
+        conn.execute("UPDATE meta SET value = '8' WHERE key = 'schema_version'")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = saved_isolation
+
+
 def commit_draft(
     conn: sqlite3.Connection,
     statement: str,
@@ -329,6 +613,140 @@ def commit_draft(
         if backlog_ids:
             _pull_from_backlog(conn, session_id, backlog_ids)
     return session_id
+
+
+class EmptyPlan(ValueError):
+    """A session would have started with no tasks. The gate never allows it."""
+
+
+def commit_plan(
+    conn: sqlite3.Connection,
+    intended_minutes: int | None,
+    keep_ids: list[int],
+    titles: list[str],
+    done_ids: list[int] = (),
+    delete_ids: list[int] = (),
+    new_details: list = (),
+    edits: dict | None = None,
+) -> int:
+    """Start a session from the welcome screen: finish, delete, pull, add.
+
+    One transaction, so the screen's answer lands whole or not at all. The
+    session starts with the kept backlog tasks, in order, then the typed
+    ones. If that comes to nothing -- the desktop app pulled or deleted every
+    kept task while the gate was up, and nothing was typed -- EmptyPlan
+    rolls the lot back, done and deletes included.
+
+    `new_details` runs alongside `titles`; `edits` maps a kept task's id to
+    its changed details. A details value is anything with notes, due_date
+    and labels (ui.Details). An edit to a task that did not end up in this
+    session -- the app took it meanwhile -- is dropped with it.
+    """
+    with conn:
+        for task_id in done_ids:
+            _finish_backlog_task(conn, task_id)
+        for task_id in delete_ids:
+            _delete_backlog_task(conn, task_id)
+        session_id = create_session(conn, "", intended_minutes, "manual")
+        _pull_from_backlog(conn, session_id, keep_ids)
+        for task_id, details in (edits or {}).items():
+            _set_details(conn, task_id, session_id, details)
+        new_ids = add_tasks(conn, session_id, titles)
+        for task_id, details in zip(new_ids, new_details):
+            _set_details(conn, task_id, session_id, details)
+        if conn.execute(
+            "SELECT 1 FROM task WHERE session_id = ?", (session_id,)
+        ).fetchone() is None:
+            raise EmptyPlan("a session needs at least one task")
+    return session_id
+
+
+def _delete_backlog_task(conn, task_id: int) -> None:
+    # The same statement as the app's backlog delete (db.rs
+    # delete_backlog_task): labels go with it by cascade, an approved meeting
+    # action reads as unapproved again. Session rows are history: the guard
+    # makes deleting one impossible.
+    conn.execute("DELETE FROM task WHERE id = ? AND session_id IS NULL", (task_id,))
+
+
+def _finish_backlog_task(conn, task_id: int) -> None:
+    """Done, for a backlog copy: the session row it was carried from is
+    marked done -- that is where the work was supposed to happen -- and the
+    copy goes. A row carried from nowhere has no session to record it in, so
+    it is left alone; the welcome screen offers Done only on carried rows."""
+    row = conn.execute(
+        "SELECT carried_from FROM task WHERE id = ? AND session_id IS NULL",
+        (task_id,),
+    ).fetchone()
+    if row is None or row["carried_from"] is None:
+        return
+    conn.execute(
+        f"UPDATE task SET status = 'done', resolved_at = ?"
+        f" WHERE id = ? AND session_id IS NOT NULL AND status IN {UNFINISHED}",
+        (now(), row["carried_from"]),
+    )
+    _delete_backlog_task(conn, task_id)
+
+
+def _set_details(conn, task_id: int, session_id: int | None, details) -> bool:
+    """A task's notes, due date and exact set of labels, as the app's
+    db::write_details writes them. Labels are found by name, case-blind
+    (label.name is NOCASE), and a name that isn't there yet is created. Like
+    the app, it never deletes a label: one with no task left is a preset.
+
+    Guarded on session_id (None = the backlog), so only a row where the
+    caller expects it is touched.
+    """
+    due = details.due_date
+    if due is not None and not _is_day(due):
+        raise ValueError(f"due date must be YYYY-MM-DD, not {due!r}")
+    cur = conn.execute(
+        "UPDATE task SET notes = ?, due_date = ? WHERE id = ? AND session_id IS ?",
+        (details.notes.strip(), due, task_id, session_id),
+    )
+    if not cur.rowcount:
+        return False
+    conn.execute("DELETE FROM task_label WHERE task_id = ?", (task_id,))
+    for name in details.labels:
+        name = name.strip()
+        if not name:
+            continue
+        count = conn.execute("SELECT COUNT(*) FROM label").fetchone()[0]
+        conn.execute(
+            "INSERT OR IGNORE INTO label (name, color) VALUES (?, ?)",
+            (name, LABEL_COLORS[count % len(LABEL_COLORS)]),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO task_label (task_id, label_id)"
+            " SELECT ?, id FROM label WHERE name = ?",
+            (task_id, name),
+        )
+    return True
+
+
+def _is_day(text: str) -> bool:
+    # The fixed width is what makes the column's string order date order.
+    try:
+        return date.fromisoformat(text).isoformat() == text
+    except ValueError:
+        return False
+
+
+def list_labels(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every label, worn or not, by name."""
+    return conn.execute("SELECT name, color FROM label ORDER BY name").fetchall()
+
+
+def labels_by_task(conn: sqlite3.Connection) -> dict[int, list[str]]:
+    """Label names per task id, each list by name. One query for the whole
+    store, which is small by design (the app's attach_labels does the same)."""
+    out: dict[int, list[str]] = {}
+    for row in conn.execute(
+        "SELECT tl.task_id, l.name FROM task_label tl"
+        " JOIN label l ON l.id = tl.label_id ORDER BY l.name"
+    ):
+        out.setdefault(row["task_id"], []).append(row["name"])
+    return out
 
 
 def create_session(
@@ -354,13 +772,23 @@ def checkpoint_due(started_at: str, intended_minutes: int | None) -> str | None:
     return (start + timedelta(minutes=intended_minutes)).isoformat(timespec="seconds")
 
 
-def add_tasks(conn: sqlite3.Connection, session_id: int, titles: list[str]) -> None:
+def add_tasks(conn: sqlite3.Connection, session_id: int, titles: list[str]) -> list[int]:
+    """Insert the titles into the session, returning their ids in order."""
+    # Numbered after whatever the session already holds, so tasks added
+    # after a pull land below the pulled ones.
+    start = conn.execute(
+        "SELECT COALESCE(MAX(position), 0) FROM task WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()[0]
     created = now()
-    conn.executemany(
-        "INSERT INTO task (session_id, title, position, source, created_at)"
-        " VALUES (?, ?, ?, 'gate', ?)",
-        [(session_id, title, pos, created) for pos, title in enumerate(titles, start=1)],
-    )
+    return [
+        conn.execute(
+            "INSERT INTO task (session_id, title, position, source, created_at)"
+            " VALUES (?, ?, ?, 'gate', ?)",
+            (session_id, title, pos, created),
+        ).lastrowid
+        for pos, title in enumerate(titles, start=start + 1)
+    ]
 
 
 def get_open_sessions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -403,7 +831,7 @@ def carry_unfinished(conn: sqlite3.Connection, session_id: int) -> int:
     """
     with conn:
         rows = conn.execute(
-            f"SELECT id, title FROM task WHERE session_id = ?"
+            f"SELECT id, title, notes, due_date FROM task WHERE session_id = ?"
             f" AND status IN {UNFINISHED} ORDER BY position",
             (session_id,),
         ).fetchall()
@@ -416,11 +844,21 @@ def carry_unfinished(conn: sqlite3.Connection, session_id: int) -> int:
             position += 1
             cur = conn.execute(
                 "INSERT OR IGNORE INTO task"
-                " (session_id, title, position, status, source, carried_from, created_at)"
-                " VALUES (NULL, ?, ?, 'planned', 'gate', ?, ?)",
-                (row["title"], position, row["id"], created),
+                " (session_id, title, position, status, source, carried_from,"
+                "  created_at, notes, due_date)"
+                " VALUES (NULL, ?, ?, 'planned', 'gate', ?, ?, ?, ?)",
+                (row["title"], position, row["id"], created, row["notes"],
+                 row["due_date"]),
             )
             carried += cur.rowcount
+            if cur.rowcount:
+                # The labels come along with the copy. Guarded on rowcount so a
+                # second carry stays the no-op task_carried_once makes it.
+                conn.execute(
+                    "INSERT OR IGNORE INTO task_label (task_id, label_id)"
+                    " SELECT ?, label_id FROM task_label WHERE task_id = ?",
+                    (cur.lastrowid, row["id"]),
+                )
     return carried
 
 

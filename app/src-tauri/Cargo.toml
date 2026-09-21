@@ -31,6 +31,37 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio = { version = "1", features = ["time", "sync", "rt-multi-thread", "process", "io-util"] }
 rand = "0.8"
 thiserror = "1"
+# Attached context files (2026-09-10). Four crates, which is a real departure
+# from the note above -- the meeting note taker managed on feature flags alone.
+# The reason is that every one of these replaces a hand-rolled parser reading
+# attacker-supplied bytes, and this is the one part of the app where the input
+# is chosen by whoever emailed you the file rather than by the user.
+#
+# Rust-side only, and none of them pull a C dependency or a system dev package:
+# that is the bar, and it is why the obvious choices are not always taken.
+#
+# zip: Office files are ZIP archives of XML. default-features = false is the
+#   point -- the defaults pull bzip2, which is C. "deflate" resolves to
+#   flate2/zlib-rs plus zopfli, both pure Rust, and deflate is the only method
+#   OOXML actually uses.
+zip = { version = "8", default-features = false, features = ["deflate"] }
+# quick-xml: reads the OOXML parts. A ~40-line tag stripper would have saved
+#   this dependency and been wrong on entity edge cases and nested runs, on
+#   input someone else chose.
+quick-xml = "0.42"
+# lopdf: page count and /Encrypt detection before a PDF is sent. A byte cap
+#   does not bound page count and page count is what costs tokens; an encrypted
+#   PDF fails at the far end with a message nobody can act on.
+#   default-features = false drops rayon and chrono, neither of which a
+#   validity check needs.
+lopdf = { version = "0.45", default-features = false }
+# imagesize: header-only dimensions, to refuse a pathological pixel count. The
+#   `image` crate would decode the whole thing to answer the same question.
+imagesize = "0.15"
+# tauri-plugin-dialog: the native file picker. Driven from Rust, like
+#   tauri-plugin-notification above, so it needs no capability entry and the
+#   chosen paths never cross into the webview at all.
+tauri-plugin-dialog = "2"
 
 [profile.release]
 strip = true

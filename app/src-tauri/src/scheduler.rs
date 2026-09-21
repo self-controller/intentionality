@@ -36,6 +36,11 @@ const CHECKPOINT_TICK_SECS: u64 = 60;
 /// the sleep. Well clear of ordinary scheduling slop at a 30s tick.
 const SUSPEND_JUMP_SECS: i64 = 60;
 
+/// While no session is held, look for one this often. The resume gate's new
+/// session should be on the board within seconds of coming back from its
+/// console, not a whole heartbeat later. One indexed read per tick.
+const ADOPT_POLL_SECS: u64 = 5;
+
 pub fn spawn(app: AppHandle) {
     tauri::async_runtime::spawn(heartbeat_loop(app.clone()));
     tauri::async_runtime::spawn(analysis_loop(app.clone()));
@@ -46,7 +51,11 @@ async fn heartbeat_loop(app: AppHandle) {
     let mut last_wall = Utc::now();
     let mut last_mono = Instant::now();
     loop {
-        tokio::time::sleep(Duration::from_secs(HEARTBEAT_SECS)).await;
+        let tick = match app.state::<AppState>().session_id() {
+            Some(_) => HEARTBEAT_SECS,
+            None => ADOPT_POLL_SECS,
+        };
+        tokio::time::sleep(Duration::from_secs(tick)).await;
         let (wall, mono) = (Utc::now(), Instant::now());
         let slept =
             (wall - last_wall).num_seconds() - mono.duration_since(last_mono).as_secs() as i64;
@@ -55,7 +64,7 @@ async fn heartbeat_loop(app: AppHandle) {
 
         let state = app.state::<AppState>();
         let Some(session_id) = state.session_id() else {
-            readopt(&app, &state);
+            sync_session(&app);
             continue;
         };
         if slept >= SUSPEND_JUMP_SECS {
@@ -63,33 +72,42 @@ async fn heartbeat_loop(app: AppHandle) {
             // moment you walked away — it is what the gate turns into
             // ended_at. Stamping it now would date the session's end to the
             // moment you came back, six hours late. Stay quiet and let the
-            // resume gate close the session at the real time.
+            // resume gate close the session at the real time — but do look:
+            // if it already has, hand over to its successor now.
+            sync_session(&app);
             continue;
         }
         let alive = {
             let conn = state.conn.lock().unwrap();
-            db::heartbeat(&conn, session_id).unwrap_or(false)
+            db::heartbeat(&conn, session_id)
         };
-        if !alive {
+        match alive {
+            Ok(true) => {}
             // Closed elsewhere (gate close / next gate / the resume gate's
-            // recovery sweep). Flip to no-session mode rather than
-            // resurrecting the row; the next tick looks for its successor.
-            state.clear_session();
-            let _ = app.emit("session:closed", session_id);
+            // recovery sweep). Never resurrect the row; hand over to its
+            // successor if it exists yet, else poll for it.
+            Ok(false) => sync_session(&app),
+            // A busy store is not evidence the session ended. Dropping it here
+            // used to strand the app in no-session mode for good, because
+            // mid-flight adoption only takes sessions newer than the process.
+            Err(err) => eprintln!("heartbeat failed, keeping session {session_id}: {err}"),
         }
     }
 }
 
-/// Look for a session that started after this app did — what the resume gate
-/// leaves behind on its spare VT. Adoption used to happen once, at startup, so
-/// a session begun while the app was running stayed invisible to it.
-fn readopt(app: &AppHandle, state: &AppState) {
-    let adopted = {
-        let conn = state.conn.lock().unwrap();
-        crate::adopt_session_after(&conn, state.app_started_at())
-    };
-    if let Some(id) = adopted {
-        state.set_session(id);
+/// Reconcile the held session with the store and tell the frontend — after
+/// the swap, so every listener's refetch already sees the successor.
+pub fn sync_session(app: &AppHandle) {
+    let (closed, opened) = app.state::<AppState>().sync_session();
+    if closed.is_some() || opened.is_some() {
+        // To the journal, so "when did the app let go of one session and pick
+        // up the next?" is a grep, not a reconstruction from task timestamps.
+        eprintln!("intentionality: session {closed:?} -> {opened:?}");
+    }
+    if let Some(id) = closed {
+        let _ = app.emit("session:closed", id);
+    }
+    if let Some(id) = opened {
         let _ = app.emit("session:opened", id);
     }
 }

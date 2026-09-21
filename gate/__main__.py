@@ -1,46 +1,69 @@
+import os
 import sys
+from datetime import datetime
 
 from . import config, debrief, flow, handoff, resume, store
 from .ui import GateAborted
 
 
-def recover_open_sessions(conn) -> None:
-    """Close and resolve whatever the last session left behind.
+def select_ui() -> None:
+    """INTENTIONALITY_GATE_UI=gtk asks for the graphical front end. It is
+    only ever a request: no GTK, no display, no compositor -- the terminal
+    answers instead, with one line on stderr saying why. A GUI that could
+    fail closed would be a GUI that could lock the login path."""
+    if os.environ.get("INTENTIONALITY_GATE_UI") != "gtk":
+        return
+    try:
+        from . import gui
 
+        gui.install()
+    except Exception as exc:  # ImportError, ValueError from gi, RuntimeError
+        print(f"gate: no graphical front end ({exc}); using the terminal.", file=sys.stderr)
+
+
+def recover_open_sessions(conn) -> list[str]:
+    """Close whatever the last session left behind and carry its unfinished
+    tasks into the backlog. Returns what it printed, for the welcome screen.
+
+    It asks nothing: the carried tasks are the first thing the welcome screen
+    shows, with Done and Delete on each, so resolving them happens there.
     Shared by every entry point that opens a new session, so the login gate
     and the resume gate can never drift apart on how a session is salvaged.
     """
+    notes = []
     for row in store.get_open_sessions(conn):
         store.mark_recovered(conn, row["id"])
-        ended = store.get_session(conn, row["id"])["ended_at"]
-        if ended:
-            print(f"Session {row['id']} ended around {ended} (from heartbeat).")
-        else:
-            print(f"Session {row['id']} was never closed — no heartbeat, end time unknown.")
-        # Ctrl-C must not escape this loop. mark_recovered has already run,
-        # so this session will never be offered again — an abort that skipped
-        # the carry would strand its tasks for good.
+        # mark_recovered has run, so this session will never be offered
+        # again: nothing between here and the carry may skip it.
         try:
-            if ui_yes("Resolve its tasks now? [y/n] > "):
-                debrief.resolve_tasks(conn, row["id"])
-        except GateAborted:
-            print("\nDebrief skipped.")
+            ended = store.get_session(conn, row["id"])["ended_at"]
+            if ended:
+                notes.append(f"Session {row['id']} ended around {local_time(ended)}.")
+            else:
+                notes.append(
+                    f"Session {row['id']} was never closed — no heartbeat, end time unknown."
+                )
+            print(notes[-1])
         finally:
-            # Carry AFTER the debrief: what the user just resolved must not
-            # reappear in the backlog.
             carried = store.carry_unfinished(conn, row["id"])
-            if carried:
-                print(f"{carried} unfinished task(s) moved to the backlog.")
+        if carried:
+            tasks = "task" if carried == 1 else "tasks"
+            notes.append(f"{carried} unfinished {tasks} carried over.")
+            print(notes[-1])
+    return notes
+
+
+def local_time(stamp: str) -> str:
+    """'7:37 PM, Sep 16' for a stored UTC stamp."""
+    when = datetime.fromisoformat(stamp).astimezone()
+    return f"{when.hour % 12 or 12}:{when:%M %p}, {when:%b} {when.day}"
 
 
 def gate(conn) -> int:
     try:
-        recover_open_sessions(conn)
-        session_id = flow.run(conn)
+        session_id = flow.run(conn, recover_open_sessions(conn))
     except GateAborted:
         print("\nNothing saved.")
-        return 0
-    if session_id is None:
         return 0
 
     if not config.DESKTOP_CMD:
@@ -65,14 +88,35 @@ def resume_cmd(conn) -> int:
     console exists for the length of the conversation and no longer.
     """
     try:
-        recover_open_sessions(conn)
-        session_id = flow.run(conn)
+        flow.run(conn, recover_open_sessions(conn))
     except GateAborted:
         print("\nNothing saved — no session is open.")
         return 0
-    if session_id is None:
-        print("No session started.")
     print("\nBack to your desktop.")
+    return 0
+
+
+def handoff_cmd(conn) -> int:
+    """The second half of `gate`, for a launcher that ran the first half
+    under a compositor.
+
+    A kiosk compositor holds the GPU for as long as its client lives, so the
+    desktop cannot be that client's child the way gate() makes it: the
+    conversation runs under cage, cage exits, and then this launches the
+    desktop for whatever the conversation committed. "Whatever" is exact:
+    the recovery sweep just closed every other open session, so an open one
+    now is the one just stated, and none means the gate was interrupted.
+    """
+    row = store.latest_open_session(conn)
+    if row is None:
+        print("No open session — not starting the desktop.")
+        return 0
+    if not config.DESKTOP_CMD:
+        print("No desktop command configured — run `gate close` to end the session.")
+        return 0
+    if handoff.launch_and_wait(row["id"]) is None:
+        return 1
+    _close_debrief_carry(conn, row["id"])
     return 0
 
 
@@ -113,29 +157,28 @@ def _close_debrief_carry(conn, session_id: int) -> None:
             print(f"{carried} unfinished task(s) moved to the backlog.")
 
 
-def ui_yes(prompt: str) -> bool:
-    from . import ui
-
-    return ui.confirm_choice(prompt, "yn") == "y"
-
-
 def main(argv: list[str]) -> int:
     conn = store.connect()
     store.init(conn)
-    if argv[1:] == ["close"]:
-        return close_cmd(conn)
     if argv[1:] == ["migrate"]:
         return migrate_cmd(conn)
-    if argv[1:] == ["resume"]:
-        return resume_cmd(conn)
     if argv[1:] == ["resume-needed"]:
         return resume_needed_cmd(conn)
-    if argv[1:]:
+    if argv[1:] == ["handoff"]:
+        # Runs after the compositor has gone: a GUI here has nowhere to draw.
+        return handoff_cmd(conn)
+    if argv[1:] and argv[1:] not in (["close"], ["resume"]):
         print(
-            f"usage: {argv[0]} [close | migrate | resume | resume-needed]",
+            f"usage: {argv[0]} [close | migrate | resume | resume-needed | handoff]",
             file=sys.stderr,
         )
         return 2
+    # The conversational entry points, and only those, may open a window.
+    select_ui()
+    if argv[1:] == ["close"]:
+        return close_cmd(conn)
+    if argv[1:] == ["resume"]:
+        return resume_cmd(conn)
     return gate(conn)
 
 

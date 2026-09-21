@@ -15,6 +15,38 @@ set -x INTENTIONALITY_DESKTOP_CMD ""
 # and must never fire inside a running gate.
 set -x INTENTIONALITY_GATE 1
 
-# System python3, like the login path: a broken .venv must never wedge a VT.
+# System python by path, like the login path: a broken .venv must never wedge
+# a VT, and the graphical front end's PyGObject lives only there.
+set -l py /usr/bin/python3
+
+# No -s, as in gate-login: Ctrl+Alt+F1 does not leave a half-answered gate.
+set -l cage_opts
+
 cd $repo
-and python3 -m gate resume
+or exit
+
+# Graphical when possible. XDG_RUNTIME_DIR is here only when the unit's
+# PAMName= gave this run a logind session, which is also what lets cage open
+# the GPU — so its absence means "text gate", not "try anyway". A non-zero
+# exit from cage (could not start, or the gate failed) falls through to the
+# text gate; the recovery sweep is idempotent, so a half-run costs nothing.
+if command -q cage; and set -q XDG_RUNTIME_DIR
+    # WebKit's helpers reach for things a bare console does not have. An
+    # accessibility bus and gvfs are both optional and both absent here, so
+    # say so rather than let them time out.
+    set -x GTK_A11Y none
+    set -x GIO_USE_VFS local
+    # The escape hatch for a first run on real hardware: cage on tty1 drives
+    # KMS directly, and WebKit's DMA-BUF path between its GPU and web
+    # processes is the likeliest thing to come up black there. Set
+    # INTENTIONALITY_GATE_SOFTWARE=1 to take the slow, certain route.
+    if set -q INTENTIONALITY_GATE_SOFTWARE
+        set -x WEBKIT_DISABLE_DMABUF_RENDERER 1
+        set -x LIBGL_ALWAYS_SOFTWARE 1
+    end
+    INTENTIONALITY_GATE_UI=gtk cage $cage_opts -- $py -m gate resume
+    and exit
+    echo "gate: graphical gate did not complete; running the text gate." >&2
+end
+
+exec $py -m gate resume

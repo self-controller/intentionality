@@ -29,7 +29,7 @@ pub struct BuildInfo {
 /// Where the sources live, embedded at compile time. If this path is gone the
 /// staleness check is skipped, not failed — a binary copied elsewhere should
 /// still run and still report its own build time.
-const REPO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+pub(crate) const REPO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
 /// Only what actually ends up in this binary. `gate/` is deliberately absent:
 /// editing store.py or schema.sql needs no app rebuild, and warning about it

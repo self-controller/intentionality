@@ -1,4 +1,4 @@
--- Schema v4, applied in full by store.init() on a fresh database only.
+-- Schema v8, applied in full by store.init() on a fresh database only.
 -- Existing databases are upgraded by the migrations in store.py; this file
 -- must always describe the same end state those migrations produce.
 -- journal_mode is persistent; set at creation.
@@ -9,7 +9,7 @@ CREATE TABLE meta (
     value TEXT NOT NULL
 );
 
-INSERT INTO meta (key, value) VALUES ('schema_version', '4');
+INSERT INTO meta (key, value) VALUES ('schema_version', '8');
 
 CREATE TABLE session (
     id                INTEGER PRIMARY KEY,
@@ -44,13 +44,37 @@ CREATE TABLE task (
     carried_from INTEGER REFERENCES task(id) ON DELETE SET NULL,
     created_at   TEXT NOT NULL,
     started_at   TEXT,                   -- first time the task entered 'doing'
-    resolved_at  TEXT
+    resolved_at  TEXT,
+    -- Plain text the user typed about this task. Never model output, and never
+    -- rendered as markdown.
+    notes        TEXT NOT NULL DEFAULT '',
+    -- The day the task is due, 'YYYY-MM-DD' on the user's own calendar: a
+    -- day, not an instant, so it never shifts with a timezone, and the fixed
+    -- width makes string order date order. NULL = no due date. Notes and
+    -- due_date are last because each arrived by ADD COLUMN, which appends.
+    due_date     TEXT
 );
 
 -- A task can be carried into the backlog at most once, whatever the close
 -- paths do: carry is INSERT OR IGNORE against this index.
 CREATE UNIQUE INDEX task_carried_once
     ON task (carried_from) WHERE carried_from IS NOT NULL;
+
+-- Free-text labels the user invents as they go, shared across tasks so the
+-- second card can reuse the first one's tag. A label nothing wears is a
+-- preset: it stays, offered to every card, until it is deleted by name from
+-- the app's labels panel (task_label rows go with it by cascade).
+CREATE TABLE label (
+    id    INTEGER PRIMARY KEY,
+    name  TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    color TEXT NOT NULL           -- assigned at creation, stable thereafter
+);
+
+CREATE TABLE task_label (
+    task_id  INTEGER NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+    label_id INTEGER NOT NULL REFERENCES label(id) ON DELETE CASCADE,
+    PRIMARY KEY (task_id, label_id)
+);
 
 CREATE TABLE analysis (
     id                  INTEGER PRIMARY KEY,
@@ -84,15 +108,35 @@ CREATE TABLE meeting (
     started_at   TEXT NOT NULL,      -- UTC, ISO-8601
     ended_at     TEXT,               -- NULL while recording, or if it ended badly
     title        TEXT NOT NULL DEFAULT '',  -- the model's, written at summarize time
-    summary      TEXT,               -- NULL until the model has run
-    key_points   TEXT,               -- JSON array of strings; NULL until then
-    -- 'recording' while the microphone is live, 'summarizing' between Stop and
-    -- the model's reply, 'done' once notes landed. 'failed' means the notes
-    -- never arrived -- but the transcript is still there and still worth reading,
-    -- so a failed meeting is displayed, not hidden.
+    -- What the user typed during the meeting. Never model output. It is the
+    -- glossary the cleaning pass reads names and jargon off, and it is also
+    -- where a todo nobody said out loud gets recorded.
+    notes        TEXT NOT NULL DEFAULT '',
+    -- The cleaning pass's output: the raw segments repaired against the notes
+    -- and files. NULL until it has run. meeting_segment stays the record of
+    -- what was actually heard and is never overwritten by it.
+    clean_transcript TEXT,
+    -- The write-up: one markdown document. The model drafts it at summarize
+    -- time -- an opening paragraph, then '## Key points' and, only when there
+    -- is anything, '## Additional information'; fenced code and $-delimited
+    -- LaTeX where the meeting had code or maths -- and the user may then edit
+    -- it end to end. NULL until the model has run. Through v5 this was a
+    -- paragraph beside a JSON key_points column and a details column; the v6
+    -- migration folded both in.
+    summary      TEXT,
+    -- 'recording' while the microphone is live, then two wrap-up states:
+    -- 'cleaning' while the transcript is being repaired and 'summarizing'
+    -- while the notes are written. 'done' once notes landed. 'failed' means
+    -- they never arrived -- but the transcript is still there and still worth
+    -- reading, so a failed meeting is displayed, not hidden.
     state        TEXT NOT NULL DEFAULT 'recording'
-                 CHECK (state IN ('recording', 'summarizing', 'done', 'failed')),
-    error        TEXT                -- why it failed, shown in the UI
+                 CHECK (state IN ('recording', 'cleaning', 'summarizing', 'done', 'failed')),
+    error        TEXT,               -- why it failed, shown in the UI
+    -- When the user last saved an edit to summary. NULL means the document is
+    -- as the model wrote it; finish_meeting clears it, which is what lets the
+    -- app ask before a re-run throws hand-written edits away. Last on purpose:
+    -- the v6 migration adds it with ALTER TABLE, which appends.
+    summary_edited_at TEXT
 );
 
 -- One transcribed chunk of audio. Rows land while the meeting is still running,
@@ -120,3 +164,25 @@ CREATE TABLE meeting_action (
     -- became a backlog task, so approving twice cannot double-insert.
     task_id    INTEGER REFERENCES task(id) ON DELETE SET NULL
 );
+
+-- A file the user attached as context for one meeting: a deck, a spec, a
+-- screenshot. The bytes live on disk under <store dir>/meetings/, never here --
+-- the store is shared with the Python gate and has to stay small enough to
+-- copy, back up and open in a shell.
+CREATE TABLE meeting_file (
+    id         INTEGER PRIMARY KEY,
+    meeting_id INTEGER NOT NULL REFERENCES meeting(id) ON DELETE CASCADE,
+    position   INTEGER NOT NULL,     -- display order within the meeting
+    name       TEXT NOT NULL,        -- the original basename, shown in the UI
+    -- The copy this app owns and is free to delete. An opaque filename, never
+    -- derived from `name`: the original is display metadata and nothing else.
+    path       TEXT NOT NULL,
+    kind       TEXT NOT NULL CHECK (kind IN ('text', 'pdf', 'image', 'office')),
+    bytes      INTEGER NOT NULL,
+    -- Text pulled out at attach time, for 'text' and 'office'. NULL for 'pdf'
+    -- and 'image': those go to the model natively from the copied file.
+    extracted  TEXT,
+    added_at   TEXT NOT NULL
+);
+
+CREATE INDEX meeting_file_meeting ON meeting_file (meeting_id, position);
