@@ -1,10 +1,11 @@
 """The graphical front end's seam, without a display.
 
-Four things are pinned: ui hands exactly the three questions to a backend
+Five things are pinned: ui hands exactly the three questions to a backend
 (and nothing else, so the terminal helpers built on them keep working), the
-prompt-to-button parsing that gives the buttons their words, that the window
-offers no way out but SIGINT, and `gate handoff`, the half of the login gate
-that runs after the compositor is gone.
+prompt-to-button parsing that gives the buttons their words, the environment
+the webview is started in, that the window offers no way out but SIGINT, and
+`gate handoff`, the half of the login gate that runs after the compositor is
+gone.
 GTK itself is not exercised here — there is no display in the test run. The
 welcome screen's list rules are ui.WelcomeList, tested in test_welcome.py.
 
@@ -91,6 +92,42 @@ class TestPromptParsing(unittest.TestCase):
         self.assertEqual(
             gui.question_text(f"{ui.MINUTES_QUESTION}\n> "), ui.MINUTES_QUESTION
         )
+
+
+class TestWebkitEnv(unittest.TestCase):
+    """The environment the webview is started in. It lives in gui.py rather
+    than in the launchers so a gate started any other way gets it too."""
+
+    def test_defaults_and_no_sandbox(self):
+        self.assertEqual(
+            gui.webkit_env({}),
+            {
+                "GTK_A11Y": "none",
+                "GIO_USE_VFS": "local",
+                "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS": "1",
+            },
+        )
+
+    def test_a_value_set_on_purpose_is_left_alone(self):
+        extra = gui.webkit_env({"GTK_A11Y": "atspi", "GIO_USE_VFS": "gvfs"})
+        self.assertNotIn("GTK_A11Y", extra)
+        self.assertNotIn("GIO_USE_VFS", extra)
+
+    def test_an_empty_value_counts_as_unset(self):
+        # A launcher that exports an empty string has said nothing.
+        self.assertEqual(gui.webkit_env({"GTK_A11Y": ""})["GTK_A11Y"], "none")
+
+    def test_sandbox_can_be_put_back_for_a_run(self):
+        # The diagnostic path: INTENTIONALITY_GATE_SANDBOX=1 restores the
+        # sandbox, which is how to make xdg-dbus-proxy fail out loud again.
+        self.assertNotIn(
+            "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS",
+            gui.webkit_env({"INTENTIONALITY_GATE_SANDBOX": "1"}),
+        )
+
+    def test_nothing_else_is_touched(self):
+        env = {"PATH": "/usr/bin", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}
+        self.assertEqual(gui.webkit_env(env).keys() & env.keys(), set())
 
 
 class TestNoWayOut(unittest.TestCase):

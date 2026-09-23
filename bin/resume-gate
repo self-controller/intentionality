@@ -22,6 +22,13 @@ set -l py /usr/bin/python3
 # No -s, as in gate-login: Ctrl+Alt+F1 does not leave a half-answered gate.
 set -l cage_opts
 
+# What cage and the graphical gate print goes here. The unit's stdout is
+# /dev/tty9, where two things go wrong: the console redraws that text the
+# moment cage gives the screen back, and nothing running under the unit is
+# ever seen again, because StandardError=tty keeps it out of the journal too.
+# A graphical gate that dies on VT9 has to leave a record somewhere.
+set -l log ~/.local/state/intentionality/gate.log
+
 cd $repo
 or exit
 
@@ -31,11 +38,10 @@ or exit
 # exit from cage (could not start, or the gate failed) falls through to the
 # text gate; the recovery sweep is idempotent, so a half-run costs nothing.
 if command -q cage; and set -q XDG_RUNTIME_DIR
-    # WebKit's helpers reach for things a bare console does not have. An
-    # accessibility bus and gvfs are both optional and both absent here, so
-    # say so rather than let them time out.
-    set -x GTK_A11Y none
-    set -x GIO_USE_VFS local
+    # The environment the gate itself needs -- no accessibility bus, no gvfs,
+    # no WebKit sandbox -- is set in gate/gui.py, so that a gate started any
+    # other way gets it too.
+    #
     # The escape hatch for a first run on real hardware: cage on tty1 drives
     # KMS directly, and WebKit's DMA-BUF path between its GPU and web
     # processes is the likeliest thing to come up black there. Set
@@ -44,9 +50,23 @@ if command -q cage; and set -q XDG_RUNTIME_DIR
         set -x WEBKIT_DISABLE_DMABUF_RENDERER 1
         set -x LIBGL_ALWAYS_SOFTWARE 1
     end
-    INTENTIONALITY_GATE_UI=gtk cage $cage_opts -- $py -m gate resume
+    # A blank console, as at login: whenever cage is not holding the screen,
+    # VT9 shows its own text buffer, and that buffer should hold nothing.
+    isatty stdout; and printf '\e[2J\e[3J\e[H\e[?25l'
+    mkdir -p (dirname $log)
+    echo "=== "(date -Is)" ===" >> $log
+    # Unbuffered, so that a gate which dies mid-sentence still leaves the
+    # sentence: python block-buffers a stdout that is a file, and the lines
+    # lost that way are exactly the ones worth reading.
+    INTENTIONALITY_GATE_UI=gtk PYTHONUNBUFFERED=1 cage $cage_opts -- $py -m gate resume >> $log 2>&1
     and exit
-    echo "gate: graphical gate did not complete; running the text gate." >&2
+    isatty stdout; and printf '\e[?25h'
+    # Said twice on purpose: to the console, where the text gate is about to
+    # appear, and to the journal, so that a silent fall-through is still
+    # greppable (journalctl -t intentionality-gate) long after VT9 is gone.
+    echo "gate: graphical gate did not complete (see $log); running the text gate." >&2
+    echo "graphical gate did not complete (see $log); running the text gate." \
+        | systemd-cat -t intentionality-gate -p warning
 end
 
 exec $py -m gate resume

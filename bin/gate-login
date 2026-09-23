@@ -46,11 +46,11 @@ if command -q cage; and set -q XDG_RUNTIME_DIR
     # while it starts, and for the seconds GNOME takes to draw after it
     # exits — the console shows its text buffer again, so that buffer must
     # hold nothing: not the login text, and not the gate's own output.
-    # WebKit's helpers reach for things a bare console does not have. An
-    # accessibility bus and gvfs are both optional and both absent here, so
-    # say so rather than let them time out.
-    set -x GTK_A11Y none
-    set -x GIO_USE_VFS local
+    #
+    # The environment the gate itself needs -- no accessibility bus, no gvfs,
+    # no WebKit sandbox -- is set in gate/gui.py, so that a gate started any
+    # other way gets it too.
+    #
     # The escape hatch for a first run on real hardware: cage on tty1 drives
     # KMS directly, and WebKit's DMA-BUF path between its GPU and web
     # processes is the likeliest thing to come up black there. Set
@@ -62,7 +62,9 @@ if command -q cage; and set -q XDG_RUNTIME_DIR
     isatty stdout; and printf '\e[2J\e[3J\e[H\e[?25l'
     mkdir -p (dirname $log)
     echo "=== "(date -Is)" ===" >> $log
-    if INTENTIONALITY_GATE_UI=gtk INTENTIONALITY_DESKTOP_CMD= cage $cage_opts -- $py -m gate >> $log 2>&1
+    # Unbuffered, so that a gate which dies mid-sentence still leaves the
+    # sentence: python block-buffers a stdout that is a file.
+    if INTENTIONALITY_GATE_UI=gtk INTENTIONALITY_DESKTOP_CMD= PYTHONUNBUFFERED=1 cage $cage_opts -- $py -m gate >> $log 2>&1
         $py -m gate handoff
         set -l code $status
         # Only reached when there was nothing to start (an interrupted gate)

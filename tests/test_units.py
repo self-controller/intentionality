@@ -1,4 +1,6 @@
-"""No systemd unit may execute a file under /home directly.
+"""The install surface: the systemd units and the two launchers.
+
+No systemd unit may execute a file under /home directly.
 
 SELinux is enforcing on this machine and labels everything in the repo
 user_home_t. systemd runs as init_t, which may not execute user_home_t files,
@@ -14,7 +16,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-UNITS = Path(__file__).resolve().parent.parent / "systemd"
+REPO = Path(__file__).resolve().parent.parent
+UNITS = REPO / "systemd"
+LAUNCHERS = [REPO / "bin" / "gate-login", REPO / "bin" / "resume-gate"]
+GATE_LOG = "~/.local/state/intentionality/gate.log"
 EXEC_LINE = re.compile(r"^(Exec\w+)=(.*)$")
 
 
@@ -57,6 +62,26 @@ class UnitExecCase(unittest.TestCase):
         # systemd never runs the auth stack for PAMName=; a line there would
         # be dead at best and, if it were ever run, a password prompt on VT9.
         self.assertFalse([l for l in lines if l[0] == "auth"], "no auth lines")
+
+    def test_launchers_keep_what_cage_prints(self):
+        """Both of them, and in the same place. The resume unit's stdout is
+        /dev/tty9: a graphical gate that fails there leaves no other trace,
+        which is exactly how five aborted wake gates went unnoticed."""
+        for launcher in LAUNCHERS:
+            with self.subTest(launcher=launcher.name):
+                text = launcher.read_text()
+                self.assertIn(f"set -l log {GATE_LOG}", text)
+                self.assertRegex(text, r"cage \$cage_opts .*>> \$log 2>&1")
+
+    def test_launchers_leave_the_gate_environment_to_gui_py(self):
+        """One contract, in gate/gui.py, so a gate started any other way --
+        by hand from another console, say -- is started the same way."""
+        owned = ("GTK_A11Y", "GIO_USE_VFS", "WEBKIT_DISABLE_SANDBOX")
+        for launcher in LAUNCHERS:
+            text = launcher.read_text()
+            for name in owned:
+                with self.subTest(launcher=launcher.name, var=name):
+                    self.assertNotRegex(text, rf"(?m)^\s*set -x {name}")
 
     def test_parser_sees_through_prefixes(self):
         # Without this, a "-/home/…" line would read as "-/home/…" and slip

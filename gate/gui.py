@@ -33,6 +33,7 @@ import os
 import re
 import signal
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from . import ui, webstate
@@ -65,6 +66,45 @@ BASE_URI = "gate://app/"
 # gate run instead.
 READY_SECONDS = 10.0
 
+# The environment the webview runs in. It lives here, not in the launchers, so
+# that every entry point gets the same one: the login gate under cage, the
+# resume gate under cage on VT9, and a bin/gate-login run by hand from another
+# console while GNOME is up.
+#
+# The sandbox switch is the one that matters. WebKit wraps its web process in
+# bubblewrap and launches xdg-dbus-proxy beside it, and when that proxy exits
+# non-zero WebKit calls g_error() -- abort(), which no `except` can catch, so
+# select_ui's fail-open cannot help and the whole gate dies. It did: every
+# resume gate from the v1.5 webview until this change aborted in
+# XDGDBusProxy::launch ("Failed to fully launch dbus-proxy: Child process
+# exited with code 1", read out of the coredumps) and fell through to the
+# terminal gate on VT9. It never happens at a login, under cage inside GNOME,
+# or under a systemd user service -- only in the resume unit's own context,
+# so the proxy's own reason is still unknown. What is certain is that the gate
+# needs nothing the sandbox is there to contain: one committed local bundle,
+# no network, no remote content, no second origin, and the only strings in it
+# that anyone typed go through React's escaping.
+#
+# INTENTIONALITY_GATE_SANDBOX=1 puts the sandbox back for a run. That is how
+# to catch the proxy's error message next time the machine wakes, now that
+# bin/resume-gate keeps a log.
+SANDBOX_OFF = "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS"
+KEEP_SANDBOX = "INTENTIONALITY_GATE_SANDBOX"
+# Optional services a bare console does not have. Saying so beats letting
+# WebKit's helpers reach for them and wait.
+DEFAULTS = {"GTK_A11Y": "none", "GIO_USE_VFS": "local"}
+
+
+def webkit_env(env: Mapping[str, str]) -> dict[str, str]:
+    """What to add to the inherited environment before the webview starts.
+
+    Pure, so the contract is testable without a display, and it never
+    overrides a value the caller set on purpose."""
+    extra = {key: value for key, value in DEFAULTS.items() if not env.get(key)}
+    if not env.get(KEEP_SANDBOX) and not env.get(SANDBOX_OFF):
+        extra[SANDBOX_OFF] = "1"
+    return extra
+
 
 def parse_choices(prompt: str, choices: str) -> list[tuple[str, str]]:
     """(key, label) per choice. Labels come from the prompt's "[k] label"
@@ -88,6 +128,9 @@ class GtkUI:
         if not WEBUI.exists():
             raise RuntimeError(f"{WEBUI} is missing -- run `npm run build:gate` in app/")
         html = WEBUI.read_text(encoding="utf-8")
+        # Before gi, and well before load_html(): WebKit reads these when it
+        # launches the network and web processes, not when it is imported.
+        os.environ.update(webkit_env(os.environ))
 
         import gi
 

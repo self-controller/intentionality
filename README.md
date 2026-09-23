@@ -247,6 +247,27 @@ whenever anything under `app/gate-ui/` or `app/src/ui/` changes, and commit the
 result. A graphical gate
 that could fail closed would be one that could lock the login path.
 
+**What it runs without, and why.** `gate/gui.py` sets three things in the
+environment before the webview starts — not the launchers, so a gate started
+any other way is started the same way. `GTK_A11Y=none` and `GIO_USE_VFS=local`
+say that the accessibility bus and gvfs are not there, instead of letting
+WebKit's helpers reach for them and wait. `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1`
+turns off WebKit's bubblewrap sandbox, and that one has a story: with the
+sandbox on, WebKit launches `xdg-dbus-proxy` beside the web process and calls
+`g_error()` if that proxy exits non-zero — `abort()`, which no `except` can
+catch, so the fail-open above is powerless against it. **Every resume gate
+between the webview landing and this change died that way** (`Failed to fully
+launch dbus-proxy: Child process exited with code 1`, read out of the
+coredumps) and fell through to the terminal gate on VT9, which is why the wake
+gate looked like the old one. It never happens at a login, under cage inside
+GNOME, or under a systemd user service — only in the resume unit's own
+context, so *why* the proxy exits 1 there is still unknown. The gate needs
+nothing the sandbox contains: one committed local bundle, no network, no
+remote content, no second origin, and the only strings in it that anyone typed
+go through React's escaping. Set `INTENTIONALITY_GATE_SANDBOX=1` to put the
+sandbox back for a run — with the log below, that is how to catch the proxy's
+own error message the next time the machine wakes.
+
 **Why the login launcher runs two commands.** Cage holds the GPU for as long as
 its client lives, so GNOME cannot be started from inside the gate the way the
 terminal version does it (as a child it waits on). `bin/gate-login` runs the
@@ -276,6 +297,13 @@ console, so both gaps are plain black. The config.fish block has to come before
 anything in that file that prints, such as `fastfetch`. Otherwise that output
 is on screen while cage starts.
 
+`bin/resume-gate` does the same, into the same log — and there it is the only
+record there is. The unit's `StandardOutput=`/`StandardError=` are `/dev/tty9`,
+so nothing a wake gate prints ever reaches the journal; five aborted gates went
+unnoticed for that reason. If the graphical gate does not complete, the
+fall-through line is logged with `systemd-cat` as well, so
+`journalctl -t intentionality-gate` shows it long after VT9 has gone.
+
 For the resume gate, the unit needs one more piece — see the next section.
 
 ### Waking from sleep
@@ -292,6 +320,13 @@ backlog, and the welcome screen shows them to you first. Like the login gate
 it has no quit: **you are not handed back to GNOME until the new session has
 at least one task.** (Before this screen, quitting a wake gate returned you to
 the desktop with no session open; that is gone.)
+
+It is also the same *screen*: `bin/resume-gate` runs the gate under cage on
+VT9 exactly as `bin/gate-login` does on tty1, so a wake shows the black
+welcome screen too. It did not for a while — see "What it runs without, and
+why" above for the abort that sent every wake gate to the terminal fallback,
+and read `~/.local/state/intentionality/gate.log` if one ever looks like the
+terminal gate again.
 
 Two units do it, both in `systemd/`:
 
@@ -721,6 +756,7 @@ older than it understands. Inspect it anytime with the `sqlite3` CLI.
 | `INTENTIONALITY_GATE_ZOOM` | Overrides the computed webview zoom outright, when the rule is wrong for a monitor | *(computed)* |
 | `INTENTIONALITY_GATE_SOFTWARE` | Draws the gate without GPU acceleration; pair with the launchers, which also set `WEBKIT_DISABLE_DMABUF_RENDERER` | *(off)* |
 | `INTENTIONALITY_GATE_INSPECT` | Enables the WebKit inspector on the gate, for design work | *(off)* |
+| `INTENTIONALITY_GATE_SANDBOX` | Puts WebKit's sandbox back for one run — a diagnostic, see "The graphical gate" | *(sandbox off)* |
 
 Two keys, two files, two providers: the Anthropic key at
 `~/.config/intentionality/api_key` (analyses, checkpoints and meeting notes)
