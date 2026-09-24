@@ -11,7 +11,7 @@ from collections.abc import Sequence
 
 from . import store, ui
 
-EMPTY = "Add at least one task to start."
+EMPTY = ui.EMPTY_HINT
 VANISHED = "Those tasks changed while you were here — add one to start."
 
 
@@ -21,11 +21,12 @@ def run(conn, notes: Sequence[str] = ()) -> int:
         # WELCOME. Read fresh each time round: the desktop app may be running
         # (a resume gate) and editing the same backlog.
         labels_of = store.labels_by_task(conn)
+        carried = store.backlog_carry_counts(conn)
         active = [
             ui.ActiveTask(
                 id=task["id"],
                 title=task["title"],
-                carry_count=store.carry_count(conn, task["id"]),
+                carry_count=carried.get(task["id"], 0),
                 can_finish=task["carried_from"] is not None,
                 details=ui.Details(
                     task["notes"], task["due_date"], tuple(labels_of.get(task["id"], ()))

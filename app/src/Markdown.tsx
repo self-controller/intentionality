@@ -1,4 +1,4 @@
-import type { ComponentProps } from "react";
+import { memo, type ComponentProps } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
@@ -14,7 +14,7 @@ import "katex/dist/katex.min.css";
 //
 // remark-math + rehype-katex: `$...$` and `$$...$$`, the syntax the prompt
 // asks the model for. rehype-highlight: fenced blocks get hljs-* classes,
-// coloured by styles.css rather than a shipped theme.
+// coloured by app.css rather than a shipped theme.
 const remarkPlugins = [remarkGfm, remarkMath];
 const rehypePlugins = [rehypeKatex, rehypeHighlight];
 
@@ -31,7 +31,9 @@ function Link({ href, children }: ComponentProps<"a">) {
 
 const components = { a: Link };
 
-export default function Markdown({ source }: { source: string }) {
+// Memoised: its one prop is a string, and a full parse + KaTeX + highlight
+// pass is too much to repeat whenever a parent re-renders for another reason.
+export default memo(function Markdown({ source }: { source: string }) {
   return (
     <div className="md">
       <ReactMarkdown
@@ -43,4 +45,4 @@ export default function Markdown({ source }: { source: string }) {
       </ReactMarkdown>
     </div>
   );
-}
+});

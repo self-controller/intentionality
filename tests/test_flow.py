@@ -79,7 +79,7 @@ class TestRun(unittest.TestCase):
         today = date.today()
         self.assertEqual(
             [(t.title, ui.row_detail(ui.Row(t.title, t), today), t.can_finish) for t in tasks],
-            [("write report", "carried 1× · due today", True), ("from a meeting", "", False)],
+            [("write report", "due today", True), ("from a meeting", "", False)],
         )
         self.assertEqual(labels, [])
         self.assertEqual(notes, ["Session 1 ended around 9:00 AM, Sep 17."])

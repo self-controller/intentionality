@@ -113,7 +113,7 @@ pub fn sync_session(app: &AppHandle) {
 }
 
 fn draw_next(mean_minutes: f64) -> DateTime<Utc> {
-    let factor: f64 = rand::thread_rng().gen_range(0.5..1.5);
+    let factor: f64 = rand::rng().random_range(0.5..1.5);
     let minutes = (mean_minutes * factor).clamp(MIN_INTERVAL_MIN, MAX_INTERVAL_MIN);
     Utc::now() + ChronoDuration::seconds((minutes * 60.0) as i64)
 }
@@ -159,12 +159,9 @@ async fn analysis_loop(app: AppHandle) {
 /// tab will say.
 fn notify_check(app: &AppHandle, id: i64) {
     let state = app.state::<AppState>();
-    let Some(session_id) = state.session_id() else { return };
     let row = {
         let conn = state.conn.lock().unwrap();
-        db::list_analyses(&conn, session_id)
-            .ok()
-            .and_then(|list| list.into_iter().find(|a| a.id == id))
+        db::get_analysis(&conn, id).ok().flatten()
     };
     if let Some(a) = row {
         let band = match a.alignment {

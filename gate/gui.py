@@ -30,7 +30,6 @@ GTK 4, WebKitGTK 6 and a display, and says which is missing.
 
 import json
 import os
-import re
 import signal
 import sys
 from collections.abc import Mapping
@@ -39,8 +38,6 @@ from pathlib import Path
 from . import ui, webstate
 from .ui import GateAborted
 
-# "[y] commit  [r] revise  [q] quit without saving > "  ->  y/commit, r/revise, ...
-_BRACKETED = re.compile(r"\[(\w)\]\s*([^\[>]*)")
 # The debrief names its keys once, in an earlier print, not in every
 # prompt. These are those keys' meanings.
 _KNOWN_LABELS = {
@@ -61,6 +58,12 @@ WEBUI = Path(__file__).resolve().parent / "webui" / "index.html"
 # opaque one. Verified on this machine: with it, inline module scripts run and
 # storage works; without it the origin is "null" and storage throws.
 BASE_URI = "gate://app/"
+
+# The page's background, for the window as well. The window shows through for
+# the first few hundred ms, until WebKit's web process hands over its first
+# frame; matching it to the page (theme.css --color-bg) means that gap is
+# invisible rather than a flash of whatever GTK falls back to.
+BACKGROUND = "#343a40"
 
 # How long the page gets to say hello before we give up and let the terminal
 # gate run instead.
@@ -107,17 +110,14 @@ def webkit_env(env: Mapping[str, str]) -> dict[str, str]:
 
 
 def parse_choices(prompt: str, choices: str) -> list[tuple[str, str]]:
-    """(key, label) per choice. Labels come from the prompt's "[k] label"
-    pairs when it has them, else from the known key sets, else the key."""
-    found = {k.lower(): label.strip() for k, label in _BRACKETED.findall(prompt)}
+    """(key, label) per choice: from the known key sets, else the key."""
     known = _KNOWN_LABELS.get(choices, {})
-    return [(k, found.get(k) or known.get(k) or k) for k in choices]
+    return [(k, known.get(k) or k) for k in choices]
 
 
 def question_text(prompt: str) -> str:
-    """The prompt without its key legend and trailing '> ', for a heading."""
-    text = _BRACKETED.sub("", prompt)
-    return text.replace(">", "").strip()
+    """The prompt without its trailing '> ', for a heading."""
+    return prompt.replace(">", "").strip()
 
 
 class GtkUI:
@@ -143,6 +143,13 @@ class GtkUI:
         # init_check() returns True with no display at all, so ask Gdk.
         if not Gtk.init_check() or Gdk.Display.get_default() is None:
             raise RuntimeError("no display to open a window on")
+        # Before the window exists, so its very first frame is black too.
+        Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", True)
+        css = Gtk.CssProvider()
+        css.load_from_string(f"window {{ background-color: {BACKGROUND}; }}")
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
 
         self.closed = False
         self.font_px = font_px
@@ -162,9 +169,9 @@ class GtkUI:
         ucm.connect("script-message-received::gate", self._on_message)
 
         self.web = WebKit.WebView(user_content_manager=ucm, hexpand=True, vexpand=True)
-        black = Gdk.RGBA()
-        black.parse("#000000")
-        self.web.set_background_color(black)
+        bg = Gdk.RGBA()
+        bg.parse(BACKGROUND)
+        self.web.set_background_color(bg)
         settings = self.web.get_settings()
         # The web process writes straight to the real fd, which bin/gate-login
         # has already pointed at gate.log -- a JS error is diagnosable.
@@ -332,28 +339,6 @@ class GtkUI:
 
     # ------------------------------------------------------ the questions
 
-    def ask(self, prompt: str) -> str:
-        answer: list = []
-
-        def handle(msg: dict) -> None:
-            if msg.get("op") == "answer":
-                answer.append(str(msg.get("text", "")))
-
-        self._handler = handle
-        self._push(
-            {
-                "screen": "ask",
-                "question": question_text(prompt),
-                "placeholder": "",
-                "log": "".join(self._log),
-            }
-        )
-        try:
-            self._wait(answer)
-        finally:
-            self._handler = None
-        return answer[0]
-
     def confirm_choice(self, prompt: str, choices: str) -> str:
         answer: list = []
         pairs = parse_choices(prompt, choices)
@@ -420,7 +405,7 @@ class GtkUI:
             context.iteration(True)
         if after is None:
             # Whatever answered is gone now; a stale row must not catch a key.
-            self._push({"screen": "ask", "question": "", "placeholder": "", "log": "".join(self._log)})
+            self._push({"screen": "blank", "log": "".join(self._log)})
         else:
             after()
 

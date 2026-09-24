@@ -1,19 +1,16 @@
 import { useState } from "react";
-import { Button } from "../src/ui/primitives";
+import { Button } from "./primitives";
+import { ISO_DAY, localDate } from "../format";
 
 /** A month grid rendered in flow, not in a popover.
  *
- *  WebKitGTK does ship a native date picker, but it opens as a popover and
- *  popover placement under cage is untested -- the GTK gate avoided it for the
- *  same reason. Drawing the grid ourselves removes the question. */
+ *  WebKitGTK does ship a native date picker, but it opens as a popover: under
+ *  cage its placement was untested, and in the app it turned out to be worse
+ *  than that -- the GTK popup takes an input grab the page never gets back, so
+ *  the only way out of the calendar was to alt-tab away and back. Drawing the
+ *  grid ourselves removes the question for both front ends. */
 
 const DAYS = ["M", "T", "W", "T", "F", "S", "S"];
-
-function iso(d: Date): string {
-  const m = `${d.getMonth() + 1}`.padStart(2, "0");
-  const day = `${d.getDate()}`.padStart(2, "0");
-  return `${d.getFullYear()}-${m}-${day}`;
-}
 
 export default function Calendar({
   value,
@@ -22,9 +19,9 @@ export default function Calendar({
   value: string;
   onPick: (day: string) => void;
 }) {
-  const start = /^\d{4}-\d{2}-\d{2}$/.test(value) ? new Date(`${value}T00:00:00`) : new Date();
+  const start = ISO_DAY.test(value) ? new Date(`${value}T00:00:00`) : new Date();
   const [cursor, setCursor] = useState(new Date(start.getFullYear(), start.getMonth(), 1));
-  const today = iso(new Date());
+  const today = localDate(new Date());
 
   const first = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
   const lead = (first.getDay() + 6) % 7; // Monday-first
@@ -32,7 +29,7 @@ export default function Calendar({
   const cells: (string | null)[] = [
     ...Array(lead).fill(null),
     ...Array.from({ length: count }, (_, i) =>
-      iso(new Date(cursor.getFullYear(), cursor.getMonth(), i + 1)),
+      localDate(new Date(cursor.getFullYear(), cursor.getMonth(), i + 1)),
     ),
   ];
 
@@ -68,7 +65,7 @@ export default function Calendar({
               className={
                 "rounded-[0.3em] py-[0.25em] text-[0.72em] transition-colors duration-100 " +
                 (day === value
-                  ? "bg-accent text-black"
+                  ? "bg-accent text-bg"
                   : day === today
                     ? "text-accent hover:bg-raised"
                     : "text-text hover:bg-raised")

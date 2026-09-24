@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import * as api from "./api";
 import type { Health } from "./types";
@@ -18,6 +18,9 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("board");
   const [unseen, setUnseen] = useState(0);
   const [checkpoint, setCheckpoint] = useState<Analysis | null>(null);
+  // Stable: Analyses' load effect depends on it, and a fresh function every
+  // App render would tear down its listener and refetch its whole list.
+  const onSeen = useCallback(() => setUnseen((n) => Math.max(0, n - 1)), []);
 
   useEffect(() => {
     api
@@ -82,7 +85,7 @@ export default function App() {
           </Tab>
           <Tab active={screen === "analyses"} onClick={() => setScreen("analyses")}>
             Analyses
-            {unseen > 0 && <span className="ml-1.5 rounded-md bg-accent px-1.5 text-xs text-black">{unseen}</span>}
+            {unseen > 0 && <span className="ml-1.5 rounded-md bg-accent px-1.5 text-xs text-bg">{unseen}</span>}
           </Tab>
           <Tab active={screen === "meetings"} onClick={() => setScreen("meetings")}>
             Meetings
@@ -111,7 +114,7 @@ export default function App() {
       {screen === "analyses" && (
         <Analyses
           hasSession={healthState.session != null}
-          onSeen={() => setUnseen((n) => Math.max(0, n - 1))}
+          onSeen={onSeen}
         />
       )}
       {screen === "meetings" && <Meetings />}

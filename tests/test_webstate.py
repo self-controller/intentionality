@@ -35,7 +35,7 @@ class TestState(unittest.TestCase):
     def test_row_detail_is_uis_string(self):
         t = task(1, "HW2", carry=6, details=ui.Details("", "2026-09-19", ("school",)))
         row = screen([t]).state()["rows"][0]
-        self.assertEqual(row["detail"], "carried 6× · due today · school")
+        self.assertEqual(row["detail"], "due today · school")
         self.assertEqual(row["index"], 0)
         self.assertFalse(row["typed"])
         self.assertTrue(row["can_finish"])

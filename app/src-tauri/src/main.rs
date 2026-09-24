@@ -11,6 +11,7 @@ mod commands;
 mod db;
 mod error;
 mod gain;
+mod http;
 mod level;
 mod meeting;
 mod models;
@@ -26,14 +27,19 @@ mod transcribe;
 use state::AppState;
 
 /// Seconds since epoch when this machine booted, from /proc/stat's btime.
+/// Read once: boot time cannot change while we run, and adoption asks for it
+/// on every no-session poll.
 fn boot_time() -> Option<i64> {
-    let stat = std::fs::read_to_string("/proc/stat").ok()?;
-    stat.lines()
-        .find(|l| l.starts_with("btime "))?
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
+    static BOOT: std::sync::OnceLock<Option<i64>> = std::sync::OnceLock::new();
+    *BOOT.get_or_init(|| {
+        let stat = std::fs::read_to_string("/proc/stat").ok()?;
+        stat.lines()
+            .find(|l| l.starts_with("btime "))?
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()
+    })
 }
 
 /// Which session is this desktop running in?
@@ -146,14 +152,13 @@ fn main() {
             commands::create_task,
             commands::update_task,
             commands::list_labels,
-            commands::create_label,
             commands::delete_label,
             commands::delete_task,
             commands::pull_task,
+            commands::unpull_task,
             commands::list_sessions,
             commands::get_session_tasks,
             commands::get_observed,
-            commands::list_analyses,
             commands::list_recent_analyses,
             commands::get_analysis_observed,
             commands::mark_analysis_seen,
@@ -170,6 +175,7 @@ fn main() {
             commands::get_meeting,
             commands::approve_actions,
             commands::set_meeting_notes,
+            commands::set_meeting_transcript,
             commands::set_meeting_summary,
             commands::rerun_meeting_notes,
             commands::attach_meeting_files,

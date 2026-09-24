@@ -40,18 +40,16 @@ export const updateTask = (
 ) => invoke<void>("update_task", { id, title, notes, dueDate, labels });
 // Every label there is, worn or not, with how many tasks wear each.
 export const listLabels = () => invoke<LabelSummary[]>("list_labels");
-// A preset. Making one that exists (in any case) is a no-op.
-export const createLabel = (name: string) => invoke<void>("create_label", { name });
 // Takes the label off every card that wears it.
 export const deleteLabel = (name: string) => invoke<void>("delete_label", { name });
 export const deleteTask = (id: number) => invoke<void>("delete_task", { id });
 export const pullTask = (id: number) => invoke<void>("pull_task", { id });
+// A card on the current board back to the end of the backlog, unstarted.
+export const unpullTask = (id: number) => invoke<void>("unpull_task", { id });
 export const listSessions = (limit: number) => invoke<Session[]>("list_sessions", { limit });
 export const getSessionTasks = (sessionId: number) =>
   invoke<Task[]>("get_session_tasks", { sessionId });
 export const getObserved = (sessionId: number) => invoke<Observed>("get_observed", { sessionId });
-export const listAnalyses = (sessionId: number) =>
-  invoke<Analysis[]>("list_analyses", { sessionId });
 // How far the Analyses tab's history reaches. One constant so the tab and the
 // unread badge always count the same rows.
 export const RECENT_ANALYSES = 50;
@@ -87,6 +85,10 @@ export const approveActions = (meetingId: number, actionIds: number[]) =>
   invoke<number>("approve_actions", { meetingId, actionIds });
 export const setMeetingNotes = (meetingId: number, notes: string) =>
   invoke<void>("set_meeting_notes", { meetingId, notes });
+// The whole transcript, replaced. Refused while recording; the box is
+// read-only then anyway.
+export const setMeetingTranscript = (meetingId: number, text: string) =>
+  invoke<void>("set_meeting_transcript", { meetingId, text });
 // The write-up. Refused while the notes are being written; the editor is
 // hidden then anyway.
 export const setMeetingSummary = (meetingId: number, summary: string) =>

@@ -34,8 +34,6 @@ def _input(prompt: str) -> str:
 
 
 def ask(prompt: str) -> str:
-    if backend is not None:
-        return backend.ask(prompt).strip()
     return _input(prompt).strip()
 
 
@@ -246,6 +244,7 @@ def parse_minutes(raw: str) -> int | None:
     return minutes
 
 
+EMPTY_HINT = "Add at least one task to start."
 BAD_DUE = "A due date is a day like 2026-09-18, or today or tomorrow."
 
 
@@ -298,12 +297,10 @@ def due_label(due_date: str | None, today: date) -> str:
 
 
 def row_detail(row: Row, today: date) -> str:
-    """'carried 2× · due today · school, urgent · notes' -- what the welcome
+    """'due today · school, urgent · notes' -- what the welcome
     screen says beside a title. Built from the row's current details, so an
     edit shows at once."""
     parts = []
-    if row.task and row.task.carry_count:
-        parts.append(f"carried {row.task.carry_count}×")
     due = due_label(row.details.due_date, today)
     if due:
         parts.append(due)

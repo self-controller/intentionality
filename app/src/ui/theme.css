@@ -1,27 +1,35 @@
 /* The one design system. Imported by both bundles: the Tauri app and the gate.
    Preflight comes first; katex.min.css is imported after it in Markdown.tsx,
    because KaTeX relies on unreset table and border behaviour. */
-@import "tailwindcss";
+/* source(none): no automatic scan. Each bundle names its own roots with
+   @source (app.css, gate.css); auto-detection from app/ also read the Rust
+   sources and lockfiles and emitted classes nothing uses. */
+@import "tailwindcss" source(none);
 
 @theme {
-  /* Black, because the gate is black and the app follows it. */
-  --color-bg: #000000;
-  --color-surface: #0b0b0e;
-  --color-raised: #141419;
-  --color-line: #232329;
-  --color-text: #f5f5f7;
-  --color-muted: #8b8b94;
-  /* The checkbox's tick colour, promoted to the product accent -- it is the
-     one thing the gate and the app visibly share. */
-  --color-accent: #3fa6c5;
+  /* The grey scale, dark end down. The page is a mid-dark grey (#343a40);
+     inputs and wells sink to #212529, cards and chips rise to #495057, and
+     the light end is kept for text and the primary action. */
+  --color-bg: #343a40;
+  --color-surface: #212529;
+  --color-raised: #495057;
+  --color-line: #495057;
+  --color-text: #f8f9fa;
+  --color-muted: #adb5bd;
+  --color-accent: #e9ecef;
 
-  /* The five Tokyo Night values that were hard-coded 36 times in styles.css,
-     named at last. Meaning, not hue: good/warn/bad are semantic. */
+  /* Meaning, not hue: good/warn/bad are semantic. Bright enough to read on
+     the dark greys. */
   --color-good: #9ece6a;
   --color-warn: #e0af68;
   --color-bad: #f7768e;
   --color-info: #2ac3de;
   --color-violet: #bb9af7;
+
+  /* Gentle shadows. soft lifts a card off the page; lift sits under the
+     light primary button. */
+  --shadow-soft: 0 1px 3px rgb(0 0 0 / 0.25), 0 4px 12px rgb(0 0 0 / 0.2);
+  --shadow-lift: 0 2px 6px rgb(0 0 0 / 0.35);
 }
 
 @layer base {
@@ -45,11 +53,10 @@
      state. Every dimension is a fraction of --cb, so the proportions hold at
      any size -- 58px in the gate, 26px in the app's lists.
 
-     Recoloured for black. Neumorphism needs the chip to be the same colour as
-     the page behind it; the light reference on black would read as a grey
-     square, not a pressed surface. The geometry, the cubic-beziers, the
-     0.3s/0.4s durations, the 0.15s stagger and the #3fa6c5 arms are the
-     reference's, unchanged.
+     Recoloured for the grey page: neumorphism needs the chip to be the page's
+     own colour, lit from the top left and shaded below.
+     The geometry, the cubic-beziers, the 0.3s/0.4s durations and the 0.15s
+     stagger are the reference's, unchanged; the arms take the accent.
      ------------------------------------------------------------------ */
   .nb-check {
     --cb: 58px;
@@ -82,12 +89,12 @@
     left: 0;
     height: var(--cb);
     width: var(--cb);
-    background: #14141a;
+    background: #343a40;
     border-radius: calc(var(--cb) * 12 / 58);
     transition: all 0.4s cubic-bezier(0.42, 0, 0.58, 1);
     box-shadow:
-      calc(var(--cb) * 4 / 58) calc(var(--cb) * 4 / 58) calc(var(--cb) * 8 / 58) rgba(0, 0, 0, 0.9),
-      calc(var(--cb) * -4 / 58) calc(var(--cb) * -4 / 58) calc(var(--cb) * 8 / 58) rgba(255, 255, 255, 0.085);
+      calc(var(--cb) * 4 / 58) calc(var(--cb) * 4 / 58) calc(var(--cb) * 8 / 58) rgba(0, 0, 0, 0.45),
+      calc(var(--cb) * -4 / 58) calc(var(--cb) * -4 / 58) calc(var(--cb) * 8 / 58) rgba(255, 255, 255, 0.07);
   }
 
   .nb-mark::before,
@@ -120,10 +127,10 @@
   }
 
   .nb-check input:checked + .nb-mark {
-    background: linear-gradient(145deg, #0a0a0d, #191920);
+    background: linear-gradient(145deg, #2f343a, #3a4047);
     box-shadow:
-      inset calc(var(--cb) * 2 / 58) calc(var(--cb) * 2 / 58) calc(var(--cb) * 4 / 58) rgba(0, 0, 0, 0.9),
-      inset calc(var(--cb) * -2 / 58) calc(var(--cb) * -2 / 58) calc(var(--cb) * 4 / 58) rgba(255, 255, 255, 0.085);
+      inset calc(var(--cb) * 2 / 58) calc(var(--cb) * 2 / 58) calc(var(--cb) * 4 / 58) rgba(0, 0, 0, 0.45),
+      inset calc(var(--cb) * -2 / 58) calc(var(--cb) * -2 / 58) calc(var(--cb) * 4 / 58) rgba(255, 255, 255, 0.07);
   }
 
   /* Checked -- short arm first */
@@ -159,15 +166,15 @@
 
   .nb-check:hover .nb-mark {
     box-shadow:
-      calc(var(--cb) * 5 / 58) calc(var(--cb) * 5 / 58) calc(var(--cb) * 10 / 58) rgba(0, 0, 0, 0.95),
-      calc(var(--cb) * -5 / 58) calc(var(--cb) * -5 / 58) calc(var(--cb) * 10 / 58) rgba(255, 255, 255, 0.11);
+      calc(var(--cb) * 5 / 58) calc(var(--cb) * 5 / 58) calc(var(--cb) * 10 / 58) rgba(0, 0, 0, 0.55),
+      calc(var(--cb) * -5 / 58) calc(var(--cb) * -5 / 58) calc(var(--cb) * 10 / 58) rgba(255, 255, 255, 0.07);
     transform: scale(1.05);
   }
 
   .nb-check input:active + .nb-mark {
     box-shadow:
-      inset calc(var(--cb) * 2 / 58) calc(var(--cb) * 2 / 58) calc(var(--cb) * 4 / 58) rgba(0, 0, 0, 0.9),
-      inset calc(var(--cb) * -2 / 58) calc(var(--cb) * -2 / 58) calc(var(--cb) * 4 / 58) rgba(255, 255, 255, 0.085);
+      inset calc(var(--cb) * 2 / 58) calc(var(--cb) * 2 / 58) calc(var(--cb) * 4 / 58) rgba(0, 0, 0, 0.45),
+      inset calc(var(--cb) * -2 / 58) calc(var(--cb) * -2 / 58) calc(var(--cb) * 4 / 58) rgba(255, 255, 255, 0.07);
     transform: scale(0.95);
   }
 

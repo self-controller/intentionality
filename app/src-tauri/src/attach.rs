@@ -112,8 +112,8 @@ impl Staged {
 
 fn opaque_name() -> String {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
-    (0..24).map(|_| char::from(b"0123456789abcdef"[rng.gen_range(0..16)])).collect()
+    let mut rng = rand::rng();
+    (0..24).map(|_| char::from(b"0123456789abcdef"[rng.random_range(0..16)])).collect()
 }
 
 /// Copy, validate and extract — in that order, and all of it off the SQLite

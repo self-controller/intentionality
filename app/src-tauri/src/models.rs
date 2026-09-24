@@ -3,7 +3,7 @@ use crate::recommendations::Recommendation;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize)]
 pub struct Session {
     pub id: i64,
     pub started_at: String,
@@ -69,7 +69,6 @@ pub struct Board {
     pub session: Option<Session>,
     pub tasks: Vec<Task>,   // current session's cards; empty in no-session mode
     pub backlog: Vec<Task>, // session_id NULL
-    pub unseen: i64,        // unread analyses for the badge
 }
 
 /// The entire post-drop board, written atomically. One command instead of
@@ -131,7 +130,7 @@ pub struct Health {
 /// failed still displays with its transcript rather than looking empty.
 ///
 /// This is the list row as well as the detail header, so it deliberately
-/// carries no large text: `notes`, `clean_transcript` and the write-up
+/// carries no large text: `notes`, the transcript and the write-up
 /// (`summary`) live on `MeetingDetail`, which is only ever fetched one
 /// meeting at a time.
 #[derive(Serialize)]
@@ -141,14 +140,15 @@ pub struct Meeting {
     pub started_at: String,
     pub ended_at: Option<String>,
     pub title: String,
-    // "recording" | "cleaning" | "summarizing" | "done" | "failed"
+    // "recording" | "summarizing" | "done" | "failed". ('cleaning' is only
+    // ever seen on a row a build with the old repair pass left behind.)
     pub state: String,
     pub error: Option<String>,
     pub segment_count: i64,
-    pub file_count: i64,
-    /// Whether the cleaning pass has stored a transcript. Lets the list show
-    /// the state without carrying the transcript itself.
-    pub has_clean: bool,
+    /// Whether notes have been written. 'done' without them means stopped
+    /// and waiting for Write notes; this lets the list say so without
+    /// carrying the write-up itself.
+    pub has_summary: bool,
 }
 
 /// The microphone is open on this meeting, and has been since `since`.
@@ -157,7 +157,7 @@ pub struct Meeting {
 /// after it ended has been recording for minutes, not a day, and the clock on
 /// the record bar should say so. It lives in Rust with the recording itself,
 /// so a tab switch that remounts the UI gets the same answer back.
-#[derive(Serialize, Clone)]
+#[derive(Serialize)]
 pub struct RecordingNow {
     pub meeting_id: i64,
     pub since: String,
@@ -199,8 +199,8 @@ pub struct MeetingFile {
 }
 
 /// One meeting with everything the detail pane needs, in a single command:
-/// the transcript arrives as segments so the UI can show which chunk failed,
-/// and `clean_transcript` sits beside them rather than replacing them.
+/// the transcript arrives as segments for the live view while recording, and
+/// stitched into one text for the editor once it has stopped.
 #[derive(Serialize)]
 pub struct MeetingDetail {
     pub meeting: Meeting,
@@ -215,7 +215,12 @@ pub struct MeetingDetail {
     /// model wrote it. The UI asks before a re-run overwrites an edited
     /// document, and this is how it knows to.
     pub summary_edited_at: Option<String>,
-    /// The cleaning pass's output. None until it has run.
-    pub clean_transcript: Option<String>,
+    /// `db::transcript`: what the editor shows and what the model is given.
+    pub transcript: String,
+    /// When the user last edited the transcript (or it grew on a resume);
+    /// None while it is as the current write-up saw it. Non-None means the
+    /// write-up was made from an older transcript, which is what the stale
+    /// marker says and what Re-run notes fixes.
+    pub transcript_edited_at: Option<String>,
     pub files: Vec<MeetingFile>,
 }

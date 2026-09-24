@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import { addDays, ISO_DAY, localDate } from "./format";
+import Calendar from "./ui/Calendar";
 import type { Label, LabelSummary } from "./types";
 
 // What the editor starts from: a Task has all of these, and a card that does
@@ -36,8 +37,8 @@ export default function TaskEditor({
   save,
   onClose,
   onSaved,
-  onDrop,
   onDelete,
+  onLabelsChanged,
 }: {
   initial: TaskFields;
   // Says what Save will do, for a card that doesn't exist yet.
@@ -47,21 +48,27 @@ export default function TaskEditor({
   save: (title: string, notes: string, dueDate: string | null, labels: string[]) => Promise<unknown>;
   onClose: () => void;
   onSaved: () => void;
-  // Only offered for a card on the board: a session row is history and gets
-  // dropped, never deleted. Backlog rows are the other way round.
-  onDrop: (() => void) | null;
+  // Only offered for a backlog row: a session card is history, and the way
+  // off the board is a drag back to the Backlog column.
   onDelete: (() => void) | null;
+  // A label was deleted outright, so other cards on screen changed too.
+  onLabelsChanged?: () => void;
 }) {
   const [title, setTitle] = useState(initial.title);
   const [notes, setNotes] = useState(initial.notes);
-  // "" = no due date, which is also what an empty date input reports.
+  // "" = no due date, which is also what an empty date field reports.
   const [due, setDue] = useState(initial.due_date ?? "");
+  // The month grid is open. Closed by default: most cards get Today, Tomorrow
+  // or nothing at all, and the grid is a third of the dialog's height.
+  const [cal, setCal] = useState(false);
   const [labels, setLabels] = useState<string[]>(initial.labels.map((l) => l.name));
   // Names typed here that no label has yet. They stay offered once unticked,
   // so a click can bring one back.
   const [typed, setTyped] = useState<string[]>([]);
   const [draft, setDraft] = useState("");
   const [known, setKnown] = useState<LabelSummary[]>([]);
+  // A label in use waiting on its inline confirm before it is deleted.
+  const [confirming, setConfirming] = useState<LabelSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const titleRef = useRef<HTMLInputElement>(null);
@@ -111,10 +118,27 @@ export default function TaskEditor({
     if (!has(name)) setLabels([...labels, existing ?? name]);
   };
 
+  // Deleting a label is not part of Save: it takes the label off every card at
+  // once, so one worn anywhere asks first.
+  const removeLabel = (name: string) => {
+    setError(null);
+    api
+      .deleteLabel(name)
+      .then(() => {
+        setConfirming(null);
+        setLabels((ls) => ls.filter((l) => !same(l, name)));
+        setTyped((ts) => ts.filter((t) => !same(t, name)));
+        api.listLabels().then(setKnown).catch(() => setKnown([]));
+        onLabelsChanged?.();
+      })
+      .catch((e) => setError(String(e)));
+  };
+
   const submit = () => {
     if (!title.trim()) return;
-    // The picker only ever produces this shape; anything else was typed, and
-    // is better refused here than in a round trip.
+    // The grid and the two buttons only ever produce this shape, so anything
+    // else was typed into the field, and is better refused here than in a
+    // round trip: db::check_due accepts the canonical form and nothing else.
     if (due && !ISO_DAY.test(due)) {
       setError("The due date has to be a date, like 2026-09-18.");
       return;
@@ -133,11 +157,11 @@ export default function TaskEditor({
 
   return (
     <div
-      className="fixed inset-0 z-20 flex items-center justify-center overflow-y-auto bg-black/80 p-6"
+      className="fixed inset-0 z-20 flex items-center justify-center overflow-y-auto bg-black/60 backdrop-blur-sm p-6"
       onMouseDown={onClose}
     >
       <section
-        className="max-h-full w-full max-w-[560px] overflow-y-auto rounded-[10px] border border-line bg-surface px-6 py-5"
+        className="max-h-full w-full max-w-[560px] overflow-y-auto rounded-[10px] border border-line bg-surface px-6 py-5 shadow-soft"
         role="dialog"
         aria-modal="true"
         aria-label={heading ?? "Edit task"}
@@ -158,13 +182,20 @@ export default function TaskEditor({
         <label className="mb-1.5 mt-4 block text-[13px] uppercase tracking-[0.06em] text-muted" htmlFor="task-due">
           Due
         </label>
-        {/* The picker covers any day; the buttons are the two that come up
-            most, one click each. */}
+        {/* Typed, not <input type="date">. WebKitGTK answers that one with a
+            native GTK popup, and under GNOME/Wayland the popup takes an input
+            grab the page never gets back: the calendar could only be escaped
+            by alt-tabbing out of the app and back. Esc looked broken for the
+            same reason -- the handler below is a window keydown listener, and
+            a native popup is nowhere near the page's event system. The grid
+            is ours and in flow, which is what the gate already does.
+            The buttons are the two days that come up most, one click each. */}
         <div className="flex flex-wrap items-center gap-2">
           <input
             id="task-due"
-            type="date"
+            className="w-[9rem]"
             value={due}
+            placeholder="YYYY-MM-DD"
             disabled={busy}
             onChange={(e) => setDue(e.target.value)}
           />
@@ -179,7 +210,24 @@ export default function TaskEditor({
               Clear
             </button>
           )}
+          <button
+            disabled={busy}
+            aria-pressed={cal}
+            className={cal ? "border-accent text-accent" : ""}
+            onClick={() => setCal(!cal)}
+          >
+            Calendar
+          </button>
         </div>
+        {cal && (
+          <Calendar
+            value={due}
+            onPick={(d) => {
+              setDue(d);
+              setCal(false);
+            }}
+          />
+        )}
 
         <label className="mb-1.5 mt-4 block text-[13px] uppercase tracking-[0.06em] text-muted" htmlFor="task-notes">
           Notes
@@ -204,12 +252,14 @@ export default function TaskEditor({
             {offered.map((name) => {
               const on = has(name);
               const color = colorOf(name);
+              const stored = known.find((l) => same(l.name, name));
               return (
-                <li key={name.toLowerCase()}>
+                <li key={name.toLowerCase()} className="flex max-w-full items-stretch">
                   <button
                     className={
-                      "flex max-w-full items-center gap-1.5 rounded-full border border-line " +
-                      "py-1 pl-1.5 pr-2.5 text-xs transition-colors duration-150 " +
+                      "flex min-w-0 items-center gap-1.5 border border-line py-1 pl-1.5 text-xs " +
+                      "transition-colors duration-150 " +
+                      (stored ? "rounded-l-sm border-r-0 pr-1.5 " : "rounded-sm pr-2.5 ") +
                       "disabled:cursor-default " +
                       // The tick is what says it is on; the fill only reinforces it.
                       (on ? "bg-raised text-text" : "bg-transparent text-muted hover:text-text")
@@ -222,7 +272,7 @@ export default function TaskEditor({
                     <span className="w-[1em] flex-none text-center text-accent">{on ? "✓" : ""}</span>
                     <span
                       className={
-                        "h-2 w-2 flex-none rounded-full" +
+                        "h-2 w-2 flex-none rounded-[2px]" +
                         // A name typed here that no label wears yet: no colour until saved.
                         (color ? "" : " border border-muted")
                       }
@@ -230,12 +280,38 @@ export default function TaskEditor({
                     />
                     <span className="overflow-hidden text-ellipsis whitespace-nowrap">{name}</span>
                   </button>
+                  {/* Only a stored label can be deleted; a name typed here and
+                      not saved yet just gets unticked. */}
+                  {stored && (
+                    <button
+                      className="rounded-r-sm border border-l-0 border-line px-1.5 text-xs text-muted transition-colors hover:text-bad disabled:cursor-default"
+                      title={`Delete ${stored.name} from every task`}
+                      disabled={busy}
+                      onClick={() => (stored.uses ? setConfirming(stored) : removeLabel(stored.name))}
+                    >
+                      ×
+                    </button>
+                  )}
                 </li>
               );
             })}
           </ul>
         ) : (
           <p className="text-xs text-muted">No labels yet. Type one below to make it.</p>
+        )}
+        {confirming && (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <span className="basis-full text-xs text-warn">
+              “{confirming.name}” is on {confirming.uses} task{confirming.uses === 1 ? "" : "s"}.
+              Deleting it takes it off {confirming.uses === 1 ? "that one" : "all of them"} now, even if you cancel here.
+            </span>
+            <button disabled={busy} onClick={() => removeLabel(confirming.name)}>
+              Delete label
+            </button>
+            <button disabled={busy} onClick={() => setConfirming(null)}>
+              Keep it
+            </button>
+          </div>
         )}
         <input
           id="task-label-input"
@@ -267,16 +343,6 @@ export default function TaskEditor({
             Cancel
           </button>
           <span className="flex-1" />
-          {onDrop && (
-            <button
-              className="rounded-md border border-line px-2.5 py-1 text-muted transition-colors hover:border-bad hover:text-bad"
-              disabled={busy}
-              title="Move to the dropped tray"
-              onClick={onDrop}
-            >
-              Drop
-            </button>
-          )}
           {onDelete && (
             <button
               className="rounded-md border border-line px-2.5 py-1 text-muted transition-colors hover:border-bad hover:text-bad"

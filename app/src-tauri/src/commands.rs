@@ -42,15 +42,11 @@ pub fn get_board(app: AppHandle, state: State<'_, AppState>) -> Result<Board> {
     scheduler::sync_session(&app);
     let conn = state.conn.lock().unwrap();
     db::check_schema(&conn)?;
-    let (session, tasks, unseen) = match state.session_id() {
-        Some(id) => (
-            db::get_session(&conn, id)?,
-            db::session_tasks(&conn, id)?,
-            db::unseen_analyses(&conn, id)?,
-        ),
-        None => (None, Vec::new(), 0),
+    let (session, tasks) = match state.session_id() {
+        Some(id) => (db::get_session(&conn, id)?, db::session_tasks(&conn, id)?),
+        None => (None, Vec::new()),
     };
-    Ok(Board { session, tasks, backlog: db::backlog(&conn)?, unseen })
+    Ok(Board { session, tasks, backlog: db::backlog(&conn)? })
 }
 
 #[tauri::command]
@@ -133,12 +129,6 @@ pub fn list_labels(state: State<'_, AppState>) -> Result<Vec<LabelSummary>> {
 }
 
 #[tauri::command]
-pub fn create_label(state: State<'_, AppState>, name: String) -> Result<()> {
-    let conn = state.conn.lock().unwrap();
-    db::create_label(&conn, &name)
-}
-
-#[tauri::command]
 pub fn delete_label(state: State<'_, AppState>, name: String) -> Result<()> {
     let conn = state.conn.lock().unwrap();
     db::delete_label(&conn, &name)
@@ -157,6 +147,15 @@ pub fn pull_task(state: State<'_, AppState>, id: i64) -> Result<()> {
         .ok_or_else(|| crate::error::AppError::Other("no open session".into()))?;
     let conn = state.conn.lock().unwrap();
     db::pull_task(&conn, session_id, id)
+}
+
+#[tauri::command]
+pub fn unpull_task(state: State<'_, AppState>, id: i64) -> Result<()> {
+    let session_id = state
+        .session_id()
+        .ok_or_else(|| crate::error::AppError::Other("no open session".into()))?;
+    let mut conn = state.conn.lock().unwrap();
+    db::unpull_task(&mut conn, session_id, id)
 }
 
 #[tauri::command]
@@ -180,12 +179,6 @@ pub async fn get_observed(state: State<'_, AppState>, session_id: i64) -> Result
         (session.started_at, session.ended_at.unwrap_or_else(db::now))
     };
     observed::observed(&start, &end).await
-}
-
-#[tauri::command]
-pub fn list_analyses(state: State<'_, AppState>, session_id: i64) -> Result<Vec<Analysis>> {
-    let conn = state.conn.lock().unwrap();
-    db::list_analyses(&conn, session_id)
 }
 
 /// The Analyses tab reads history across sessions, so it does not take a
@@ -278,8 +271,8 @@ pub async fn start_meeting(app: AppHandle, target: Option<String>) -> Result<Rec
 }
 
 /// Open the microphone again on a finished meeting; new chunks carry on after
-/// its last segment, and the next Stop rewrites its notes from the whole
-/// transcript. Async for the same reason as `start_meeting`.
+/// its last segment. The next Stop leaves the whole transcript ready to
+/// review; the old notes stay until Write notes replaces them. Async for the same reason as `start_meeting`.
 #[tauri::command]
 pub async fn resume_meeting(
     app: AppHandle,
@@ -289,9 +282,9 @@ pub async fn resume_meeting(
     meeting::resume(&app, meeting_id, target).await
 }
 
-/// Close the microphone. Returns as soon as it is shut, with the meeting moved
-/// to 'summarizing'; the tail chunk and the notes are finished in the
-/// background and land as a `meeting:done` event.
+/// Close the microphone. Returns as soon as it is shut; the tail chunk is
+/// drained in the background, and `meeting:done` fires once the meeting is
+/// stopped and its transcript ready to edit. No notes are written here.
 #[tauri::command]
 pub async fn stop_meeting(app: AppHandle) -> Result<i64> {
     meeting::stop(&app).await
@@ -323,7 +316,8 @@ pub fn get_meeting(state: State<'_, AppState>, meeting_id: i64) -> Result<Meetin
         notes: db::meeting_notes_text(&conn, meeting_id)?,
         summary,
         summary_edited_at,
-        clean_transcript: db::clean_transcript(&conn, meeting_id)?,
+        transcript: db::transcript(&conn, meeting_id)?,
+        transcript_edited_at: db::transcript_edited_at(&conn, meeting_id)?,
         files: db::meeting_files(&conn, meeting_id)?,
         meeting,
     })
@@ -352,6 +346,18 @@ pub fn set_meeting_notes(
 ) -> Result<()> {
     let conn = state.conn.lock().unwrap();
     db::set_meeting_notes(&conn, meeting_id, &notes)
+}
+
+/// The edited transcript, the whole of it. Refused while recording -- see
+/// db::set_meeting_transcript.
+#[tauri::command]
+pub fn set_meeting_transcript(
+    state: State<'_, AppState>,
+    meeting_id: i64,
+    text: String,
+) -> Result<()> {
+    let mut conn = state.conn.lock().unwrap();
+    db::set_meeting_transcript(&mut conn, meeting_id, &text)
 }
 
 /// The user's edit to the write-up. Unlike the scratchpad this is refused
@@ -497,9 +503,9 @@ pub fn remove_meeting_file(
     Ok(())
 }
 
-/// Repair and re-summarize a meeting that already finished one way or the
-/// other. Costs two calls and no audio — the transcript was stored as it was
-/// recorded, and re-reads whatever notes and files are attached now.
+/// Write (or re-write) the notes for a stopped meeting. One model call and no
+/// audio, from the transcript as the user has edited it and whatever notes
+/// and files are attached now.
 #[tauri::command]
 pub async fn rerun_meeting_notes(app: AppHandle, meeting_id: i64) -> Result<()> {
     meeting::rerun_notes(&app, meeting_id).await

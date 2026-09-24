@@ -8,7 +8,7 @@ pub struct AppState {
     pub conn: Mutex<Connection>,
     /// Held for the whole of one analysis. Two timers plus the manual button
     /// can now all reach the model; without this they can overlap, bill twice,
-    /// and race on last_analysis_end — both runs would judge the same window.
+    /// and race on where the latest analysis ended — both runs would judge the same window.
     /// A tokio mutex, not a std one: it is held across awaits.
     pub analysis_lock: tokio::sync::Mutex<()>,
     session_id: Mutex<Option<i64>>,

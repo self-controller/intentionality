@@ -9,11 +9,11 @@ use crate::models::{
 };
 use crate::recommendations;
 use chrono::{Duration, NaiveDate, Utc};
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 10;
 pub const MIGRATE_HINT: &str = "store schema is out of date — run: python3 -m gate migrate";
 
 pub fn now() -> String {
@@ -148,16 +148,19 @@ const LABEL_COLORS: [&str; 8] = [
 /// One query for the whole join, then distributed over the tasks in hand. The
 /// store is deliberately small enough to copy and open in a shell, so reading
 /// every label beats building a dynamic `IN (…)` per call.
-fn attach_labels(conn: &Connection, tasks: &mut [Task]) -> Result<()> {
+/// `session_id` is the list the tasks came from (None = the backlog), so only
+/// that list's labels are read, not every tag ever worn.
+fn attach_labels(conn: &Connection, session_id: Option<i64>, tasks: &mut [Task]) -> Result<()> {
     if tasks.is_empty() {
         return Ok(());
     }
     let mut stmt = conn.prepare(
         "SELECT tl.task_id, l.name, l.color
          FROM task_label tl JOIN label l ON l.id = tl.label_id
+         WHERE tl.task_id IN (SELECT id FROM task WHERE session_id IS ?1)
          ORDER BY l.name",
     )?;
-    let rows = stmt.query_map([], |r| {
+    let rows = stmt.query_map([session_id], |r| {
         Ok((
             r.get::<_, i64>("task_id")?,
             Label { name: r.get("name")?, color: r.get("color")? },
@@ -201,16 +204,6 @@ fn ensure_label(conn: &Connection, name: &str) -> Result<i64> {
     Ok(conn.query_row("SELECT id FROM label WHERE name = ?1", [name], |r| r.get(0))?)
 }
 
-/// A preset: a label made before anything wears it.
-pub fn create_label(conn: &Connection, name: &str) -> Result<()> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(AppError::Other("a label needs a name".into()));
-    }
-    ensure_label(conn, name)?;
-    Ok(())
-}
-
 /// Delete a label everywhere. Its task_label rows go with it by cascade, so
 /// every card that wore it lets it go.
 pub fn delete_label(conn: &Connection, name: &str) -> Result<()> {
@@ -226,7 +219,7 @@ pub fn session_tasks(conn: &Connection, session_id: i64) -> Result<Vec<Task>> {
         conn.prepare(&format!("{TASK_SELECT} WHERE t.session_id = ?1 ORDER BY t.position"))?;
     let rows = stmt.query_map([session_id], row_task)?;
     let mut tasks: Vec<Task> = rows.collect::<rusqlite::Result<_>>()?;
-    attach_labels(conn, &mut tasks)?;
+    attach_labels(conn, Some(session_id), &mut tasks)?;
     Ok(tasks)
 }
 
@@ -235,7 +228,7 @@ pub fn backlog(conn: &Connection) -> Result<Vec<Task>> {
         conn.prepare(&format!("{TASK_SELECT} WHERE t.session_id IS NULL ORDER BY t.position"))?;
     let rows = stmt.query_map([], row_task)?;
     let mut tasks: Vec<Task> = rows.collect::<rusqlite::Result<_>>()?;
-    attach_labels(conn, &mut tasks)?;
+    attach_labels(conn, None, &mut tasks)?;
     Ok(tasks)
 }
 
@@ -424,6 +417,31 @@ pub fn pull_task(conn: &Connection, session_id: i64, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Current session -> backlog: pull_task in reverse. The card goes back to
+/// being unstarted work at the end of the backlog; its notes, labels, due date
+/// and carry chain stay. A dropped card is history and stays where it is.
+pub fn unpull_task(conn: &mut Connection, session_id: i64, id: i64) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Inside the write lock, as in apply_board.
+    ensure_open(&tx, session_id)?;
+    let next: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(position), 0) + 1 FROM task WHERE session_id IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    let changed = tx.execute(
+        "UPDATE task SET session_id = NULL, status = 'planned', position = ?1,
+            started_at = NULL, resolved_at = NULL
+         WHERE id = ?2 AND session_id = ?3 AND status <> 'dropped'",
+        params![next, id, session_id],
+    )?;
+    if changed == 0 {
+        return Err(AppError::Other(format!("task {id} is not on this board")));
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /// Returns false once the session is closed — the loop's stop signal. Mirrors
 /// gate/store.py::heartbeat: a closed session can never be resurrected.
 pub fn heartbeat(conn: &Connection, session_id: i64) -> Result<bool> {
@@ -484,14 +502,29 @@ fn row_analysis(row: &rusqlite::Row) -> rusqlite::Result<Analysis> {
 
 /// Both listings share row_analysis, so both must supply session_statement.
 /// LEFT JOIN rather than INNER: an orphaned analysis should still be readable.
-const ANALYSIS_SELECT: &str = "SELECT a.*, s.statement AS session_statement
+// Every column row_analysis reads, and not observed_json: that blob is only
+// ever wanted for one row, through analysis_observed.
+const ANALYSIS_SELECT: &str = "SELECT a.id, a.session_id, a.created_at, a.window_start,
+        a.window_end, a.headline, a.alignment, a.body, a.seen_at, a.kind,
+        a.recommendation_id, a.recommendation_note, s.statement AS session_statement
      FROM analysis a LEFT JOIN session s ON s.id = a.session_id";
 
-pub fn list_analyses(conn: &Connection, session_id: i64) -> Result<Vec<Analysis>> {
-    let mut stmt =
-        conn.prepare(&format!("{ANALYSIS_SELECT} WHERE a.session_id = ?1 ORDER BY a.id DESC"))?;
-    let rows = stmt.query_map([session_id], row_analysis)?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+pub fn get_analysis(conn: &Connection, id: i64) -> Result<Option<Analysis>> {
+    Ok(conn
+        .query_row(&format!("{ANALYSIS_SELECT} WHERE a.id = ?1"), [id], row_analysis)
+        .optional()?)
+}
+
+/// The session's most recent analysis: where the next window starts, and
+/// what the model said last time.
+pub fn latest_analysis(conn: &Connection, session_id: i64) -> Result<Option<Analysis>> {
+    Ok(conn
+        .query_row(
+            &format!("{ANALYSIS_SELECT} WHERE a.session_id = ?1 ORDER BY a.id DESC LIMIT 1"),
+            [session_id],
+            row_analysis,
+        )
+        .optional()?)
 }
 
 /// The Analyses tab's history: newest first, across every session. Ordered by
@@ -514,14 +547,6 @@ pub fn analysis_observed(conn: &Connection, id: i64) -> Result<Observed> {
     Ok(json
         .and_then(|j| serde_json::from_str(&j).ok())
         .unwrap_or_default())
-}
-
-pub fn unseen_analyses(conn: &Connection, session_id: i64) -> Result<i64> {
-    Ok(conn.query_row(
-        "SELECT COUNT(*) FROM analysis WHERE session_id = ?1 AND seen_at IS NULL",
-        [session_id],
-        |r| r.get(0),
-    )?)
 }
 
 pub fn mark_analysis_seen(conn: &Connection, id: i64) -> Result<()> {
@@ -560,16 +585,6 @@ pub fn add_analysis(conn: &Connection, a: &NewAnalysis) -> Result<i64> {
         ],
     )?;
     Ok(conn.last_insert_rowid())
-}
-
-pub fn last_analysis_end(conn: &Connection, session_id: i64) -> Result<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT window_end FROM analysis WHERE session_id = ?1 ORDER BY id DESC LIMIT 1",
-            [session_id],
-            |r| r.get(0),
-        )
-        .ok())
 }
 
 pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
@@ -640,17 +655,15 @@ pub fn pending_checkpoint(conn: &Connection, session_id: i64) -> Result<Option<A
 
 // --- meetings ---------------------------------------------------------------
 
-// Deliberately no notes, no clean_transcript and no summary: this drives the
-// list as well as the detail header, and listing 50 meetings must not drag
-// two transcripts and a write-up each across the boundary. has_clean is the
+// Deliberately no notes, no transcript and no summary: this drives the list
+// as well as the detail header, and listing 50 meetings must not drag a
+// transcript and a write-up each across the boundary. has_summary is the
 // boolean the UI actually needs.
 const MEETING_SELECT: &str = "
     SELECT m.id, m.session_id, m.started_at, m.ended_at, m.title, m.state, m.error,
-        m.clean_transcript IS NOT NULL AS has_clean,
+        m.summary IS NOT NULL AS has_summary,
         (SELECT COUNT(*) FROM meeting_segment s WHERE s.meeting_id = m.id)
-            AS segment_count,
-        (SELECT COUNT(*) FROM meeting_file f WHERE f.meeting_id = m.id)
-            AS file_count
+            AS segment_count
     FROM meeting m";
 
 fn row_meeting(row: &rusqlite::Row) -> rusqlite::Result<Meeting> {
@@ -663,8 +676,7 @@ fn row_meeting(row: &rusqlite::Row) -> rusqlite::Result<Meeting> {
         state: row.get("state")?,
         error: row.get("error")?,
         segment_count: row.get("segment_count")?,
-        file_count: row.get("file_count")?,
-        has_clean: row.get("has_clean")?,
+        has_summary: row.get("has_summary")?,
     })
 }
 
@@ -708,9 +720,10 @@ pub fn meeting_segments(conn: &Connection, meeting_id: i64) -> Result<Vec<Meetin
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// The transcript as one block, which is what the model is given. Empty
-/// segments (a chunk whose transcription failed) drop out rather than becoming
-/// blank lines the model has to interpret.
+/// The transcript as one text: what the editor shows and what the model is
+/// given. A paragraph per segment, so the box and the prompt agree and a break
+/// the user typed survives. Empty segments (a chunk whose transcription
+/// failed) drop out rather than becoming blank paragraphs.
 pub fn transcript(conn: &Connection, meeting_id: i64) -> Result<String> {
     let segments = meeting_segments(conn, meeting_id)?;
     let parts: Vec<String> = segments
@@ -718,7 +731,7 @@ pub fn transcript(conn: &Connection, meeting_id: i64) -> Result<String> {
         .map(|s| s.text.trim().to_string())
         .filter(|t| !t.is_empty())
         .collect();
-    Ok(parts.join(" "))
+    Ok(parts.join("\n\n"))
 }
 
 pub fn add_segment(conn: &Connection, meeting_id: i64, seq: i64, text: &str) -> Result<i64> {
@@ -730,14 +743,14 @@ pub fn add_segment(conn: &Connection, meeting_id: i64, seq: i64, text: &str) -> 
     Ok(conn.last_insert_rowid())
 }
 
-/// Stop recording. Guarded on 'recording' so the startup orphan sweep and a
-/// real Stop cannot both close the same meeting.
+/// The microphone is shut: stamp when. Guarded on 'recording' so the startup
+/// orphan sweep and a real Stop cannot both close the same meeting.
 ///
-/// 'cleaning', not 'summarizing': the transcript is repaired before the notes
-/// are written, and that first pass is the long one.
-pub fn meeting_cleaning(conn: &Connection, id: i64) -> Result<bool> {
+/// The state stays 'recording' while the tail chunk drains; `meeting::stop`
+/// moves it to 'done' once that has landed. Nothing here writes notes.
+pub fn meeting_stopped(conn: &Connection, id: i64) -> Result<bool> {
     let changed = conn.execute(
-        "UPDATE meeting SET state = 'cleaning', ended_at = COALESCE(ended_at, ?1)
+        "UPDATE meeting SET ended_at = COALESCE(ended_at, ?1)
          WHERE id = ?2 AND state = 'recording'",
         params![now(), id],
     )?;
@@ -755,13 +768,13 @@ pub fn meeting_state(conn: &Connection, id: i64, from: &str, to: &str) -> Result
     Ok(changed > 0)
 }
 
-/// Re-run the notes for a meeting that already finished one way or the other.
+/// Write (or re-write) the notes for a meeting that has stopped.
 /// Guarded on the two terminal states so a re-run cannot touch a meeting that
 /// is recording or already mid-run, and clears the old error so the UI shows
 /// progress rather than the previous failure.
 pub fn meeting_rerun(conn: &Connection, id: i64) -> Result<bool> {
     let changed = conn.execute(
-        "UPDATE meeting SET state = 'cleaning', error = NULL
+        "UPDATE meeting SET state = 'summarizing', error = NULL
          WHERE id = ?1 AND state IN ('done', 'failed')",
         [id],
     )?;
@@ -771,21 +784,22 @@ pub fn meeting_rerun(conn: &Connection, id: i64) -> Result<bool> {
 /// Pick a finished meeting back up: the microphone is open on it again. Same
 /// guard as a re-run, for the same reason.
 ///
-/// Three columns are cleared, each for a reason of its own. `ended_at`,
-/// because `meeting_cleaning` only stamps an empty one, so the next Stop would
-/// otherwise keep the first Stop's time; `error`, because the sweep keeps an
-/// existing one, so a crash mid-resume would report the old failure instead
-/// of the recording it lost; and `clean_transcript`, because it no longer
-/// covers the meeting and is shown ahead of the raw segments that do.
+/// Two columns are cleared, each for a reason of its own. `ended_at`, because
+/// `meeting_stopped` only stamps an empty one, so the next Stop would
+/// otherwise keep the first Stop's time; and `error`, because the sweep keeps
+/// an existing one, so a crash mid-resume would report the old failure
+/// instead of the recording it lost.
 ///
-/// The write-up and the action items stay: the next Stop replaces them, and
-/// until it has they are still the best notes this meeting has.
+/// The write-up and the action items stay — the next Stop does not replace
+/// them, Write notes does — but `transcript_edited_at` is stamped, because the
+/// transcript is about to grow past what they were written from, and that
+/// mark is what says so on screen.
 pub fn meeting_resume(conn: &Connection, id: i64) -> Result<bool> {
     let changed = conn.execute(
         "UPDATE meeting SET state = 'recording', ended_at = NULL, error = NULL,
-             clean_transcript = NULL
-         WHERE id = ?1 AND state IN ('done', 'failed')",
-        [id],
+             transcript_edited_at = ?1
+         WHERE id = ?2 AND state IN ('done', 'failed')",
+        params![now(), id],
     )?;
     Ok(changed > 0)
 }
@@ -814,9 +828,10 @@ pub fn resume_point(conn: &Connection, meeting_id: i64) -> Result<(i64, String)>
     Ok((next, last))
 }
 
-/// Both wrap-up states, not just 'summarizing': a meeting can now fail during
-/// the cleaning pass, and a row left in either one is a Start button that
-/// never comes back. This guard and the sweep's below have to move together.
+/// 'cleaning' is no longer written — the repair pass is gone — but a row a
+/// build before that left there must still be failable, and a row stranded in
+/// any live state is a Start button that never comes back. This guard and the
+/// sweep's below have to move together.
 pub fn meeting_failed(conn: &Connection, id: i64, error: &str) -> Result<()> {
     conn.execute(
         "UPDATE meeting SET state = 'failed', error = ?1,
@@ -902,15 +917,80 @@ pub fn set_meeting_summary(conn: &Connection, id: i64, summary: &str) -> Result<
     Ok(())
 }
 
-pub fn clean_transcript(conn: &Connection, id: i64) -> Result<Option<String>> {
-    Ok(conn.query_row("SELECT clean_transcript FROM meeting WHERE id = ?1", [id], |r| r.get(0))?)
+/// When the transcript was last edited by hand (or grew on a resume); None =
+/// as transcribed, or the
+/// current write-up was made from it. write_notes reads this in the same
+/// locked snapshot it takes the transcript in, and hands it back to
+/// finish_meeting as the value the clear is allowed to overwrite.
+pub fn transcript_edited_at(conn: &Connection, id: i64) -> Result<Option<String>> {
+    Ok(conn.query_row("SELECT transcript_edited_at FROM meeting WHERE id = ?1", [id], |r| {
+        r.get(0)
+    })?)
 }
 
-pub fn set_clean_transcript(conn: &Connection, id: i64, text: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE meeting SET clean_transcript = ?1 WHERE id = ?2",
-        params![text, id],
+/// Replace the whole transcript with the user's edited text.
+///
+/// The editor is one box, so the stored form collapses to match: the first
+/// segment takes the text and the rest are deleted. A meeting with no segments
+/// at all (nothing was heard, or every chunk failed) gets one at seq 0, so
+/// text typed into an empty transcript still reaches the notes. A later resume
+/// carries on at MAX(seq)+1 exactly as before.
+///
+/// Refused while recording: capture is still inserting segments, and the UI
+/// keeps the box read-only until the tail chunk has landed. Allowed while the
+/// notes are being written — an edit then is caught by `finish_meeting`'s
+/// compare-and-swap rather than refused.
+///
+/// All in one transaction: a replaced transcript that did not mark the
+/// write-up stale would be the more dangerous half to land alone.
+pub fn set_meeting_transcript(conn: &mut Connection, meeting_id: i64, text: &str) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let state: Option<(String, String)> = tx
+        .query_row(
+            "SELECT state, started_at FROM meeting WHERE id = ?1",
+            [meeting_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((state, started_at)) = state else {
+        return Err(AppError::Other("no such meeting".into()));
+    };
+    if state == "recording" {
+        return Err(AppError::Other(
+            "that meeting is still recording — edit it once it has stopped".into(),
+        ));
+    }
+    let first: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM meeting_segment WHERE meeting_id = ?1 ORDER BY seq LIMIT 1",
+            [meeting_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match first {
+        Some(first) => {
+            tx.execute(
+                "UPDATE meeting_segment SET text = ?1 WHERE id = ?2",
+                params![text, first],
+            )?;
+            tx.execute(
+                "DELETE FROM meeting_segment WHERE meeting_id = ?1 AND id != ?2",
+                params![meeting_id, first],
+            )?;
+        }
+        None => {
+            tx.execute(
+                "INSERT INTO meeting_segment (meeting_id, seq, started_at, text)
+                 VALUES (?1, 0, ?2, ?3)",
+                params![meeting_id, started_at, text],
+            )?;
+        }
+    }
+    tx.execute(
+        "UPDATE meeting SET transcript_edited_at = ?1 WHERE id = ?2",
+        params![now(), meeting_id],
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1060,6 +1140,10 @@ pub struct MeetingNotes<'a> {
     /// The write-up, as markdown.
     pub summary: &'a str,
     pub action_items: &'a [String],
+    /// What `transcript_edited_at` read when this run snapshotted the
+    /// transcript. The mark is cleared only if it still reads the same, so an
+    /// edit made while the model was working keeps it — see below.
+    pub transcript_seen: Option<&'a str>,
 }
 
 /// The notes and their action items land together — a summary on screen whose
@@ -1069,6 +1153,13 @@ pub struct MeetingNotes<'a> {
 /// being re-summarized starts from 'done' or 'failed'. `summary_edited_at` is
 /// cleared on the same principle: whatever the user had changed, the document
 /// is the model's again -- the UI asked before letting a re-run get this far.
+///
+/// `transcript_edited_at` is the one mark that is NOT cleared unconditionally.
+/// The raw transcript stays editable while the notes are being written, and
+/// write_notes snapshots it minutes before this runs, so an edit landing in
+/// that window was never seen by the model that produced these notes. Clearing
+/// it blind would call the write-up current when it is already behind; the
+/// compare-and-swap leaves the mark standing in exactly that case.
 pub fn finish_meeting(conn: &mut Connection, id: i64, notes: &MeetingNotes) -> Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let changed = tx.execute(
@@ -1080,6 +1171,13 @@ pub fn finish_meeting(conn: &mut Connection, id: i64, notes: &MeetingNotes) -> R
     if changed == 0 {
         return Err(AppError::Other("no such meeting".into()));
     }
+    // IS, not =, so the ordinary case (nothing was edited, both sides NULL)
+    // matches. A stamp that moved since the snapshot makes this a no-op.
+    tx.execute(
+        "UPDATE meeting SET transcript_edited_at = NULL
+         WHERE id = ?1 AND transcript_edited_at IS ?2",
+        params![id, notes.transcript_seen],
+    )?;
     // Re-running the summary replaces the proposals, but never the ones already
     // accepted: those are real tasks now, and deleting the row would orphan them.
     tx.execute("DELETE FROM meeting_action WHERE meeting_id = ?1 AND task_id IS NULL", [id])?;
@@ -1212,6 +1310,25 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// Labels are read per list: the backlog (session_id IS NULL) must get
+    /// its own tags and not a session task's, and the other way round.
+    #[test]
+    fn each_list_reads_only_its_own_labels() {
+        let mut conn = store();
+        let (_, task_id) = session_with_task(&conn);
+        let later = add_task(&conn, None, "later").unwrap();
+        update_task(&mut conn, later, "later", "", None, &["someday".into()]).unwrap();
+        update_task(&mut conn, task_id, "write the thing", "", None, &["now".into()]).unwrap();
+
+        let backlog = backlog(&conn).unwrap();
+        assert_eq!(backlog.len(), 1);
+        assert_eq!(
+            backlog[0].labels.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
+            ["someday"]
+        );
+        assert_eq!(label_names(&conn, task_id), ["now"]);
+    }
+
     #[test]
     fn update_task_round_trips_title_notes_and_labels() {
         let mut conn = store();
@@ -1281,20 +1398,20 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_preset_is_tagged_by_name_and_keeps_its_colour() {
+    fn a_label_is_reused_by_name_and_keeps_its_colour() {
         let mut conn = store();
-        let (_, task_id) = session_with_task(&conn);
-        create_label(&conn, "  Reading  ").unwrap();
-        let preset = list_labels(&conn).unwrap().pop().unwrap();
-        assert_eq!((preset.name.as_str(), preset.uses), ("Reading", 0));
-        // Making it again, in another case, is the same label.
-        create_label(&conn, "reading").unwrap();
-        assert_eq!(list_labels(&conn).unwrap().len(), 1);
-        assert!(create_label(&conn, "   ").is_err());
-
-        update_task(&mut conn, task_id, "a", "", None, &["READING".into()]).unwrap();
-        let task = session_tasks(&conn, 1).unwrap().pop().unwrap();
-        assert_eq!(task.labels, [Label { name: "Reading".into(), color: preset.color }]);
+        let (session_id, task_id) = session_with_task(&conn);
+        let other = add_task(&conn, Some(session_id), "another").unwrap();
+        update_task(&mut conn, task_id, "a", "", None, &["  Reading  ".into()]).unwrap();
+        let made = list_labels(&conn).unwrap().pop().unwrap();
+        assert_eq!((made.name.as_str(), made.uses), ("Reading", 1));
+        // Tagging with it again, in another case, is the same label.
+        update_task(&mut conn, other, "b", "", None, &["READING".into()]).unwrap();
+        let labels = list_labels(&conn).unwrap();
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].uses, 2);
+        let task = session_tasks(&conn, session_id).unwrap().pop().unwrap();
+        assert_eq!(task.labels, [Label { name: "Reading".into(), color: made.color }]);
     }
 
     #[test]
@@ -1446,6 +1563,47 @@ pub(crate) mod tests {
         assert!(resolved.is_none());
     }
 
+    /// Dragging a card to the Backlog column: it lands last, unstarted, with
+    /// its details intact.
+    #[test]
+    fn unpull_sends_a_card_back_to_the_end_of_the_backlog() {
+        let mut conn = store();
+        let (session_id, task_id) = session_with_task(&conn);
+        let first = add_task(&conn, None, "already waiting").unwrap();
+        update_task(&mut conn, task_id, "write the thing", "a note", Some("2026-10-01"), &["school".into()]).unwrap();
+        let doing = Arrangement { todo: vec![], doing: vec![task_id], done: vec![], dropped: vec![] };
+        apply_board(&mut conn, session_id, &doing).unwrap();
+
+        unpull_task(&mut conn, session_id, task_id).unwrap();
+
+        assert!(session_tasks(&conn, session_id).unwrap().is_empty());
+        let back = backlog(&conn).unwrap();
+        assert_eq!(back.iter().map(|t| t.id).collect::<Vec<_>>(), vec![first, task_id]);
+        let t = &back[1];
+        assert_eq!(t.status, "planned");
+        assert_eq!(t.notes, "a note");
+        assert_eq!(t.due_date.as_deref(), Some("2026-10-01"));
+        assert_eq!(t.labels.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), vec!["school"]);
+        let started: Option<String> = conn
+            .query_row("SELECT started_at FROM task WHERE id = ?1", [task_id], |r| r.get(0))
+            .unwrap();
+        assert!(started.is_none());
+    }
+
+    /// Only this board's cards, and never a dropped one or a backlog row.
+    #[test]
+    fn unpull_refuses_what_is_not_on_this_board() {
+        let mut conn = store();
+        let (session_id, task_id) = session_with_task(&conn);
+        let backlog_id = add_task(&conn, None, "a backlog item").unwrap();
+        assert!(unpull_task(&mut conn, session_id, backlog_id).is_err());
+        assert!(unpull_task(&mut conn, session_id + 1, task_id).is_err());
+        let dropped = Arrangement { todo: vec![], doing: vec![], done: vec![], dropped: vec![task_id] };
+        apply_board(&mut conn, session_id, &dropped).unwrap();
+        assert!(unpull_task(&mut conn, session_id, task_id).is_err());
+        assert_eq!(session_tasks(&conn, session_id).unwrap().len(), 1);
+    }
+
     /// The board on screen can outlive its session: the resume gate closes it
     /// on another VT and the heartbeat only notices on its next tick. A drag in
     /// that window used to rewrite the closed session's history.
@@ -1467,6 +1625,7 @@ pub(crate) mod tests {
         ));
         assert!(matches!(add_task(&conn, Some(session_id), "late"), Err(AppError::SessionClosed(_))));
         assert!(matches!(pull_task(&conn, session_id, backlog_id), Err(AppError::SessionClosed(_))));
+        assert!(matches!(unpull_task(&mut conn, session_id, task_id), Err(AppError::SessionClosed(_))));
 
         let (status, started): (String, Option<String>) = conn
             .query_row("SELECT status, started_at FROM task WHERE id = ?1", [task_id], |r| {
@@ -1536,7 +1695,7 @@ pub(crate) mod tests {
         add_segment(&conn, id, 0, "First part.").unwrap();
         add_segment(&conn, id, 1, "").unwrap();
         add_segment(&conn, id, 2, "  Third part.  ").unwrap();
-        assert_eq!(transcript(&conn, id).unwrap(), "First part. Third part.");
+        assert_eq!(transcript(&conn, id).unwrap(), "First part.\n\nThird part.");
         assert_eq!(get_meeting(&conn, id).unwrap().unwrap().segment_count, 3);
     }
 
@@ -1548,6 +1707,7 @@ pub(crate) mod tests {
             title: "Migration plan",
             summary: "We agreed a date.",
             action_items: &["Send the doc".to_string(), "Book a slot".to_string()],
+            transcript_seen: None,
         }).unwrap();
 
         let actions = meeting_actions(&conn, id).unwrap();
@@ -1571,6 +1731,19 @@ pub(crate) mod tests {
 
     /// Re-running the summary replaces the proposals nobody accepted, but an
     /// action already approved is a real task now — deleting its row would
+    /// Stop, as `meeting::stop` does it: stamp the end, then move to 'done'
+    /// once the tail chunk has landed. No notes yet.
+    fn stop(conn: &Connection, id: i64) {
+        assert!(meeting_stopped(conn, id).unwrap());
+        assert!(meeting_state(conn, id, "recording", "done").unwrap());
+    }
+
+    /// Stop, then Write notes: the model call is in flight.
+    fn writing(conn: &Connection, id: i64) {
+        stop(conn, id);
+        assert!(meeting_rerun(conn, id).unwrap());
+    }
+
     #[test]
     fn the_scratchpad_round_trips_in_any_state() {
         let conn = store();
@@ -1583,7 +1756,7 @@ pub(crate) mod tests {
         );
         // Still writable once the meeting is over: a debounced autosave can
         // land after Stop, and rejecting it would lose what was typed last.
-        meeting_cleaning(&conn, id).unwrap();
+        writing(&conn, id);
         set_meeting_notes(&conn, id, "and a todo nobody said out loud").unwrap();
         assert_eq!(
             meeting_notes_text(&conn, id).unwrap(),
@@ -1592,36 +1765,40 @@ pub(crate) mod tests {
         assert!(set_meeting_notes(&conn, id + 99, "nowhere").is_err());
     }
 
-    /// The raw segments are the record of what was heard, and the repair pass
-    /// must never be able to overwrite them.
+    /// Stop writes no notes. The row stays 'recording' while the tail chunk
+    /// drains -- which is what keeps the transcript read-only for that window
+    /// -- then lands in 'done' with no summary, waiting for Write notes.
     #[test]
-    fn cleaning_stores_a_second_transcript_beside_the_raw_one() {
+    fn stopping_leaves_a_meeting_done_with_no_notes() {
         let conn = store();
         let id = start_meeting(&conn, None).unwrap();
-        add_segment(&conn, id, 0, "um so we agreed thursday").unwrap();
-        assert!(clean_transcript(&conn, id).unwrap().is_none());
-        assert!(!get_meeting(&conn, id).unwrap().unwrap().has_clean);
+        add_segment(&conn, id, 0, "we agreed thursday").unwrap();
+        assert!(meeting_stopped(&conn, id).unwrap());
+        let m = get_meeting(&conn, id).unwrap().unwrap();
+        assert_eq!(m.state, "recording");
+        assert!(m.ended_at.is_some(), "the end is when the microphone shut");
 
-        set_clean_transcript(&conn, id, "So we agreed Thursday.").unwrap();
-        assert_eq!(
-            clean_transcript(&conn, id).unwrap().unwrap(),
-            "So we agreed Thursday."
-        );
-        assert!(get_meeting(&conn, id).unwrap().unwrap().has_clean);
-        assert_eq!(transcript(&conn, id).unwrap(), "um so we agreed thursday");
+        assert!(meeting_state(&conn, id, "recording", "done").unwrap());
+        let m = get_meeting(&conn, id).unwrap().unwrap();
+        assert_eq!(m.state, "done");
+        assert!(!m.has_summary);
+        assert_eq!(meeting_summary(&conn, id).unwrap(), (None, None));
+        assert!(meeting_actions(&conn, id).unwrap().is_empty());
     }
 
     #[test]
-    fn a_meeting_moves_through_cleaning_then_summarizing() {
-        let conn = store();
+    fn writing_notes_moves_a_stopped_meeting_to_summarizing() {
+        let mut conn = store();
         let id = start_meeting(&conn, None).unwrap();
-        assert!(meeting_cleaning(&conn, id).unwrap());
-        assert_eq!(get_meeting(&conn, id).unwrap().unwrap().state, "cleaning");
-        assert!(meeting_state(&conn, id, "cleaning", "summarizing").unwrap());
+        writing(&conn, id);
         assert_eq!(get_meeting(&conn, id).unwrap().unwrap().state, "summarizing");
-        // Guarded: the same hop cannot be taken twice, so a task that outlived
-        // a sweep cannot drag the row back.
-        assert!(!meeting_state(&conn, id, "cleaning", "summarizing").unwrap());
+        finish_meeting(&mut conn, id, &MeetingNotes {
+            title: "t", summary: "s", action_items: &[],
+            transcript_seen: None,
+        }).unwrap();
+        let m = get_meeting(&conn, id).unwrap().unwrap();
+        assert_eq!(m.state, "done");
+        assert!(m.has_summary);
     }
 
     /// A re-run is only for a meeting that has finished. Anything else is
@@ -1632,17 +1809,21 @@ pub(crate) mod tests {
         let mut conn = store();
         let id = start_meeting(&conn, None).unwrap();
         assert!(!meeting_rerun(&conn, id).unwrap()); // recording
-        meeting_cleaning(&conn, id).unwrap();
+        meeting_stopped(&conn, id).unwrap();
+        assert!(!meeting_rerun(&conn, id).unwrap()); // stopped, tail still draining
+        meeting_state(&conn, id, "recording", "done").unwrap();
+        assert!(meeting_rerun(&conn, id).unwrap()); // stopped, no notes yet
         assert!(!meeting_rerun(&conn, id).unwrap()); // mid-run
 
         meeting_failed(&conn, id, "the model timed out").unwrap();
         assert!(meeting_rerun(&conn, id).unwrap());
         let m = get_meeting(&conn, id).unwrap().unwrap();
-        assert_eq!(m.state, "cleaning");
+        assert_eq!(m.state, "summarizing");
         assert!(m.error.is_none(), "the old failure must not still be on screen");
 
         finish_meeting(&mut conn, id, &MeetingNotes {
             title: "t", summary: "s", action_items: &[],
+            transcript_seen: None,
         }).unwrap();
         assert!(meeting_rerun(&conn, id).unwrap()); // done is re-runnable too
     }
@@ -1654,37 +1835,37 @@ pub(crate) mod tests {
         let mut conn = store();
         let id = start_meeting(&conn, None).unwrap();
         assert!(!meeting_resume(&conn, id).unwrap()); // recording
-        meeting_cleaning(&conn, id).unwrap();
-        assert!(!meeting_resume(&conn, id).unwrap()); // cleaning
-        meeting_state(&conn, id, "cleaning", "summarizing").unwrap();
+        writing(&conn, id);
         assert!(!meeting_resume(&conn, id).unwrap()); // summarizing
 
         finish_meeting(&mut conn, id, &MeetingNotes {
             title: "t", summary: "s", action_items: &[],
+            transcript_seen: None,
         }).unwrap();
         assert!(meeting_resume(&conn, id).unwrap());
         assert_eq!(get_meeting(&conn, id).unwrap().unwrap().state, "recording");
         // And a second resume of the same meeting is refused, not stacked.
         assert!(!meeting_resume(&conn, id).unwrap());
 
-        meeting_cleaning(&conn, id).unwrap();
+        meeting_stopped(&conn, id).unwrap();
         meeting_failed(&conn, id, "the model timed out").unwrap();
         assert!(meeting_resume(&conn, id).unwrap()); // failed is resumable too
     }
 
-    /// What goes stale is cleared; what is still the best notes the meeting
-    /// has stays until the next Stop replaces it.
+    /// The notes stay -- Write notes replaces them, not the next Stop -- but
+    /// they are marked stale, because the transcript is about to grow past
+    /// what they were written from.
     #[test]
-    fn a_resume_clears_what_went_stale_and_keeps_the_notes() {
+    fn a_resume_keeps_the_notes_and_marks_them_stale() {
         let mut conn = store();
         let id = start_meeting(&conn, None).unwrap();
         add_segment(&conn, id, 0, "we agreed thursday").unwrap();
-        meeting_cleaning(&conn, id).unwrap();
-        set_clean_transcript(&conn, id, "We agreed Thursday.").unwrap();
+        stop(&conn, id);
         finish_meeting(&mut conn, id, &MeetingNotes {
             title: "Planning",
             summary: "Thursday.",
             action_items: &["Send the doc".to_string()],
+            transcript_seen: None,
         }).unwrap();
         let action = meeting_actions(&conn, id).unwrap()[0].id;
         approve_actions(&mut conn, id, &[action]).unwrap();
@@ -1695,15 +1876,15 @@ pub(crate) mod tests {
         let m = get_meeting(&conn, id).unwrap().unwrap();
         assert!(m.ended_at.is_none(), "the next Stop has to be able to stamp its own end");
         assert!(m.error.is_none());
-        assert!(!m.has_clean);
-        assert!(clean_transcript(&conn, id).unwrap().is_none());
+        assert!(m.has_summary);
+        assert!(transcript_edited_at(&conn, id).unwrap().is_some());
         assert_eq!(m.title, "Planning");
         assert_eq!(meeting_summary(&conn, id).unwrap().0.as_deref(), Some("Thursday."));
         assert!(meeting_actions(&conn, id).unwrap()[0].task_id.is_some());
         assert_eq!(transcript(&conn, id).unwrap(), "we agreed thursday");
 
         // The next Stop stamps a fresh end rather than keeping the first one.
-        meeting_cleaning(&conn, id).unwrap();
+        meeting_stopped(&conn, id).unwrap();
         assert!(get_meeting(&conn, id).unwrap().unwrap().ended_at.is_some());
     }
 
@@ -1714,7 +1895,7 @@ pub(crate) mod tests {
         let conn = store();
         let id = start_meeting(&conn, None).unwrap();
         add_segment(&conn, id, 0, "first part").unwrap();
-        meeting_cleaning(&conn, id).unwrap();
+        meeting_stopped(&conn, id).unwrap();
         meeting_failed(&conn, id, "the model timed out").unwrap();
 
         assert!(meeting_resume(&conn, id).unwrap());
@@ -1747,17 +1928,21 @@ pub(crate) mod tests {
 
         let (next, _) = resume_point(&conn, id).unwrap();
         add_segment(&conn, id, next, "after the break").unwrap();
-        assert_eq!(transcript(&conn, id).unwrap(), "first part second part after the break");
+        assert_eq!(
+            transcript(&conn, id).unwrap(),
+            "first part\n\nsecond part\n\nafter the break"
+        );
     }
 
-    /// Both wrap-up states, not just the second. A row stranded in either one
-    /// is a Start button that never comes back.
+    /// 'cleaning' is no longer written, but a build with the repair pass may
+    /// have left a row there, and a stranded row is a Start button that never
+    /// comes back.
     #[test]
-    fn the_orphan_sweep_fails_a_meeting_stranded_while_cleaning() {
+    fn the_orphan_sweep_fails_a_row_an_older_build_left_cleaning() {
         let conn = store();
         let id = start_meeting(&conn, None).unwrap();
         add_segment(&conn, id, 0, "said something").unwrap();
-        meeting_cleaning(&conn, id).unwrap();
+        conn.execute("UPDATE meeting SET state = 'cleaning' WHERE id = ?1", [id]).unwrap();
 
         assert_eq!(sweep_orphan_meetings(&conn).unwrap(), 1);
         let m = get_meeting(&conn, id).unwrap().unwrap();
@@ -1777,7 +1962,7 @@ pub(crate) mod tests {
         assert_eq!(meeting_summary(&conn, id).unwrap(), (None, None));
         // Not while the notes are being written: finish_meeting would only
         // overwrite it moments later.
-        meeting_cleaning(&conn, id).unwrap();
+        writing(&conn, id);
         assert!(set_meeting_summary(&conn, id, "too early").is_err());
         assert_eq!(meeting_summary(&conn, id).unwrap(), (None, None));
 
@@ -1785,6 +1970,7 @@ pub(crate) mod tests {
             title: "Roadmap",
             summary: "We picked Q4.\n\n## Key points\n- Ship in Q4",
             action_items: &[],
+            transcript_seen: None,
         }).unwrap();
         let (doc, edited) = meeting_summary(&conn, id).unwrap();
         assert_eq!(doc.as_deref(), Some("We picked Q4.\n\n## Key points\n- Ship in Q4"));
@@ -1804,9 +1990,127 @@ pub(crate) mod tests {
         // The re-run's notes are the model's again.
         finish_meeting(&mut conn, id, &MeetingNotes {
             title: "Roadmap", summary: "Second pass.", action_items: &[],
+            transcript_seen: None,
         }).unwrap();
         assert_eq!(meeting_summary(&conn, id).unwrap(), (Some("Second pass.".into()), None));
         assert!(set_meeting_summary(&conn, id + 99, "nowhere").is_err());
+    }
+
+    /// The editor is one box, so the stored form collapses to one segment.
+    #[test]
+    fn the_edited_transcript_replaces_the_segments_with_one() {
+        let mut conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        add_segment(&conn, id, 0, "on a curt so far said").unwrap();
+        add_segment(&conn, id, 1, "").unwrap();
+        add_segment(&conn, id, 2, "thursday works").unwrap();
+        assert_eq!(transcript(&conn, id).unwrap(), "on a curt so far said\n\nthursday works");
+
+        // Not while capture is still inserting segments.
+        assert!(set_meeting_transcript(&mut conn, id, "too early").is_err());
+        assert!(transcript_edited_at(&conn, id).unwrap().is_none());
+        assert_eq!(meeting_segments(&conn, id).unwrap().len(), 3);
+
+        stop(&conn, id);
+        let edited = "Ana Kirtsova said\n\nThursday works.";
+        set_meeting_transcript(&mut conn, id, edited).unwrap();
+        let segs = meeting_segments(&conn, id).unwrap();
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].seq, 0);
+        assert_eq!(transcript(&conn, id).unwrap(), edited);
+        assert!(transcript_edited_at(&conn, id).unwrap().is_some());
+
+        // A resume carries on after it, with the edited text as context.
+        assert!(meeting_resume(&conn, id).unwrap());
+        let (next, last) = resume_point(&conn, id).unwrap();
+        assert_eq!((next, last.as_str()), (1, edited));
+        add_segment(&conn, id, next, "and one more thing").unwrap();
+        assert_eq!(
+            transcript(&conn, id).unwrap(),
+            format!("{edited}\n\nand one more thing")
+        );
+
+        assert!(set_meeting_transcript(&mut conn, id + 99, "nowhere").is_err());
+    }
+
+    /// Nothing was heard (or every chunk failed): what the user types still
+    /// needs somewhere to live, or it could never reach the notes.
+    #[test]
+    fn text_typed_into_an_empty_transcript_gets_a_segment() {
+        let mut conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        stop(&conn, id);
+        set_meeting_transcript(&mut conn, id, "typed from memory").unwrap();
+        let segs = meeting_segments(&conn, id).unwrap();
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].seq, 0);
+        assert_eq!(segs[0].started_at, get_meeting(&conn, id).unwrap().unwrap().started_at);
+        assert_eq!(transcript(&conn, id).unwrap(), "typed from memory");
+
+        // Editable while the notes are being written, unlike the write-up:
+        // finish_meeting's compare-and-swap catches it instead.
+        assert!(meeting_rerun(&conn, id).unwrap());
+        set_meeting_transcript(&mut conn, id, "fixed mid-run").unwrap();
+        assert_eq!(transcript(&conn, id).unwrap(), "fixed mid-run");
+    }
+
+    #[test]
+    fn notes_clear_the_transcript_mark_only_if_it_did_not_move() {
+        let mut conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        add_segment(&conn, id, 0, "as heard").unwrap();
+        stop(&conn, id);
+
+        // The ordinary case: nothing was edited, so both sides are NULL and
+        // the meeting finishes unmarked.
+        finish_meeting(&mut conn, id, &MeetingNotes {
+            title: "t", summary: "s", action_items: &[],
+            transcript_seen: None,
+        }).unwrap();
+        assert!(transcript_edited_at(&conn, id).unwrap().is_none());
+
+        // Edited, then a re-run that read that edit: the mark is cleared,
+        // because these notes were written from the corrected text.
+        set_meeting_transcript(&mut conn, id, "as corrected").unwrap();
+        let seen = transcript_edited_at(&conn, id).unwrap();
+        assert!(seen.is_some());
+        finish_meeting(&mut conn, id, &MeetingNotes {
+            title: "t", summary: "s", action_items: &[],
+            transcript_seen: seen.as_deref(),
+        }).unwrap();
+        assert!(transcript_edited_at(&conn, id).unwrap().is_none());
+
+        // Edited *while* the model was working: the run snapshotted the
+        // transcript before the fix, so its notes are already behind and the
+        // mark has to survive. Clearing blind here is the bug this guards.
+        let before = transcript_edited_at(&conn, id).unwrap();
+        set_meeting_transcript(&mut conn, id, "corrected again, mid-run").unwrap();
+        finish_meeting(&mut conn, id, &MeetingNotes {
+            title: "t", summary: "s", action_items: &[],
+            transcript_seen: before.as_deref(),
+        }).unwrap();
+        assert!(transcript_edited_at(&conn, id).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_meeting_can_start_while_another_is_still_wrapping_up() {
+        let conn = store();
+        let first = start_meeting(&conn, None).unwrap();
+        add_segment(&conn, first, 0, "the first meeting").unwrap();
+        writing(&conn, first);
+
+        // The microphone is shut the moment Stop returns, so nothing about a
+        // meeting whose notes are still being written may block the next one.
+        // The data layer has no guard against this and must not grow one:
+        // the only thing that ever refused it was the record bar's UI.
+        let second = start_meeting(&conn, None).unwrap();
+        assert_ne!(first, second);
+        add_segment(&conn, second, 0, "the second meeting").unwrap();
+
+        assert_eq!(get_meeting(&conn, first).unwrap().unwrap().state, "summarizing");
+        assert_eq!(get_meeting(&conn, second).unwrap().unwrap().state, "recording");
+        assert_eq!(transcript(&conn, first).unwrap(), "the first meeting");
+        assert_eq!(transcript(&conn, second).unwrap(), "the second meeting");
     }
 
     fn file<'a>(name: &'a str, path: &'a str, bytes: i64, text: &'a str) -> NewFile<'a> {
@@ -1921,18 +2225,16 @@ pub(crate) mod tests {
         assert!(shown.contains("spec.md"));
     }
 
-    /// The list row counts attachments without carrying them.
     #[test]
-    fn a_meeting_row_counts_its_files() {
+    fn a_meeting_lists_its_files() {
         let conn = store();
         let id = start_meeting(&conn, None).unwrap();
-        assert_eq!(get_meeting(&conn, id).unwrap().unwrap().file_count, 0);
+        assert!(meeting_files(&conn, id).unwrap().is_empty());
         conn.execute(
             "INSERT INTO meeting_file (meeting_id, position, name, path, kind, bytes, added_at)
              VALUES (?1, 0, 'deck.pptx', 'ab12cd34', 'office', 4096, ?2)",
             params![id, now()],
         ).unwrap();
-        assert_eq!(get_meeting(&conn, id).unwrap().unwrap().file_count, 1);
         let files = meeting_files(&conn, id).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].name, "deck.pptx");
@@ -1948,6 +2250,7 @@ pub(crate) mod tests {
             title: "First pass",
             summary: "s",
             action_items: &["Keep me".to_string(), "Replace me".to_string()],
+            transcript_seen: None,
         }).unwrap();
         let keep = meeting_actions(&conn, id).unwrap()[0].id;
         approve_actions(&mut conn, id, &[keep]).unwrap();
@@ -1956,6 +2259,7 @@ pub(crate) mod tests {
             title: "Second pass",
             summary: "s2",
             action_items: &["Brand new".to_string()],
+            transcript_seen: None,
         }).unwrap();
 
         let after: Vec<String> =
@@ -1994,7 +2298,7 @@ pub(crate) mod tests {
         let conn = store();
         let id = start_meeting(&conn, None).unwrap();
         add_segment(&conn, id, 0, "something said").unwrap();
-        assert!(meeting_cleaning(&conn, id).unwrap());
+        writing(&conn, id);
         let stopped_at = get_meeting(&conn, id).unwrap().unwrap().ended_at;
         assert!(stopped_at.is_some(), "Stop records ended_at before the notes");
 
@@ -2017,6 +2321,7 @@ pub(crate) mod tests {
         finish_meeting(&mut conn, id, &MeetingNotes {
             title: "t", summary: "s",
             action_items: &["Do the thing".to_string()],
+            transcript_seen: None,
         }).unwrap();
         let action = meeting_actions(&conn, id).unwrap()[0].id;
         approve_actions(&mut conn, id, &[action]).unwrap();
@@ -2030,11 +2335,18 @@ pub(crate) mod tests {
         assert_eq!(backlog[0].title, "Do the thing");
     }
 
+    /// Two Stops are kept apart by `take_meeting`; the store's part is that a
+    /// second stamp never moves the first end, and a meeting that has already
+    /// stopped cannot be stopped again.
     #[test]
-    fn stopping_a_meeting_twice_only_moves_it_once() {
+    fn stopping_keeps_the_first_end_and_refuses_a_stopped_meeting() {
         let conn = store();
         let id = start_meeting(&conn, None).unwrap();
-        assert!(meeting_cleaning(&conn, id).unwrap());
-        assert!(!meeting_cleaning(&conn, id).unwrap());
+        assert!(meeting_stopped(&conn, id).unwrap());
+        let first = get_meeting(&conn, id).unwrap().unwrap().ended_at;
+        assert!(meeting_stopped(&conn, id).unwrap());
+        assert_eq!(get_meeting(&conn, id).unwrap().unwrap().ended_at, first);
+        meeting_state(&conn, id, "recording", "done").unwrap();
+        assert!(!meeting_stopped(&conn, id).unwrap());
     }
 }

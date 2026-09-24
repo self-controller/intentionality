@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Button, TextInput, SectionHeading } from "../src/ui/primitives";
-import Calendar from "./Calendar";
+import Calendar from "../src/ui/Calendar";
 import { post } from "./bridge";
 import type { Panel, LabelOpt, PanelDraft } from "./types";
 

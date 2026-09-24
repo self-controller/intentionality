@@ -13,8 +13,8 @@ const TONES: Record<NonNullable<ButtonProps["tone"]>, string> = {
     "border border-line text-muted hover:text-text hover:border-muted " +
     "disabled:hover:text-muted disabled:hover:border-line",
   primary:
-    "bg-accent text-black border border-accent font-medium " +
-    "hover:brightness-110 disabled:hover:brightness-100",
+    "bg-accent text-bg border border-accent font-medium " +
+    "shadow-lift hover:-translate-y-px disabled:hover:translate-y-0",
   danger:
     "border border-line text-muted hover:text-bad hover:border-bad " +
     "disabled:hover:text-muted disabled:hover:border-line",
@@ -83,7 +83,7 @@ export function Tab({
         "rounded-[0.45rem] border px-3 py-1 transition-colors duration-150 " +
         "outline-none focus-visible:ring-2 focus-visible:ring-accent " +
         (active
-          ? "border-accent bg-accent font-medium text-black"
+          ? "border-accent bg-accent font-medium text-bg"
           : "border-line text-muted hover:border-muted hover:text-text") +
         ` ${className}`
       }

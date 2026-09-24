@@ -52,9 +52,9 @@ export default function Checkpoint({
   };
 
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center overflow-y-auto bg-black/85 p-6">
+    <div className="fixed inset-0 z-30 flex items-center justify-center overflow-y-auto bg-black/60 backdrop-blur-sm p-6">
       <section
-      className="max-h-full w-full max-w-[560px] overflow-y-auto rounded-[10px] border border-line bg-surface px-7 py-6"
+      className="max-h-full w-full max-w-[560px] overflow-y-auto rounded-[10px] border border-line bg-surface px-7 py-6 shadow-soft"
       role="dialog" aria-modal="true" aria-label="Time is up">
         <h1>
           Time's up

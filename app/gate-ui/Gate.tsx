@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { onPush, post } from "./bridge";
 import type { State } from "./types";
 import Intro from "./Intro";
+import Stars from "./Stars";
 import Welcome from "./Welcome";
-import { AskScreen, ChoiceScreen } from "./Prompt";
+import { BlankScreen, ChoiceScreen } from "./Prompt";
 
 const INTRO_MS = 1100;
 const FADE_MS = 500;
@@ -43,9 +44,12 @@ export default function Gate() {
 
   return (
     <>
-      {state?.screen === "welcome" && <Welcome state={state} />}
-      {state?.screen === "ask" && <AskScreen state={state} />}
-      {state?.screen === "choice" && <ChoiceScreen state={state} />}
+      <Stars />
+      <div className="relative z-10 h-full">
+        {state?.screen === "welcome" && <Welcome state={state} />}
+        {state?.screen === "blank" && <BlankScreen state={state} />}
+        {state?.screen === "choice" && <ChoiceScreen state={state} />}
+      </div>
       {!gone && <Intro leaving={done || !wanted} />}
     </>
   );

@@ -22,8 +22,8 @@ dashboard, randomized-interval analyses, and the meeting note taker.
 
 ## Requirements
 
-- Python 3.11+ (tested on 3.14), stdlib only — the gate and CLI dashboard
-  have zero dependencies.
+- Python 3.11+ (tested on 3.14), stdlib only — the gate has
+  zero dependencies.
 - For the desktop app: Rust + Node (see `app/` below), webkit2gtk, and — for
   the analysis feature only — an Anthropic API key in
   `~/.config/intentionality/api_key` (chmod 600) or `ANTHROPIC_API_KEY`.
@@ -442,9 +442,9 @@ surfaces, all bare-bones for now:
   Session cards are history — drag one into the tray to drop it, and drag it
   back out to undo that, but they are never deleted. Clicking any card (or a
   backlog row) opens it: rename it, write plain-text **notes** on it, give it
-  a **due date** — a calendar day, shown on the card in words ("Due
-  tomorrow", "Overdue · Sep 9") and beside the task on the gate's welcome
-  screen — and **labels**: every label there is shows as a chip to click, and
+  a **due date** — typed, or picked from the month grid behind
+  **Calendar**, and shown on the card in words ("Due tomorrow", "Overdue ·
+  Sep 9") and beside the task on the gate's welcome screen — and **labels**: every label there is shows as a chip to click, and
   typing a new name makes a new one. **Details…** beside either add box opens
   the same editor for a task that doesn't exist yet, so it starts with all of
   that; Enter still adds the bare title. The **Labels** panel under the
@@ -581,9 +581,31 @@ the action items), **Notes** (your scratchpad and context files) and
 **Transcript** (cleaned, with the raw segments behind a toggle).
 
 Pick a microphone, press **Start transcribing** and it opens; press **Stop**
-and it shuts at once, with the button reading **Writing the notes…** until
-they land. Nothing else starts a recording — there is no timer, no scheduler
-and no startup path that can, which is the one hard rule this feature has.
+and it shuts at once. The notes are written behind you — a line under the
+button says whether it is still cleaning the transcript or writing the notes
+— and you can **start the next meeting straight away**: the microphone was
+free the moment Stop returned, and only the model calls are queued, so a
+second wrap-up waits for the first rather than competing with it. Nothing
+else starts a recording — there is no timer, no scheduler and no startup path
+that can, which is the one hard rule this feature has.
+
+### Correcting the transcript
+
+Click any block in the raw transcript to fix what was heard: a mangled name,
+a piece of jargon, or a stretch that failed to transcribe at all, which shows
+as "(this stretch could not be transcribed)" and opens an empty box you can
+type into. It works while the meeting is still recording, while the notes are
+being written, and long afterwards — there is no state in which the record of
+what was said is frozen against you.
+
+Corrections go into the raw segments rather than the cleaned text, because
+the raw segments are what everything else is built from: **Re-run notes**
+re-cleans and re-summarizes from them, so a fix reaches the next write-up.
+The cleaned transcript and the write-up both say when they predate your
+corrections, and offer the re-run rather than taking it — the repair pass is
+minutes of model time, and when to spend it is your call. Editing one block
+never rewrites another, and the timestamps stay put, so the meeting is still
+navigable after a correction.
 While the microphone is open the tab shows a red pulsing indicator, the
 elapsed time, and the level meter described below.
 
@@ -707,21 +729,12 @@ in delimiters the transcript itself cannot forge, and the model is told it is a
 recording of what people said and never instructions to follow. A participant
 saying "ignore your previous instructions" is recorded, not obeyed.
 
-## The CLI dashboard
+## ActivityWatch
 
-```bash
-python3 -m dashboard          # latest session in detail + recent list
-python3 -m dashboard 3        # a specific session
-python3 -m dashboard list     # recent sessions only
-```
-
-Shows each session's intention (tasks, intended duration, and the statement
-for sessions old enough to have one) next to
-what [ActivityWatch](https://activitywatch.net/) observed in the same time
-window: active time per app, minus away time. It reads ActivityWatch's local
-API (`localhost:5600`, override with `INTENTIONALITY_AW_URL`) and works
-without it — sessions and tasks still display, observations show as
-unavailable.
+The app's Dashboard tab and the analyses read
+[ActivityWatch](https://activitywatch.net/)'s local API (`localhost:5600`,
+override with `INTENTIONALITY_AW_URL`) and work without it: sessions and tasks
+still display, and observations show as unavailable.
 
 > **GNOME Wayland caveat:** the window watcher bundled with ActivityWatch is
 > X11-only and records nothing under GNOME Wayland. You need the
@@ -799,14 +812,13 @@ gate/
 ├── handoff.py     # launches the desktop as a child, waits
 ├── debrief.py     # end-of-session per-task resolution
 ├── store.py       # the only Python module that touches sqlite3; owns migrations
-├── schema.sql     # session / task / analysis / meeting / meta tables (v4)
+├── schema.sql     # session / task / analysis / meeting / meta tables (v10)
 ├── ui.py          # the welcome list + questions; terminal by default, or a backend
 ├── gui.py         # the WebKit backend, for running under cage
 ├── webstate.py    # the welcome screen as data -- pure, no gi, so it is testable
+├── config.py      # paths and env var names
 └── webui/         # the built React bundle (committed: login cannot run npm)
-└── config.py      # paths and env var names
 
-dashboard/          # the CLI dashboard (stdlib only)
 app/                # the Tauri desktop app, and the gate's front end
 ├── src/            # React + Tailwind: Board, Analyses, Meetings, Dashboard
 │   └── ui/         # the shared theme and components, used by both bundles
@@ -822,7 +834,8 @@ tests/
 ├── test_welcome.py # the shared list model and the terminal welcome
 ├── test_gui.py     # the ui backend seam, button labels, `gate handoff`
 ├── test_webstate.py # the welcome screen's state, with no display and no gi
-└── test_resume.py  # the away-time threshold that decides a resume gate
+├── test_resume.py  # the away-time threshold that decides a resume gate
+└── test_units.py   # the systemd units and launchers: no Exec into /home, PAM
 ```
 
 `flow.py` never imports `sqlite3` or the network — it only calls into

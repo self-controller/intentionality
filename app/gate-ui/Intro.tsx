@@ -11,7 +11,7 @@ export default function Intro({ leaving }: { leaving: boolean }) {
         (leaving ? "opacity-0 pointer-events-none" : "opacity-100")
       }
     >
-      <p className="gate-rise text-[2.6em] font-semibold tracking-tight text-white">
+      <p className="gate-rise text-[2.6em] font-semibold tracking-tight text-text">
         Let&rsquo;s get to work.
       </p>
     </div>

@@ -12,25 +12,32 @@ import { listen } from "@tauri-apps/api/event";
 import * as api from "./api";
 import { DUE_TEXT, dueInfo } from "./format";
 import TaskEditor, { blankTask } from "./TaskEditor";
-import type { Board as BoardData, LabelSummary, Status, Task } from "./types";
+import type { Board as BoardData, Status, Task } from "./types";
 
-const LANES: { status: Status; label: string }[] = [
-  { status: "planned", label: "To Do" },
-  { status: "doing", label: "Doing" },
-  { status: "done", label: "Done" },
+// The droppable ids: a session status, or the backlog, which is no status at
+// all (session_id NULL). Dropped cards are history and aren't shown.
+type Lane = "planned" | "doing" | "done" | "backlog";
+
+const LANES: { lane: Lane; label: string }[] = [
+  { lane: "planned", label: "To Do" },
+  { lane: "doing", label: "Doing" },
+  { lane: "done", label: "Done" },
+  { lane: "backlog", label: "Backlog" },
 ];
+
+const laneLabel = (lane: Lane) => LANES.find((l) => l.lane === lane)!.label;
 
 function LabelChips({ task }: { task: Task }) {
   if (!task.labels.length) return null;
   return (
-    <span className="mt-1.5 flex flex-wrap gap-1">
+    <span className="mt-2 flex flex-wrap gap-1">
       {task.labels.map((l) => (
         <span
           key={l.name}
           /* The colour comes from the label row, so a tag looks the same on
              every card; the near-black text is what keeps it readable on all
              eight of them. */
-          className="rounded-full px-1.5 text-[10px] font-semibold leading-relaxed text-bg"
+          className="rounded-sm px-1.5 py-px text-[11px] font-semibold leading-relaxed text-surface"
           style={{ background: l.color }}
         >
           {l.name}
@@ -48,10 +55,7 @@ function DueChip({ task }: { task: Task }) {
   const finished = task.status === "done" || task.status === "dropped";
   return (
     <span
-      className={
-        "ml-1.5 whitespace-nowrap text-[11px] " +
-        (finished ? "text-muted" : DUE_TEXT[cls])
-      }
+      className={"mt-1.5 block text-[12px] " + (finished ? "text-muted" : DUE_TEXT[cls])}
       title={`Due ${task.due_date}`}
     >
       {finished ? `Due ${date}` : text}
@@ -71,10 +75,9 @@ function Card({ task, onOpen }: { task: Task; onOpen: (t: Task) => void }) {
       ref={setNodeRef}
       style={style}
       className={
-        "relative mb-2 cursor-grab touch-none select-none rounded-lg border " +
-        "border-line bg-raised px-2.5 py-2 transition-colors duration-150 " +
-        "hover:border-muted/50 " +
-        (isDragging ? "cursor-grabbing opacity-85" : "")
+        "relative mb-2 cursor-pointer touch-none select-none rounded-lg bg-raised/45 " +
+        "px-3 py-2.5 shadow-sm transition-colors duration-150 hover:bg-raised/70 " +
+        (isDragging ? "cursor-grabbing bg-raised/80 shadow-lg" : "")
       }
       // The sensor's distance constraint is what keeps this from firing at the
       // end of a drag: under 4px of travel is a click, past it is a drag.
@@ -82,198 +85,87 @@ function Card({ task, onOpen }: { task: Task; onOpen: (t: Task) => void }) {
       {...listeners}
       {...attributes}
     >
-      <span className="cursor-pointer">{task.title}</span>
-      {task.notes.trim() && <span className="ml-1.5 inline-block h-[5px] w-[5px] rounded-full bg-muted align-middle" title="Has notes" />}
-      {task.carry_count > 0 && <span className="ml-1.5 text-[11px] text-warn">{task.carry_count}×</span>}
+      <div className="font-medium leading-snug">
+        {task.title}
+      </div>
+      {task.notes.trim() && (
+        <p className="mt-1 line-clamp-2 whitespace-pre-line text-[13px] leading-snug text-muted">{task.notes}</p>
+      )}
       <DueChip task={task} />
       <LabelChips task={task} />
     </div>
   );
 }
 
-function Lane({
-  status,
+function Column({
+  lane,
   label,
   tasks,
+  first,
+  onAdd,
   onOpen,
+  empty,
 }: {
-  status: Status;
+  lane: Lane;
   label: string;
   tasks: Task[];
+  first: boolean;
+  // Null where nothing can be added: a session column with no open session.
+  onAdd: (() => void) | null;
   onOpen: (t: Task) => void;
+  empty?: string;
 }) {
-  const { setNodeRef, isOver } = useDroppable({ id: status });
+  const { setNodeRef, isOver } = useDroppable({ id: lane });
   return (
     <div
       ref={setNodeRef}
       className={
-        "min-h-[240px] flex-1 rounded-[10px] border bg-surface p-2.5 " +
-        "transition-colors duration-150 " +
-        (isOver ? "border-accent" : "border-line")
+        "min-h-[240px] min-w-0 flex-1 px-3 pb-3 transition-colors duration-150 " +
+        (first ? "" : "border-l border-line/70 ") +
+        (isOver ? "bg-raised/15" : "")
       }
     >
-      <h2 className="mb-2.5 flex items-center justify-between text-[13px] uppercase tracking-[0.06em] text-muted">
+      <h2 className="mb-3 flex h-7 items-center gap-2 text-[14px] font-medium">
         <span>{label}</span>
-        <span>{tasks.length}</span>
+        <span className="text-muted">{tasks.length}</span>
+        {onAdd && (
+          <button
+            className="ml-auto rounded border-none px-1.5 text-lg leading-none text-muted transition-colors hover:text-text"
+            title={`New task in ${label}`}
+            onClick={onAdd}
+          >
+            +
+          </button>
+        )}
       </h2>
       {tasks.map((t) => (
         <Card key={t.id} task={t} onOpen={onOpen} />
       ))}
+      {empty && !tasks.length && <p className="text-xs text-muted">{empty}</p>}
     </div>
   );
 }
 
-/**
- * The fourth target. Dropping is a status, not a delete — a session card is
- * history — so the tray is a real drop zone and its contents are real cards:
- * what went in by drag comes back out the same way.
- */
-function DroppedTray({
-  tasks,
-  open,
-  setOpen,
-  onOpen,
-}: {
-  tasks: Task[];
-  open: boolean;
-  setOpen: (v: boolean) => void;
-  onOpen: (t: Task) => void;
-}) {
-  const { setNodeRef, isOver } = useDroppable({ id: "dropped" });
-  // Opening it while a card hovers is what makes the target visible at the
-  // moment you need to see it.
-  const showing = open || isOver;
-  return (
-    <div
-      ref={setNodeRef}
-      className={
-        "mt-3 rounded-[10px] border p-1 transition-colors duration-150 " +
-        (isOver ? "border-bad" : "border-transparent")
-      }
-    >
-      <button onClick={() => setOpen(!open)}>
-        {showing ? "▾" : "▸"} dropped ({tasks.length})
-      </button>
-      {showing && (
-        <div className="ml-2.5 mt-1.5 max-w-[420px] opacity-70 [&_span.cursor-pointer]:line-through">
-          {tasks.map((t) => (
-            <Card key={t.id} task={t} onOpen={onOpen} />
-          ))}
-          {!tasks.length && <span className="text-xs text-muted">drag a card here to drop it</span>}
-        </div>
-      )}
-    </div>
-  );
+// The whole arrangement apply_board wants. Dropped cards aren't shown but
+// are still on the board, and pass through untouched.
+function arrangement(tasks: Task[]) {
+  const ids = (s: Status) => tasks.filter((t) => t.status === s).map((t) => t.id);
+  return { todo: ids("planned"), doing: ids("doing"), done: ids("done"), dropped: ids("dropped") };
 }
 
-/**
- * The labels there are, worn or not. Presets are made here before anything
- * wears them; deleting one takes it off every card, so a label in use asks
- * first. `stamp` changes whenever the board reloads, which keeps the counts
- * current after an edit.
- */
-function LabelsPanel({ stamp, onChanged }: { stamp: unknown; onChanged: () => void }) {
-  const [open, setOpen] = useState(false);
-  const [labels, setLabels] = useState<LabelSummary[]>([]);
-  const [draft, setDraft] = useState("");
-  const [confirming, setConfirming] = useState<LabelSummary | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(() => {
-    api.listLabels().then(setLabels).catch((e) => setError(String(e)));
-  }, []);
-  useEffect(load, [load, stamp]);
-
-  const create = () => {
-    const name = draft.trim();
-    if (!name) return;
-    setError(null);
-    api
-      .createLabel(name)
-      .then(() => {
-        setDraft("");
-        load();
-      })
-      .catch((e) => setError(String(e)));
-  };
-
-  const remove = (name: string) => {
-    setError(null);
-    api
-      .deleteLabel(name)
-      .then(() => {
-        setConfirming(null);
-        load();
-        onChanged();
-      })
-      .catch((e) => setError(String(e)));
-  };
-
-  return (
-    <section className="mt-4 border-t border-line pt-2.5">
-      <button
-        className="mb-2 text-[13px] uppercase tracking-[0.06em] text-muted transition-colors hover:text-text"
-        onClick={() => setOpen(!open)}
-      >
-        {open ? "▾" : "▸"} Labels ({labels.length})
-      </button>
-      {open && (
-        <>
-          {labels.length ? (
-            <ul className="mb-1 flex flex-wrap gap-1.5">
-              {labels.map((l) => (
-                <li key={l.name} className="flex max-w-full items-center gap-1.5 rounded-full border border-line bg-raised py-1 pl-2 pr-1 text-xs">
-                  <span className="h-2 w-2 flex-none rounded-full" style={{ background: l.color }} />
-                  <span className="max-w-[14ch] overflow-hidden text-ellipsis whitespace-nowrap">{l.name}</span>
-                  <span className="text-[11px] text-muted" title={`On ${l.uses} task${l.uses === 1 ? "" : "s"}`}>
-                    {l.uses}
-                  </span>
-                  <button
-                    className="rounded-full px-1 text-muted transition-colors hover:text-bad"
-                    title={`Delete ${l.name}`}
-                    onClick={() => (l.uses ? setConfirming(l) : remove(l.name))}
-                  >
-                    ×
-                  </button>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="text-xs text-muted">No labels yet.</p>
-          )}
-          {confirming && (
-            <div className="my-2 flex flex-wrap items-center gap-1.5">
-              <span className="basis-full text-xs text-warn">
-                “{confirming.name}” is on {confirming.uses} task{confirming.uses === 1 ? "" : "s"}.
-                Deleting it takes it off {confirming.uses === 1 ? "that one" : "all of them"}.
-              </span>
-              <button onClick={() => remove(confirming.name)}>Delete</button>
-              <button onClick={() => setConfirming(null)}>Keep it</button>
-            </div>
-          )}
-          <input
-            value={draft}
-            placeholder="New label…"
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && create()}
-          />
-          {error && <p className="mt-2 text-xs text-bad">{error}</p>}
-        </>
-      )}
-    </section>
+// A card that is already on the board (just pulled, or just made), put in its
+// lane from a fresh read: the frontend's copy doesn't have it yet.
+function place(id: number, status: Status) {
+  return api.getBoard().then((b) =>
+    api.applyBoard(arrangement(b.tasks.map((t) => (t.id === id ? { ...t, status } : t)))),
   );
 }
-
-// A card about to be made from an add box, and which box it came from.
-type Creating = { toBacklog: boolean; title: string };
 
 export default function Board() {
   const [board, setBoard] = useState<BoardData | null>(null);
-  const [newTitle, setNewTitle] = useState("");
-  const [backlogTitle, setBacklogTitle] = useState("");
-  const [showDropped, setShowDropped] = useState(false);
   const [editing, setEditing] = useState<Task | null>(null);
-  const [creating, setCreating] = useState<Creating | null>(null);
+  // The column whose + opened the editor for a card that doesn't exist yet.
+  const [creating, setCreating] = useState<Lane | null>(null);
   const [err, setErr] = useState<string | null>(null);
   // A write the backend refused, shown above the board it reloaded — not the
   // fatal screen, which hid the board until the tab was remounted.
@@ -308,172 +200,107 @@ export default function Board() {
   if (err) return <div className="p-12 text-center text-muted">{err}</div>;
   if (!board) return null;
 
-  const byStatus = (s: Status) => board.tasks.filter((t) => t.status === s);
-  const dropped = byStatus("dropped");
+  const session = board.session;
+  const inLane = (lane: Lane) =>
+    lane === "backlog" ? board.backlog : board.tasks.filter((t) => t.status === lane);
 
-  // One write for the whole board, whether the move came from a drag or from
-  // the editor's Drop button.
-  const move = (taskId: number, target: Status) => {
-    const task = board.tasks.find((t) => t.id === taskId);
-    if (!task || task.status === target) return;
+  // Every move, whichever columns it crosses: optimistic first, then one
+  // write (two for a pull into Doing or Done), then a reload.
+  const move = (taskId: number, target: Lane) => {
+    const onBoard = board.tasks.find((t) => t.id === taskId);
+    const inBacklog = board.backlog.find((t) => t.id === taskId);
     setNotice(null);
-    // Optimistic move, then the whole arrangement is written atomically.
-    const next = board.tasks.map((t) => (t.id === taskId ? { ...t, status: target } : t));
-    setBoard({ ...board, tasks: next });
-    const ids = (s: Status) => next.filter((t) => t.status === s).map((t) => t.id);
-    api
-      .applyBoard({ todo: ids("planned"), doing: ids("doing"), done: ids("done"), dropped: ids("dropped") })
-      .then(refresh)
-      .catch(fail);
+    if (onBoard) {
+      if (onBoard.status === target) return;
+      if (target === "backlog") {
+        setBoard({
+          ...board,
+          tasks: board.tasks.filter((t) => t.id !== taskId),
+          backlog: [...board.backlog, { ...onBoard, session_id: null, status: "planned" }],
+        });
+        api.unpullTask(taskId).then(refresh).catch(fail);
+        return;
+      }
+      const next = board.tasks.map((t) => (t.id === taskId ? { ...t, status: target } : t));
+      setBoard({ ...board, tasks: next });
+      api.applyBoard(arrangement(next)).then(refresh).catch(fail);
+    } else if (inBacklog && session && target !== "backlog") {
+      setBoard({
+        ...board,
+        backlog: board.backlog.filter((t) => t.id !== taskId),
+        tasks: [...board.tasks, { ...inBacklog, session_id: session.id, status: target }],
+      });
+      // A pull lands in To Do; anywhere else is a second move.
+      api
+        .pullTask(taskId)
+        .then(() => (target === "planned" ? undefined : place(taskId, target)))
+        .then(refresh)
+        .catch(fail);
+    }
   };
 
   const onDragEnd = (ev: DragEndEvent) => {
-    const target = ev.over?.id as Status | undefined;
-    if (!target || !board.session) return;
-    move(ev.active.id as number, target);
-  };
-
-  const add = (toBacklog: boolean) => {
-    const title = (toBacklog ? backlogTitle : newTitle).trim();
-    if (!title) return;
-    setNotice(null);
-    api
-      .addTask(title, toBacklog)
-      .then(() => {
-        toBacklog ? setBacklogTitle("") : setNewTitle("");
-        refresh();
-      })
-      .catch(fail);
+    const target = ev.over?.id as Lane | undefined;
+    if (target) move(ev.active.id as number, target);
   };
 
   return (
-    <div className="flex items-start gap-4 p-4">
-      <div className="min-w-0 flex-1">
-        {notice && <p className="mb-3 text-[13px] text-warn">{notice}</p>}
-        {board.session ? (
-          <>
-            <div className="mb-3 flex items-center gap-2.5">
-              {/* Sessions committed since the gate stopped asking have no
-                  statement; the lanes below are the intention. */}
-              {board.session.statement && <strong>{board.session.statement}</strong>}
-              {board.session.intended_minutes != null && (
-                <span className="text-muted">
-                  {board.session.statement ? " · " : ""}
-                  intended {board.session.intended_minutes} min
-                </span>
-              )}
-            </div>
-            <DndContext sensors={sensors} onDragEnd={onDragEnd}>
-              <div className="flex gap-3">
-                {LANES.map(({ status, label }) => (
-                  <Lane
-                    key={status}
-                    status={status}
-                    label={label}
-                    tasks={byStatus(status)}
-                    onOpen={setEditing}
-                  />
-                ))}
-              </div>
-              {/* Enter adds the title alone; Details… opens the editor so a
-                  new card can start with its date, notes and labels. */}
-              <div className="mt-3 flex max-w-[420px] gap-2">
-                <input
-                  value={newTitle}
-                  placeholder="Add a task to this session…"
-                  onChange={(e) => setNewTitle(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && add(false)}
-                />
-                <button onClick={() => setCreating({ toBacklog: false, title: newTitle })}>
-                  Details…
-                </button>
-              </div>
-              <DroppedTray
-                tasks={dropped}
-                open={showDropped}
-                setOpen={setShowDropped}
-                onOpen={setEditing}
-              />
-            </DndContext>
-          </>
-        ) : (
-          <p className="text-muted">
-            No open session — start one at the gate. The backlog and dashboard still work.
-          </p>
-        )}
-      </div>
-
-      <aside className="w-60 flex-none rounded-[10px] border border-line bg-surface p-2.5">
-        <h2 className="mb-2.5 text-[13px] uppercase tracking-[0.06em] text-muted">Backlog</h2>
-        {board.backlog.map((t) => (
-          <div
-            key={t.id}
-            className="flex cursor-pointer items-center justify-between gap-1.5 py-[5px] text-muted transition-colors hover:text-text"
-            onClick={() => setEditing(t)}
-          >
-            <span className="min-w-0 flex-1">
-              {t.title}
-              {t.notes.trim() && <span className="ml-1.5 inline-block h-[5px] w-[5px] rounded-full bg-muted align-middle" title="Has notes" />}
-              {t.carry_count > 0 && <span className="ml-1.5 text-[11px] text-warn">{t.carry_count}×</span>}
-              <DueChip task={t} />
-              <LabelChips task={t} />
+    <div className="p-4">
+      {notice && <p className="mb-3 text-[13px] text-warn">{notice}</p>}
+      {session && (session.statement || session.intended_minutes != null) && (
+        <div className="mb-3 flex items-center gap-2.5">
+          {/* Sessions committed since the gate stopped asking have no
+              statement; the columns below are the intention. */}
+          {session.statement && <strong>{session.statement}</strong>}
+          {session.intended_minutes != null && (
+            <span className="text-muted">
+              {session.statement ? " · " : ""}
+              intended {session.intended_minutes} min
             </span>
-            {/* The row opens the editor, so its buttons must not. */}
-            <span className="flex flex-none gap-0.5" onClick={(e) => e.stopPropagation()}>
-              {board.session && (
-                <button
-                  className="rounded border-none px-1.5 py-0.5 text-muted transition-colors hover:text-text"
-                  title="Pull into this session"
-                  onClick={() => {
-                    setNotice(null);
-                    api.pullTask(t.id).then(refresh).catch(fail);
-                  }}
-                >
-                  ←
-                </button>
-              )}
-              <button
-                className="rounded border-none px-1.5 py-0.5 text-muted transition-colors hover:text-bad"
-                title="Delete"
-                onClick={() => api.deleteTask(t.id).then(refresh)}
-              >
-                ✕
-              </button>
-            </span>
-          </div>
-        ))}
-        <div className="mt-2 flex items-center gap-1.5 [&_input]:min-w-0 [&_input]:flex-1 [&_button]:flex-none">
-          <input
-            value={backlogTitle}
-            placeholder="Add to backlog…"
-            onChange={(e) => setBacklogTitle(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && add(true)}
-          />
-          <button onClick={() => setCreating({ toBacklog: true, title: backlogTitle })}>
-            Details…
-          </button>
+          )}
         </div>
-        <LabelsPanel stamp={board} onChanged={refresh} />
-      </aside>
+      )}
+      <DndContext sensors={sensors} onDragEnd={onDragEnd}>
+        <div className="flex">
+          {LANES.map(({ lane, label }, i) => {
+            const open = lane === "backlog" || session != null;
+            return (
+              <Column
+                key={lane}
+                lane={lane}
+                label={label}
+                tasks={inLane(lane)}
+                first={i === 0}
+                onAdd={open ? () => setCreating(lane) : null}
+                onOpen={setEditing}
+                empty={open ? undefined : "No open session — start one at the gate."}
+              />
+            );
+          })}
+        </div>
+      </DndContext>
 
       {creating && (
         <TaskEditor
-          initial={blankTask(creating.title.trim())}
-          heading={creating.toBacklog ? "New backlog task" : "New task for this session"}
+          initial={blankTask("")}
+          heading={`New task in ${laneLabel(creating)}`}
           saveText="Add task"
           save={(title, notes, dueDate, labels) =>
-            api.createTask(title, notes, dueDate, labels, creating.toBacklog)
+            api
+              .createTask(title, notes, dueDate, labels, creating === "backlog")
+              // A new session card starts in To Do.
+              .then((id) =>
+                creating === "backlog" || creating === "planned" ? undefined : place(id, creating),
+              )
           }
           onClose={() => setCreating(null)}
           onSaved={() => {
-            // The box it came from was the draft; the card is made now.
-            creating.toBacklog ? setBacklogTitle("") : setNewTitle("");
             setCreating(null);
             setNotice(null);
             refresh();
           }}
-          onDrop={null}
           onDelete={null}
+          onLabelsChanged={refresh}
         />
       )}
 
@@ -486,26 +313,22 @@ export default function Board() {
             api.updateTask(editing.id, title, notes, dueDate, labels)
           }
           onClose={() => setEditing(null)}
+          onLabelsChanged={refresh}
           onSaved={() => {
             setEditing(null);
             refresh();
           }}
-          // A card on the board gets dropped; a backlog row gets deleted.
-          onDrop={
-            editing.session_id != null && editing.status !== "dropped"
-              ? () => {
-                  move(editing.id, "dropped");
-                  setEditing(null);
-                }
-              : null
-          }
+          // A backlog row can be deleted; a session card is history.
           onDelete={
             editing.session_id == null
               ? () => {
-                  api.deleteTask(editing.id).then(() => {
-                    setEditing(null);
-                    refresh();
-                  });
+                  api
+                    .deleteTask(editing.id)
+                    .then(() => {
+                      setEditing(null);
+                      refresh();
+                    })
+                    .catch(fail);
                 }
               : null
           }

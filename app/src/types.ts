@@ -47,7 +47,6 @@ export interface Board {
   session: Session | null;
   tasks: Task[];
   backlog: Task[];
-  unseen: number;
 }
 
 export interface Observed {
@@ -131,8 +130,10 @@ export interface Level {
   gain_db: number;
 }
 
-// Two wrap-up states, not one: the transcript is repaired before the notes are
-// written, and the repair is the long half.
+// 'recording' lasts until the tail chunk has landed, a moment past Stop.
+// 'done' with no summary means stopped and waiting for Write notes.
+// ('cleaning' may still sit on a row an older build left behind; the startup
+// sweep fails it, so the UI never needs to render it.)
 export type MeetingState =
   | "recording"
   | "cleaning"
@@ -160,8 +161,8 @@ export interface Meeting {
   state: MeetingState;
   error: string | null;
   segment_count: number;
-  file_count: number;
-  has_clean: boolean;
+  // Whether notes have been written; the list says "no notes yet" without it.
+  has_summary: boolean;
 }
 
 // The microphone is open on this meeting, and has been since `since`. Not the
@@ -207,8 +208,12 @@ export interface MeetingDetail {
   // When the user last saved an edit to `summary`; null while it is as the
   // model wrote it. Re-run asks before overwriting an edited document.
   summary_edited_at: string | null;
-  // The repair pass's output; null until it has run. The segments above stay
-  // the record of what was actually heard.
-  clean_transcript: string | null;
+  // The segments above stitched into one text, a paragraph each: what the
+  // editor shows once the meeting has stopped, and what the model is given.
+  transcript: string;
+  // When the transcript was last edited (or grew on a resume); null while it
+  // is as the write-up saw it. Non-null means the write-up was made from an
+  // older transcript — what the stale marker says, and what Re-run notes fixes.
+  transcript_edited_at: string | null;
   files: MeetingFile[];
 }

@@ -1,4 +1,5 @@
-//! Port of dashboard/report.py::observed() — clip window events to the
+//! Port of the old CLI dashboard's observed() (dashboard/report.py, removed;
+//! git history has it) — clip window events to the
 //! session window, subtract AFK, accumulate per app — with one deliberate
 //! fix: afk_seconds is the UNION of AFK spans, computed independently of
 //! window events. The Python version accumulates AFK per window event, so a
@@ -60,24 +61,43 @@ fn cap_titles(titles: BTreeMap<String, f64>, keep: usize) -> BTreeMap<String, f6
     kept
 }
 
-pub async fn observed(start_iso: &str, end_iso: &str) -> Result<Observed> {
+/// ActivityWatch's raw events for one span, fetched once so several windows
+/// inside it can be summarized without asking AW again.
+pub struct Events {
+    afk: Vec<aw::AwEvent>,
+    window: Vec<aw::AwEvent>,
+}
+
+pub async fn fetch(start_iso: &str, end_iso: &str) -> Result<Events> {
     let (window_bucket, afk_bucket) = aw::find_buckets().await?;
     let window_bucket =
         window_bucket.ok_or_else(|| AppError::AwUnavailable("no window-watcher bucket".into()))?;
+    let afk = match afk_bucket {
+        Some(bucket) => aw::events(&bucket, start_iso, end_iso).await?,
+        None => Vec::new(),
+    };
+    let window = aw::events(&window_bucket, start_iso, end_iso).await?;
+    Ok(Events { afk, window })
+}
 
+pub async fn observed(start_iso: &str, end_iso: &str) -> Result<Observed> {
+    summarize(&fetch(start_iso, end_iso).await?, start_iso, end_iso)
+}
+
+/// Everything in `events` clipped to [start, end]. The span may be any part
+/// of what was fetched: clipping is what makes a sub-window exact.
+pub fn summarize(events: &Events, start_iso: &str, end_iso: &str) -> Result<Observed> {
     let start = parse_ts(start_iso)?;
     let end = parse_ts(end_iso)?;
 
     let mut afk_spans = Vec::new();
-    if let Some(bucket) = afk_bucket {
-        for ev in aw::events(&bucket, start_iso, end_iso).await? {
-            if ev.data.get("status").and_then(|v| v.as_str()) == Some("afk") {
-                let s = parse_ts(&ev.timestamp)?;
-                let e = s + dur(&ev);
-                let (s, e) = (s.max(start), e.min(end));
-                if e > s {
-                    afk_spans.push((s, e));
-                }
+    for ev in &events.afk {
+        if ev.data.get("status").and_then(|v| v.as_str()) == Some("afk") {
+            let s = parse_ts(&ev.timestamp)?;
+            let e = s + dur(ev);
+            let (s, e) = (s.max(start), e.min(end));
+            if e > s {
+                afk_spans.push((s, e));
             }
         }
     }
@@ -86,9 +106,9 @@ pub async fn observed(start_iso: &str, end_iso: &str) -> Result<Observed> {
 
     let mut per_app: BTreeMap<String, f64> = BTreeMap::new();
     let mut per_title: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
-    for ev in aw::events(&window_bucket, start_iso, end_iso).await? {
+    for ev in &events.window {
         let ev_start = parse_ts(&ev.timestamp)?;
-        let ev_end = ev_start + dur(&ev);
+        let ev_end = ev_start + dur(ev);
         let (cs, ce) = (ev_start.max(start), ev_end.min(end));
         if ce <= cs {
             continue;

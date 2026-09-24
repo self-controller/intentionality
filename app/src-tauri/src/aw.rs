@@ -1,21 +1,17 @@
-//! ActivityWatch REST client — the Rust twin of dashboard/aw.py. AW being
+//! ActivityWatch REST client — the Rust twin of the old CLI dashboard's dashboard/aw.py (removed). AW being
 //! down is a normal condition; every failure is one AwUnavailable error and
 //! the UI shows observations as unavailable.
 
 use crate::error::{AppError, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::time::Duration;
 
 fn base_url() -> String {
     std::env::var("INTENTIONALITY_AW_URL").unwrap_or_else(|_| "http://localhost:5600".into())
 }
 
-fn client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()
-        .map_err(|e| AppError::AwUnavailable(e.to_string()))
+fn client() -> Result<&'static reqwest::Client> {
+    crate::http::local().map_err(|e| AppError::AwUnavailable(e.to_string()))
 }
 
 #[derive(Deserialize)]

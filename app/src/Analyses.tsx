@@ -155,7 +155,7 @@ export default function Analyses({
                     "block w-full overflow-hidden text-ellipsis whitespace-nowrap rounded-md " +
                     "border px-2.5 py-1.5 text-left transition-colors duration-150 " +
                     (a.id === selected
-                      ? "border-accent bg-accent text-black "
+                      ? "border-accent bg-accent text-bg "
                       : "border-line text-text hover:border-muted ") +
                     // Unread checks are the ones worth returning to.
                     (a.seen_at ? "" : "font-semibold")

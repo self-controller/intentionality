@@ -1,12 +1,48 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { LevelBars, type LevelBarsHandle } from "./LevelBars";
-import Markdown from "./Markdown";
 import Checkbox from "./ui/Checkbox";
 import { Button, SectionHeading, Tab as TabButton } from "./ui/primitives";
 import * as api from "./api";
 import { dayKey, dayLabel, fmt, hhmm, size } from "./format";
-import type { AudioSource, Level, Meeting, MeetingDetail, RecordingNow } from "./types";
+import type {
+  AudioSource,
+  Level,
+  Meeting,
+  MeetingDetail,
+  RecordingNow,
+} from "./types";
+
+// The markdown stack (parser, KaTeX, highlight.js) is most of the app's
+// JavaScript and only the write-up needs it, so it loads the first time a
+// write-up is shown instead of before the board can appear.
+const LazyMarkdown = lazy(() => import("./Markdown"));
+
+function Markdown({ source }: { source: string }) {
+  return (
+    <Suspense fallback={<p className="text-muted">Loading…</p>}>
+      <LazyMarkdown source={source} />
+    </Suspense>
+  );
+}
+
+/// The record bar's clock. Its own component so the once-a-second tick
+/// re-renders this text and not the whole tab.
+///
+/// Derived from when the backend says the microphone opened, so it stays
+/// right across a tab switch instead of restarting -- and a resumed meeting
+/// counts from the resume, not from the day it was first recorded.
+function Elapsed({ since }: { since: string }) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const began = new Date(since).getTime();
+    const tick = () => setElapsed(Math.max(0, Math.round((Date.now() - began) / 1000)));
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [since]);
+  return <>{fmt(elapsed)}</>;
+}
 
 const KIND_DOT: Record<string, string> = {
   pdf: "bg-bad",
@@ -35,8 +71,8 @@ function rememberedSource(): AudioSource | null {
 
 /// Debounced, chained autosave for one text field of one meeting.
 ///
-/// Used twice — the scratchpad and the write-up — and the rules are the same
-/// for both. The draft, not the stored value, is what the textarea shows:
+/// Used three times — the scratchpad, the transcript and the write-up — and
+/// the rules are the same for all of them. The draft, not the stored value, is what the textarea shows:
 /// `refresh` below replaces the detail wholesale every time a segment lands
 /// (roughly every two minutes while recording), and a textarea reading the
 /// stored value would have whatever was being typed wiped out mid-sentence.
@@ -58,6 +94,8 @@ function useAutosave(
   const timer = useRef<number | null>(null);
   const pending = useRef<{ id: number; text: string } | null>(null);
   const inFlight = useRef<Promise<void> | null>(null);
+  // Something has been typed since the draft was last seeded.
+  const touched = useRef(false);
 
   /// Send one save, after any save already in flight.
   const send = useCallback(
@@ -92,12 +130,34 @@ function useAutosave(
   const seed = useCallback((id: number, text: string, force = false) => {
     if (force || owner.current !== id) {
       owner.current = id;
+      touched.current = false;
       setDraft(text);
     }
   }, []);
 
+  /// Seed, and keep following the stored text until something is typed.
+  ///
+  /// For the transcript, whose stored text moves under an untouched draft:
+  /// the tail chunk lands a moment *after* Stop returns, and a box seeded once
+  /// would be missing the last thing said. Once the user has typed, the draft
+  /// is the truth and only their own saves change what is stored.
+  const follow = useCallback((id: number, text: string) => {
+    if (owner.current !== id || !touched.current) {
+      owner.current = id;
+      touched.current = false;
+      setDraft(text);
+    }
+  }, []);
+
+  /// Go back to following. A resume grows the transcript past the draft, and
+  /// the next Stop's text has to reach the box.
+  const release = useCallback(() => {
+    touched.current = false;
+  }, []);
+
   const edit = (text: string) => {
     setDraft(text);
+    touched.current = true;
     const id = owner.current;
     if (id == null) return;
     pending.current = { id, text };
@@ -116,7 +176,7 @@ function useAutosave(
   flushRef.current = flush;
   useEffect(() => () => void flushRef.current(), []);
 
-  return { draft, seed, edit, flush };
+  return { draft, seed, follow, release, edit, flush };
 }
 
 /// Recording lives in Rust, not in this component. Switching to the Board and
@@ -141,7 +201,6 @@ export default function Meetings() {
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ticked, setTicked] = useState<Set<number>>(new Set());
-  const [elapsed, setElapsed] = useState(0);
   const [sources, setSources] = useState<AudioSource[]>([]);
   const [source, setSource] = useState<AudioSource | null>(rememberedSource);
   const [sourceNote, setSourceNote] = useState<string | null>(null);
@@ -150,6 +209,7 @@ export default function Meetings() {
   // The scratchpad and the write-up, each with a draft of its own. See
   // useAutosave for why the drafts, not `detail`, are what the textareas show.
   const notes = useAutosave(api.setMeetingNotes, fail);
+  const transcript = useAutosave(api.setMeetingTranscript, fail);
   const summary = useAutosave(api.setMeetingSummary, fail);
 
   const selectedRef = useRef<number | null>(null);
@@ -168,27 +228,31 @@ export default function Meetings() {
 
   // The microphone is open. Not "a meeting is selected and unfinished": once
   // Stop has been clicked the microphone is shut, and the red dot, the clock
-  // and the meter must all stop with it even though the notes are still being
-  // written.
+  // and the meter must all stop with it even though the last block is still
+  // on its way.
   const live = recording != null && !stopping;
 
-  // The notes for a meeting are still being written. Read off the list rather
-  // than kept in a state of its own, so it survives this tab being unmounted
-  // and remounted — `items` is refreshed by both `meeting:state` and
-  // `meeting:done`. `stopping` covers the gap before the first of those lands.
+  // The notes for some meeting are still being written. Read off the list
+  // rather than kept in a state of its own, so it survives this tab being
+  // unmounted and remounted — `items` is refreshed by both `meeting:state`
+  // and `meeting:done`.
   //
-  // Both wrap-up states, so the Start button stays down through the repair
-  // pass as well as the summary — on a long meeting the repair is the slower
-  // of the two.
-  const notesPending =
-    stopping || items.some((m) => m.state === "cleaning" || m.state === "summarizing");
-  const wrapUp = items.find(
-    (m) => m.state === "cleaning" || m.state === "summarizing",
-  )?.state;
+  // This reports; it no longer forbids. Only Write notes gets here now: Stop
+  // leaves the transcript to be reviewed first.
+  const wrapUpCount = items.filter((m) => m.state === "summarizing").length;
+  const notesPending = wrapUpCount > 0;
+
+  // The microphone is free. There is exactly one of it, so a live recording
+  // rules out another — but a meeting whose notes are being written does not:
+  // Stop shuts the microphone before it returns and hands the rest to a
+  // background task. `stopping` is the in-between, covering the Stop round
+  // trip so a double-click cannot land on the Start that replaces it.
+  const canRecord = recording == null && !stopping;
 
   const reload = useCallback(() => api.listMeetings(api.RECENT_MEETINGS), []);
 
   const seedNotes = notes.seed;
+  const followTranscript = transcript.follow;
   const load = useCallback(
     (id: number) => {
       setSelected(id);
@@ -206,10 +270,11 @@ export default function Meetings() {
           // changes under us (a re-run replaces it), and a draft seeded once
           // per meeting would shadow that.
           seedNotes(d.meeting.id, d.notes);
+          followTranscript(d.meeting.id, d.transcript);
         })
         .catch(fail);
     },
-    [seedNotes, fail],
+    [seedNotes, followTranscript, fail],
   );
 
   useEffect(() => {
@@ -224,7 +289,16 @@ export default function Meetings() {
     const refresh = () => {
       reload().then(setItems).catch(() => {});
       if (selectedRef.current != null) {
-        api.getMeeting(selectedRef.current).then(setDetail).catch(() => {});
+        api
+          .getMeeting(selectedRef.current)
+          .then((d) => {
+            // A switch landed while this was in flight: the pane and the
+            // transcript draft belong to the newly selected meeting now.
+            if (d.meeting.id !== selectedRef.current) return;
+            setDetail(d);
+            followTranscript(d.meeting.id, d.transcript);
+          })
+          .catch(() => {});
       }
     };
     const unlistenSegment = listen("meeting:segment", refresh);
@@ -251,7 +325,7 @@ export default function Meetings() {
       unlistenDone.then((f) => f());
       unlistenLevel.then((f) => f());
     };
-  }, [reload, load, fail, setNow]);
+  }, [reload, load, fail, setNow, followTranscript]);
 
   // Fall back to the system default for a source that is not on offer, and say
   // so. The stored choice is deliberately *not* cleared: the backend reports
@@ -292,22 +366,6 @@ export default function Meetings() {
     else localStorage.removeItem(SOURCE_KEY);
   };
 
-  // The elapsed clock is cosmetic and derived from when the backend says the
-  // microphone opened, so it stays right across a tab switch instead of
-  // restarting — and a resumed meeting counts from the resume, not from the
-  // day it was first recorded.
-  useEffect(() => {
-    if (!live || since == null) {
-      setElapsed(0);
-      return;
-    }
-    const began = new Date(since).getTime();
-    const tick = () => setElapsed(Math.max(0, Math.round((Date.now() - began) / 1000)));
-    tick();
-    const timer = setInterval(tick, 1000);
-    return () => clearInterval(timer);
-  }, [live, since]);
-
   /// The microphone to record from, re-checked against a fresh list first.
   /// `pw-record` does not refuse an unknown --target: measured on 2026-09-10,
   /// it falls back to the default source, streams happily and says nothing. So
@@ -347,14 +405,16 @@ export default function Meetings() {
       .finally(() => setBusy(false));
   };
 
-  /// Pick a finished meeting back up. Both drafts are flushed first for the
-  /// same reason as a re-run: the next Stop reads the notes, and the pane
-  /// asked before letting an edited write-up get here.
+  /// Pick a finished meeting back up. Every draft is flushed first — once the
+  /// microphone is open the transcript refuses saves — and the transcript
+  /// goes back to following the store, so the next Stop's text reaches it.
   const resume = async (id: number) => {
     setError(null);
     setBusy(true);
     await notes.flush().catch(() => {});
+    await transcript.flush().catch(() => {});
     await summary.flush().catch(() => {});
+    transcript.release();
     return pickTarget()
       .then((target) => api.resumeMeeting(id, target))
       .then(opened)
@@ -381,9 +441,8 @@ export default function Meetings() {
           load(id);
         });
       })
-      // A failed *stop*, which is all this call does now. A failed summary is
-      // not a failed meeting and never reaches here: the transcript is saved,
-      // and the detail pane below says what went wrong and offers a retry.
+      // A failed *stop*, which is all this call does: no notes are written
+      // until Write notes is pressed.
       .catch((e) => {
         setError(String(e));
         setNow(null);
@@ -391,9 +450,9 @@ export default function Meetings() {
           .then(setItems)
           .catch(() => {});
       })
-      // Cleared only once that reload has landed, so `notesPending` has already
-      // read 'summarizing' off the fresh list. Clearing earlier would flash an
-      // enabled Start between the two.
+      // Cleared only once that reload has landed. Holding Start down until
+      // then is what keeps the second click of a double-click meant for Stop
+      // off the Start that replaces it.
       .finally(() => {
         setStopping(false);
         setBusy(false);
@@ -413,10 +472,10 @@ export default function Meetings() {
       .finally(() => setBusy(false));
   };
 
-  /// Repair and re-summarize a meeting that already finished. The whole point
-  /// is that it re-reads the notes, so both drafts are flushed first — the
-  /// usual reason to press this is having just corrected a name the model got
-  /// wrong. (The write-up's draft is flushed only to be replaced moments
+  /// Write notes, or re-write them. The run reads the transcript and the
+  /// scratchpad as stored, so both drafts are flushed first — the usual thing
+  /// to have done just before pressing this is correcting a name in the
+  /// transcript. (The write-up's draft is flushed only to be replaced moments
   /// later; the pane asked before letting an edited document get here.)
   const rerun = async () => {
     if (!detail) return;
@@ -424,6 +483,7 @@ export default function Meetings() {
     setError(null);
     const id = detail.meeting.id;
     await notes.flush().catch(() => {});
+    await transcript.flush().catch(() => {});
     await summary.flush().catch(() => {});
     return api
       .rerunMeetingNotes(id)
@@ -532,26 +592,37 @@ export default function Meetings() {
               </option>
             ))}
           </select>
-          {/* Three states, not two. The wrap-up needs one of its own: the
-              microphone is already shut but the tail chunk and the notes are
-              still in flight, and a Start button offered there would take a
-              double-click meant for Stop and open a second recording. */}
+          {/* Two states, not three. A meeting whose notes are still being
+              written no longer occupies this button: the microphone was shut
+              the moment Stop returned, the wrap-up is a background task, and
+              nothing in Rust ever refused the next recording — only this
+              button did. The wrap-up says so on its own line below instead.
+
+              The double-click that the old three-state shape guarded against
+              (a second click meant for Stop landing on a Start that had taken
+              its place) is covered by `stopping`, which is set before the
+              round trip and cleared only once the reloaded list has landed. */}
           {live ? (
             <button className="w-full rounded-md border border-bad p-2.5 text-sm text-bad transition-colors hover:brightness-110 disabled:opacity-40" onClick={stop} disabled={busy || attaching}>
               ■ Stop transcribing
             </button>
-          ) : notesPending ? (
-            <button className="w-full rounded-md border border-line p-2.5 text-sm text-muted disabled:opacity-40" disabled>
-              {wrapUp === "cleaning" ? "Cleaning the transcript…" : "Writing the notes…"}
-            </button>
           ) : (
-            <button className="w-full rounded-md border border-line p-2.5 text-sm transition-colors hover:border-muted disabled:opacity-40 disabled:hover:border-line" onClick={start} disabled={busy}>
+            <button className="w-full rounded-md border border-line p-2.5 text-sm transition-colors hover:border-muted disabled:opacity-40 disabled:hover:border-line" onClick={start} disabled={busy || !canRecord}>
               ● Start transcribing
             </button>
           )}
+          {notesPending && (
+            // Which meeting, when it is not the one on screen, and how many
+            // when several are queued — the model calls are serialized, so a
+            // second wrap-up genuinely waits for the first.
+            <div className="text-xs text-muted">
+              Writing the notes…
+              {wrapUpCount > 1 && ` (${wrapUpCount} meetings)`}
+            </div>
+          )}
           {live && (
             <div className="flex items-center gap-2 text-[13px] text-bad">
-              <span className="rec-dot" /> recording {fmt(elapsed)}
+              <span className="rec-dot" /> recording {since ? <Elapsed since={since} /> : fmt(0)}
             </div>
           )}
           {/* The record indicator above stays the source of truth for whether
@@ -574,7 +645,7 @@ export default function Meetings() {
                   // On the accent fill every child inherits the dark text: a
                   // muted grey or a state colour on cyan is unreadable.
                   (selected === m.id
-                    ? "border-accent bg-accent text-black"
+                    ? "border-accent bg-accent text-bg"
                     : "border-line text-text hover:border-muted")
                 }
                 onClick={() => load(m.id)}
@@ -588,6 +659,7 @@ export default function Meetings() {
                     <span className={selected === m.id ? "" : "text-bad"}> · notes failed</span>
                   )}
                   {m.state === "summarizing" && <span> · summarizing…</span>}
+                  {m.state === "done" && !m.has_summary && <span> · no notes yet</span>}
                   {live && m.id === recording && (
                     <span className={selected === m.id ? "" : "text-bad"}> · live</span>
                   )}
@@ -600,9 +672,9 @@ export default function Meetings() {
 
       <div className="min-w-0 max-w-[1040px] flex-1 [&_section]:mt-5 [&_p]:max-w-[60ch]">
         {!detail && <p className="text-muted">Select a meeting.</p>}
-        {/* Keyed by meeting, so the tab, the editor and the raw-transcript
-            toggle reset on a switch but survive the two-minute `refresh`
-            replacements of `detail` for the same meeting. */}
+        {/* Keyed by meeting, so the tab and the editor reset on a switch but
+            survive the two-minute `refresh` replacements of `detail` for the
+            same meeting. */}
         {detail && <Detail
           key={detail.meeting.id}
           detail={detail}
@@ -612,11 +684,14 @@ export default function Meetings() {
           onApprove={approve}
           onRerun={rerun}
           onResume={() => resume(detail.meeting.id)}
-          canRecord={recording == null && !notesPending}
+          canRecord={canRecord}
           onDelete={() => remove(detail.meeting.id)}
           notesDraft={notes.draft}
           onEditNotes={notes.edit}
           onBlurNotes={notes.flush}
+          transcriptDraft={transcript.draft}
+          onEditTranscript={transcript.edit}
+          onBlurTranscript={transcript.flush}
           summaryDraft={summary.draft}
           onEditSummary={summary.edit}
           onBeginEditSummary={beginEditSummary}
@@ -646,6 +721,9 @@ function Detail({
   notesDraft,
   onEditNotes,
   onBlurNotes,
+  transcriptDraft,
+  onEditTranscript,
+  onBlurTranscript,
   summaryDraft,
   onEditSummary,
   onBeginEditSummary,
@@ -662,13 +740,15 @@ function Detail({
   onApprove: () => void;
   onRerun: () => void;
   onResume: () => void;
-  // Nothing else holds the microphone or is mid-write-up, so this meeting
-  // may open it again.
+  // Nothing else holds the microphone, so this meeting may open it again.
   canRecord: boolean;
   onDelete: () => void;
   notesDraft: string;
   onEditNotes: (text: string) => void;
   onBlurNotes: () => void;
+  transcriptDraft: string;
+  onEditTranscript: (text: string) => void;
+  onBlurTranscript: () => void;
   summaryDraft: string;
   onEditSummary: (text: string) => void;
   onBeginEditSummary: () => void;
@@ -678,17 +758,29 @@ function Detail({
   attaching: boolean;
   busy: boolean;
 }) {
-  const { meeting, segments, actions, clean_transcript, files } = detail;
-  const running = meeting.state === "cleaning" || meeting.state === "summarizing";
+  const { meeting, segments, actions, files } = detail;
+  const running = meeting.state === "summarizing";
   const finished = meeting.state === "done" || meeting.state === "failed";
-  const [tab, setTab] = useState<Tab>("summary");
-  const [showRaw, setShowRaw] = useState(false);
+  // Capture may still be writing segments: the microphone is open, or Stop
+  // has shut it and the last block is still on its way. The transcript is
+  // shown, not edited, until then — the backend refuses a save as well.
+  const capturing = meeting.state === "recording";
+  // A stopped meeting with no notes is waiting on its transcript to be
+  // reviewed, so that is where it opens.
+  const [tab, setTab] = useState<Tab>(detail.summary ? "summary" : "transcript");
+  // The preview trails the textarea: typing stays immediate, and the markdown
+  // pass runs when React has a moment rather than on every keystroke.
+  const previewSource = useDeferredValue(summaryDraft);
+  // The write-up was made from the transcript, so an edit to it (or a resume
+  // that grew it) puts the write-up behind. Says so rather than re-running by
+  // itself: a run is model time, and that is the user's to spend.
+  const stale = detail.transcript_edited_at != null && detail.summary != null;
   // The write-up's editor is open. Its draft is only live while this is true,
   // which is what keeps a re-run's fresh document from being shadowed by a
   // draft seeded from the old one.
   const [editing, setEditing] = useState(false);
-  // Which of the two document-replacing actions is asking first, if either.
-  const [confirm, setConfirm] = useState<null | "rerun" | "resume">(null);
+  // Re-run is asking before it replaces a hand-edited document.
+  const [confirm, setConfirm] = useState(false);
   const pending = actions.filter((a) => a.task_id == null);
   const approved = actions.filter((a) => a.task_id != null);
   const toggle = (id: number) => {
@@ -713,15 +805,33 @@ function Detail({
     setEditing(false);
   };
   const rerun = () => {
-    setConfirm(null);
+    setConfirm(false);
     setEditing(false);
+    // Where "Writing the notes…" shows, and where they land.
+    setTab("summary");
     onRerun();
   };
-  const resume = () => {
-    setConfirm(null);
-    setEditing(false);
-    onResume();
-  };
+
+  // Write notes, or Re-run over an edited document behind an inline confirm:
+  // the webview has no reliable dialog. Offered on both the transcript tab,
+  // where the review ends, and the summary tab.
+  const writeControls = confirm ? (
+    <>
+      <span className="text-xs text-warn">This replaces the document you edited.</span>
+      <button onClick={rerun} disabled={busy}>
+        Re-run anyway
+      </button>
+      <button onClick={() => setConfirm(false)}>Keep it</button>
+    </>
+  ) : (
+    <Button
+      tone={detail.summary ? "ghost" : "primary"}
+      onClick={() => (edited ? setConfirm(true) : rerun())}
+      disabled={busy}
+    >
+      {detail.summary ? "Re-run notes" : "Write notes"}
+    </Button>
+  );
 
   const notesPane = (
     <section className="max-w-[68ch]">
@@ -778,53 +888,63 @@ function Detail({
     </section>
   );
 
-  // Never while recording: a resumed meeting's cleaned transcript stops where
-  // the last Stop did, and the new segments are what is worth watching land.
-  // (The backend clears it on resume; this covers the refresh in between.)
-  const hasClean = !!clean_transcript && !isRecording;
+  // While capture is running: the blocks as they land, timestamped, read
+  // only. Once it has stopped: one box holding the whole transcript, which is
+  // exactly the text Write notes sends.
   const transcriptPane = (
     <section>
-      <h3>
-        {hasClean && !showRaw ? "Transcript" : "Raw transcript"}
-        {hasClean && (
-          // The raw segments are still the record of what was heard, so the
-          // repaired version never replaces them — it just gets shown first.
-          <button className="border-none bg-transparent p-0 text-accent underline decoration-dotted hover:brightness-110" onClick={() => setShowRaw(!showRaw)}>
-            {showRaw ? "Show cleaned" : "Show raw"}
-          </button>
-        )}
-      </h3>
-      {hasClean && !showRaw && (
-        <div className="max-w-[68ch] whitespace-pre-line">
-          {clean_transcript!.split("\n\n").map((para, i) => (
-            <p key={i}>{para}</p>
-          ))}
-        </div>
-      )}
-      {(!hasClean || showRaw) && (
-      <>
-      {segments.length === 0 && (
-        <p className="text-muted">
-          {isRecording ? "Listening — the first block lands after two minutes." : "Nothing was transcribed."}
-        </p>
-      )}
-      <div className="max-w-[68ch] whitespace-pre-line">
-        {segments.map((s) =>
-          s.text ? (
-            <p key={s.id}>
-              <span className="mr-2 text-xs text-muted">{hhmm(s.started_at)}</span> {s.text}
+      <h3>Transcript</h3>
+      {capturing ? (
+        <>
+          {segments.length === 0 && (
+            <p className="text-muted">
+              {isRecording ? "Listening — the first block lands after two minutes." : "Finishing the last block…"}
             </p>
-          ) : (
-            // A visible gap, not a silent one: a chunk that failed to
-            // transcribe is two minutes the notes below never saw.
-            <p key={s.id} className="my-2 block text-xs text-muted">
-              <span className="mr-2 text-xs text-muted">{hhmm(s.started_at)}</span> (this stretch could not be
-              transcribed)
+          )}
+          <div className="max-w-[68ch] whitespace-pre-line">
+            {segments.map((s) =>
+              s.text ? (
+                <p key={s.id}>
+                  <span className="mr-2 text-xs text-muted">{hhmm(s.started_at)}</span> {s.text}
+                </p>
+              ) : (
+                // A visible gap, not a silent one: a chunk that failed to
+                // transcribe is two minutes the notes will never see — unless
+                // it is typed back in once the meeting has stopped.
+                <p key={s.id} className="my-2 text-xs text-muted">
+                  <span className="mr-2">{hhmm(s.started_at)}</span> (this stretch could not be transcribed)
+                </p>
+              ),
+            )}
+          </div>
+          {!isRecording && segments.length > 0 && (
+            <p className="text-xs text-muted">Finishing the last block…</p>
+          )}
+        </>
+      ) : (
+        <>
+          {!running && (
+            <p className="my-1.5 text-xs text-muted">
+              Fix names and mis-heard words, then write the notes.
             </p>
-          ),
-        )}
-      </div>
-      </>
+          )}
+          {stale && finished && (
+            <p className="my-1.5 text-xs text-warn">
+              The notes were written before this text changed. Re-run notes to
+              rebuild them from it.
+            </p>
+          )}
+          <textarea
+            className="min-h-[60vh] w-full max-w-[80ch] resize-y rounded-md border border-line bg-surface px-3 py-2.5 text-sm leading-relaxed text-text outline-none transition-colors focus:border-accent read-only:text-muted"
+            value={transcriptDraft}
+            onChange={(e) => onEditTranscript(e.target.value)}
+            onBlur={onBlurTranscript}
+            readOnly={running}
+            placeholder="Nothing was transcribed. Type what was said here and it goes to the notes."
+            spellCheck={false}
+          />
+          {finished && <div className="mt-3 flex flex-wrap items-center gap-2">{writeControls}</div>}
+        </>
       )}
     </section>
   );
@@ -836,13 +956,13 @@ function Detail({
     <section>
       <div className="flex items-center gap-2.5">
         <h3>Summary</h3>
-        {!running && !editing && (
-          <button className="border-none bg-transparent p-0 text-accent underline decoration-dotted hover:brightness-110" onClick={beginEdit} disabled={busy}>
+        {finished && !editing && (
+          <button className="border-none bg-transparent p-0 text-accent underline decoration-dotted hover:text-muted" onClick={beginEdit} disabled={busy}>
             Edit
           </button>
         )}
         {editing && (
-          <button className="border-none bg-transparent p-0 text-accent underline decoration-dotted hover:brightness-110" onClick={endEdit} disabled={busy}>
+          <button className="border-none bg-transparent p-0 text-accent underline decoration-dotted hover:text-muted" onClick={endEdit} disabled={busy}>
             Done
           </button>
         )}
@@ -850,6 +970,12 @@ function Detail({
           <span className="text-xs italic text-muted">edited by you</span>
         )}
       </div>
+      {stale && finished && !editing && (
+        <p className="my-1.5 text-xs text-warn">
+          Written before the transcript changed. Re-run notes to rebuild it
+          from the current text.
+        </p>
+      )}
       {editing ? (
         <>
           <textarea
@@ -865,8 +991,8 @@ function Detail({
           </p>
           <div className="mt-3 border-t border-line pt-3">
             <p className="text-muted">Preview</p>
-            {summaryDraft.trim() ? (
-              <Markdown source={summaryDraft} />
+            {previewSource.trim() ? (
+              <Markdown source={previewSource} />
             ) : (
               <p className="text-muted">Nothing to show yet.</p>
             )}
@@ -875,7 +1001,21 @@ function Detail({
       ) : detail.summary ? (
         <Markdown source={detail.summary} />
       ) : (
-        !running && <p className="text-muted">No notes yet.</p>
+        !running &&
+        (finished ? (
+          <p className="text-muted">
+            No notes yet —{" "}
+            <button
+              className="border-none bg-transparent p-0 text-accent underline decoration-dotted hover:text-muted"
+              onClick={() => setTab("transcript")}
+            >
+              review the transcript
+            </button>
+            , then write them.
+          </p>
+        ) : (
+          <p className="text-muted">No notes yet.</p>
+        ))
       )}
     </section>
   );
@@ -911,41 +1051,16 @@ function Detail({
     </section>
   );
 
-  // Any finished meeting, not just a failed one: the usual reason to re-run
-  // is having corrected something in the notes, and the reason to resume is
-  // that the meeting was not actually over. Both end with the model rewriting
-  // the document — a resume at its next Stop — so over a hand-edited one
-  // either asks first, inline: the webview has no reliable dialog.
+  // Any stopped meeting. Resume no longer asks first: its Stop leaves the
+  // write-up alone, and only Write notes / Re-run notes replaces it.
   const finishedRow = finished && (
     <div className="mt-5 flex flex-wrap items-center gap-2">
-      {confirm ? (
-        <>
-          <span className="text-xs text-warn">
-            {confirm === "rerun"
-              ? "This replaces the document you edited."
-              : "Stopping will replace the document you edited."}
-          </span>
-          <button
-            onClick={confirm === "rerun" ? rerun : resume}
-            disabled={busy || (confirm === "resume" && !canRecord)}
-          >
-            {confirm === "rerun" ? "Re-run anyway" : "Resume anyway"}
-          </button>
-          <button onClick={() => setConfirm(null)}>Keep it</button>
-        </>
-      ) : (
-        <>
-          <button
-            onClick={() => (edited ? setConfirm("resume") : resume())}
-            disabled={busy || !canRecord}
-          >
-            ● Resume transcribing
-          </button>
-          <button onClick={() => (edited ? setConfirm("rerun") : rerun())} disabled={busy}>
-            Re-run notes
-          </button>
-        </>
+      {!confirm && (
+        <button onClick={onResume} disabled={busy || !canRecord}>
+          ● Resume transcribing
+        </button>
       )}
+      {writeControls}
     </div>
   );
 
@@ -961,7 +1076,7 @@ function Detail({
 
       {/* While recording there is nothing to summarize, and the transcript
           and the scratchpad sit side by side: the whole point of the
-          scratchpad is correcting what you are reading land wrong, so they
+          scratchpad is noting down what you are reading land wrong, so they
           have to be readable at the same time. Once the meeting is over the
           page becomes a document with three tabs. */}
       {isRecording ? (
@@ -994,8 +1109,7 @@ function Detail({
                   <p className="text-muted">{meeting.error}</p>
                 </div>
               )}
-              {meeting.state === "cleaning" && <p className="text-muted">Cleaning the transcript…</p>}
-              {meeting.state === "summarizing" && <p className="text-muted">Writing the notes…</p>}
+              {running && <p className="text-muted">Writing the notes…</p>}
               {summaryPane}
               {actionsPane}
               {finishedRow}
@@ -1009,7 +1123,7 @@ function Detail({
           )}
           {tab === "transcript" && transcriptPane}
 
-          <button className="rounded-md border border-line px-2.5 py-1 text-muted transition-colors hover:border-bad hover:text-bad" onClick={onDelete} disabled={busy}>
+          <button className="mt-6 rounded-md border border-line px-2.5 py-1 text-muted transition-colors hover:border-bad hover:text-bad" onClick={onDelete} disabled={busy}>
             Delete meeting
           </button>
         </>

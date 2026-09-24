@@ -19,7 +19,7 @@ from . import ui
 # What a marked row says instead of its details.
 MARK_WORDS = {ui.DONE: "done", ui.DELETE: "will be deleted"}
 
-EMPTY_HINT = "Add at least one task to start."
+EMPTY_HINT = ui.EMPTY_HINT
 
 
 class WelcomeScreen:

@@ -63,7 +63,7 @@ export default function Welcome({ state }: { state: WelcomeState }) {
             lets a long one scroll from the top, instead of always hugging it. */}
         <div className="mx-auto flex min-h-full w-[36rem] max-w-[calc(100%-4rem)]
                         flex-col justify-center py-[3rem]">
-          <h1 className="gate-rise text-[2.1rem] font-semibold tracking-tight text-white">
+          <h1 className="gate-rise text-[2.1rem] font-semibold tracking-tight text-text">
             {state.greeting}
           </h1>
           <p className="mt-[0.15rem] text-[0.95rem] text-muted">{state.date}</p>
@@ -119,7 +119,7 @@ export default function Welcome({ state }: { state: WelcomeState }) {
         </div>
       </div>
 
-      <div className="w-full border-t border-line/60 bg-bg">
+      <div className="w-full border-t border-line/60 bg-bg/70 backdrop-blur-sm">
         <div className="mx-auto flex w-[36rem] max-w-[calc(100%-4rem)] flex-col gap-[0.6rem] py-[1.2rem]">
           <div className="flex items-center gap-[0.6rem]">
             <label htmlFor="gate-minutes" className="text-[0.9rem] text-muted">

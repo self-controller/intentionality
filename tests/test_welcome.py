@@ -141,12 +141,12 @@ class TestDueWords(unittest.TestCase):
     def test_row_detail(self):
         for row, expected in (
             (Row("typed"), ""),
-            (Row("c", ActiveTask(1, "c", 2, True)), "carried 2×"),
+            (Row("c", ActiveTask(1, "c", 2, True)), ""),
             (Row("d", ActiveTask(1, "d", 0, False, Details(due_date="2026-09-11"))), "due today"),
             (Row("x", DETAILED), "due Sunday · school, urgent · notes"),
             (
                 Row("c", ActiveTask(1, "c", 1, True, Details(due_date="2026-09-12", labels=("a",)))),
-                "carried 1× · due tomorrow · a",
+                "due tomorrow · a",
             ),
         ):
             with self.subTest(title=row.title):
@@ -197,7 +197,7 @@ class TestTerminalWelcome(TerminalCase):
         out = self.out.getvalue()
         self.assertIn("e N = due date, notes, labels", out)
         self.assertEqual(out.count("Add at least one task first."), 1)
-        self.assertIn("  1. carried  (carried 1×)  [delete]", out)
+        self.assertIn("  1. carried  [delete]", out)
         # The recovery sweep printed the notes; the terminal doesn't repeat them.
         self.assertNotIn("already printed", out)
 
@@ -207,7 +207,7 @@ class TestTerminalWelcome(TerminalCase):
         self.assertEqual(p, ui.Plan([2], [1], [], [], 45))
         out = self.out.getvalue()
         self.assertEqual(out.count("whole number above zero"), 2)
-        self.assertIn("  1. carried  (carried 1×)  [done]", out)
+        self.assertIn("  1. carried  [done]", out)
 
     def test_bad_numbers_and_refusals_are_said(self):
         self.script("x 9", "d 1", "", "")
@@ -238,7 +238,7 @@ class TestTerminalWelcome(TerminalCase):
         self.assertIn(ui.BAD_DUE, out)
         self.assertIn(ui.MARKED, out)
         self.assertIn("Labels there are: school, urgent.", out)
-        self.assertIn("carried 1× · due tomorrow · school, Errands · notes", out)
+        self.assertIn("due tomorrow · school, Errands · notes", out)
         prompts = "".join(self.prompts)
         self.assertIn("[2026-09-13]", prompts)
         self.assertIn("[old notes]", prompts)

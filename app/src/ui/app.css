@@ -41,8 +41,6 @@
   textarea:focus { border-color: var(--color-accent); }
   ::placeholder { color: var(--color-muted); opacity: 0.8; }
   select option { background: var(--color-surface); color: var(--color-text); }
-  /* The date picker's own chrome follows the page, not the platform. */
-  input[type="date"] { width: auto; color-scheme: dark; }
 }
 
 /* ------------------------------------------------------------------------

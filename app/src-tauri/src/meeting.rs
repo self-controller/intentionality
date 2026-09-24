@@ -2,10 +2,14 @@
 //!
 //! `start` opens the microphone and returns immediately; a background task
 //! then transcribes each chunk as it is cut and writes it to the store, so the
-//! transcript survives the app being killed mid-meeting and the summary at
-//! Stop has only the tail chunk left to wait for. `stop` closes the microphone
-//! and returns; draining that tail and asking the model for notes happen in a
-//! task behind it, so the click is never held open by a network call.
+//! transcript survives the app being killed mid-meeting. `stop` closes the
+//! microphone and returns; draining the tail chunk happens in a task behind
+//! it, so the click is never held open by a network call.
+//!
+//! Stop does not write the notes. The meeting lands in 'done' with no summary,
+//! the user reads and corrects the transcript, and **Write notes**
+//! (`rerun_notes`) is what asks the model — once, from the transcript as they
+//! left it.
 //!
 //! Nothing here is reachable from a timer. Capture begins on an explicit click
 //! and ends on an explicit click — see the note in transcribe.rs about why.
@@ -31,8 +35,8 @@ pub async fn start(app: &AppHandle, target: Option<String>) -> Result<RecordingN
 
 /// Pick a finished meeting back up: the microphone opens on it again and new
 /// chunks carry on after its last segment. Nothing else is special about it
-/// from here on — it is an ordinary 'recording' row, so the next Stop cleans
-/// and writes up the whole transcript, old part and new.
+/// from here on — it is an ordinary 'recording' row, and the next Stop leaves
+/// the whole transcript, old part and new, ready to review and write up.
 pub async fn resume(app: &AppHandle, meeting_id: i64, target: Option<String>) -> Result<RecordingNow> {
     let state = app.state::<AppState>();
     // After the microphone, like `start`: a pw-record that cannot start must
@@ -163,22 +167,20 @@ async fn capture(
     }
 }
 
-/// Close the microphone and return. The tail chunk and the notes are finished
-/// off in a task of their own.
+/// Close the microphone and return. The tail chunk is drained in a task of
+/// its own.
 ///
 /// Everything after `stop_capture` used to be awaited here, which made Stop
-/// take as long as an OpenAI round trip for the tail chunk plus a Claude call
-/// for the notes — during which the click had produced no visible change at
-/// all and the recording indicator was still running. It read as a Stop that
-/// had not worked, and the honest fix is to return when the thing the button
-/// names has actually happened: the microphone is shut.
+/// take as long as an OpenAI round trip for the tail chunk — during which the
+/// click had produced no visible change at all and the recording indicator was
+/// still running. The honest fix is to return when the thing the button names
+/// has actually happened: the microphone is shut.
 ///
-/// The row is moved to 'cleaning' *before* the drain rather than after it, so
-/// the UI has a state to show for that whole window and `ended_at` is the
-/// moment recording stopped rather than the moment the model replied.
-///
-/// `meeting:done` still fires either way: a meeting whose summary failed keeps
-/// its transcript, and the UI has to stop waiting on it regardless.
+/// `ended_at` is stamped here, the moment recording stopped, but the row stays
+/// 'recording' until the tail chunk has landed: the UI keeps the transcript
+/// read-only for exactly that window, so nothing typed can race the last
+/// segment. Then it moves to 'done' with no summary — stopped, notes not yet
+/// written — and `meeting:done` tells the UI to hand the transcript over.
 pub async fn stop(app: &AppHandle) -> Result<i64> {
     let state = app.state::<AppState>();
     // Taken, not read: two Stops racing means only one of them gets the handle.
@@ -190,29 +192,30 @@ pub async fn stop(app: &AppHandle) -> Result<i64> {
     // The microphone closes here. Everything below is wrap-up.
     handle.stop_capture();
 
-    let moved = {
+    let stopped = {
         let conn = state.conn.lock().unwrap();
-        db::meeting_cleaning(&conn, meeting_id)?
+        db::meeting_stopped(&conn, meeting_id)?
     };
-    if !moved {
+    if !stopped {
         return Err(AppError::Other("that meeting is no longer recording".into()));
     }
-    let _ = app.emit("meeting:state", json!({"meeting_id": meeting_id, "state": "cleaning"}));
 
     // Closing the microphone makes the capture task drain its tail chunk and
     // finish; awaiting that task is what guarantees the last thing said is in
-    // the transcript the model gets — so it is awaited in here, off the click.
+    // the transcript before it becomes editable.
     let capture = handle.take_capture();
     let app = app.clone();
     tokio::spawn(async move {
         if let Some(task) = capture {
             let _ = task.await;
         }
-        let outcome = write_notes(&app, meeting_id).await;
-        if let Err(err) = &outcome {
+        {
             let state = app.state::<AppState>();
             let conn = state.conn.lock().unwrap();
-            let _ = db::meeting_failed(&conn, meeting_id, &err.to_string());
+            // Guarded: a sweep that already failed this row keeps it failed.
+            if let Err(err) = db::meeting_state(&conn, meeting_id, "recording", "done") {
+                eprintln!("meeting {meeting_id}: could not mark stopped: {err}");
+            }
         }
         let _ = app.emit("meeting:done", meeting_id);
     });
@@ -271,8 +274,8 @@ fn read_files(rows: Vec<db::FileRow>) -> Vec<(String, Loaded)> {
 /// `uploaded` as it arrives, so the caller can delete them all whether this
 /// finishes or stops halfway.
 ///
-/// An upload that fails fails the run, the same as an API error during the
-/// repair: it says nothing about the file and everything about the network or
+/// An upload that fails fails the run, the same as an API error would: it
+/// says nothing about the file and everything about the network or
 /// the key, and writing notes without a file the user attached would quietly
 /// be worse notes. Re-run notes is the fix.
 async fn upload_files(
@@ -300,21 +303,25 @@ async fn upload_files(
     Ok(files)
 }
 
-/// Repair the transcript, then write the notes from it. Two model calls, one
-/// logical operation. Split out so `stop` has exactly one place to catch a
-/// failure and mark the meeting, whatever went wrong.
+/// Write the notes from the transcript as it stands. Split out so
+/// `rerun_notes` has exactly one place to catch a failure and mark the
+/// meeting, whatever went wrong.
 ///
 /// The inputs are snapshotted at the top, in one lock: a note the user saves
 /// while the model is thinking belongs to the next run, and **Re-run notes**
 /// is how they ask for it.
 async fn write_notes(app: &AppHandle, meeting_id: i64) -> Result<()> {
     let state = app.state::<AppState>();
-    let (raw, notes, rows) = {
+    let (raw, notes, rows, edited) = {
         let conn = state.conn.lock().unwrap();
         (
             db::transcript(&conn, meeting_id)?,
             db::meeting_notes_text(&conn, meeting_id)?,
             db::meeting_file_rows(&conn, meeting_id)?,
+            // Read here, with the transcript itself: these notes are about to
+            // be written from this exact text, and finish_meeting may only
+            // clear the stale mark if nothing was edited in between.
+            db::transcript_edited_at(&conn, meeting_id)?,
         )
     };
     // Off the lock and off the async worker both. Reading up to 50 MB is short
@@ -343,7 +350,7 @@ async fn write_notes(app: &AppHandle, meeting_id: i64) -> Result<()> {
     let result = match upload_files(loaded, &mut uploaded).await {
         Ok(files) => {
             let ctx = claude::MeetingContext { notes, files };
-            notes_from(app, meeting_id, &raw, &ctx).await
+            notes_from(app, meeting_id, &raw, &ctx, edited.as_deref()).await
         }
         Err(err) => Err(err),
     };
@@ -353,42 +360,26 @@ async fn write_notes(app: &AppHandle, meeting_id: i64) -> Result<()> {
     result
 }
 
-/// The two model calls and the writes after each, with every input already in
-/// hand. Split from `write_notes` so that its caller has one place to clean up
-/// the uploads on any outcome.
+/// The model call and the write after it, with every input already in hand.
+/// Split from `write_notes` so that its caller has one place to clean up the
+/// uploads on any outcome.
 async fn notes_from(
     app: &AppHandle,
     meeting_id: i64,
     raw: &str,
     ctx: &claude::MeetingContext,
+    // What `transcript_edited_at` read when `raw` was taken.
+    transcript_seen: Option<&str>,
 ) -> Result<()> {
     let state = app.state::<AppState>();
 
     // Shared with the two analysis timers: it exists to stop concurrent calls
-    // to the model, and a meeting ending as a scheduled check fires is exactly
-    // that. Taken here and not around the recording, which can run for hours.
-    //
-    // Held across both calls, because they are one operation: a scheduled
-    // check landing between the repair and the notes would interleave with a
-    // meeting that is halfway written. That does mean the hold is now minutes
-    // rather than seconds on a long meeting, and a scheduled check firing in
-    // that window waits rather than running.
+    // to the model, and a meeting being written up as a scheduled check fires
+    // is exactly that. Taken here and not around the recording, which can run
+    // for hours.
     let _running = state.analysis_lock.lock().await;
 
-    let clean = claude::clean_transcript(raw, ctx).await?;
-    {
-        let conn = state.conn.lock().unwrap();
-        db::set_clean_transcript(&conn, meeting_id, &clean)?;
-        // Guarded, so a sweep that already failed this row on startup cannot
-        // be dragged back into a wrap-up state by a task that outlived it.
-        db::meeting_state(&conn, meeting_id, "cleaning", "summarizing")?;
-    }
-    let _ = app.emit(
-        "meeting:state",
-        json!({"meeting_id": meeting_id, "state": "summarizing"}),
-    );
-
-    let notes = claude::summarize_meeting(&clean, ctx).await?;
+    let notes = claude::summarize_meeting(raw, ctx).await?;
 
     let mut conn = state.conn.lock().unwrap();
     db::finish_meeting(
@@ -398,16 +389,16 @@ async fn notes_from(
             title: &notes.title,
             summary: &notes.summary,
             action_items: &notes.action_items,
+            transcript_seen,
         },
     )
 }
 
-/// Re-run the notes for a meeting that already finished, or failed. The
-/// transcript is already stored, so this costs two model calls and no audio.
-///
-/// It re-cleans as well as re-summarizes — which is the point, since the
-/// notes and files the repair pass reads are exactly what the user is likely
-/// to have just corrected.
+/// Write the notes for a stopped meeting, or re-write them. This is the only
+/// way notes get written: Stop leaves the transcript for the user to review
+/// first. The transcript is already stored, so this costs one model call and
+/// no audio, and it reads the transcript, notes and files exactly as the user
+/// has just left them.
 pub async fn rerun_notes(app: &AppHandle, meeting_id: i64) -> Result<()> {
     let state = app.state::<AppState>();
     if state.meeting_id() == Some(meeting_id) {
@@ -423,7 +414,7 @@ pub async fn rerun_notes(app: &AppHandle, meeting_id: i64) -> Result<()> {
     }
     let _ = app.emit(
         "meeting:state",
-        json!({"meeting_id": meeting_id, "state": "cleaning"}),
+        json!({"meeting_id": meeting_id, "state": "summarizing"}),
     );
 
     let outcome = write_notes(app, meeting_id).await;

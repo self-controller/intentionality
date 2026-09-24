@@ -1,4 +1,4 @@
--- Schema v8, applied in full by store.init() on a fresh database only.
+-- Schema v10, applied in full by store.init() on a fresh database only.
 -- Existing databases are upgraded by the migrations in store.py; this file
 -- must always describe the same end state those migrations produce.
 -- journal_mode is persistent; set at creation.
@@ -9,7 +9,7 @@ CREATE TABLE meta (
     value TEXT NOT NULL
 );
 
-INSERT INTO meta (key, value) VALUES ('schema_version', '8');
+INSERT INTO meta (key, value) VALUES ('schema_version', '10');
 
 CREATE TABLE session (
     id                INTEGER PRIMARY KEY,
@@ -60,6 +60,10 @@ CREATE TABLE task (
 CREATE UNIQUE INDEX task_carried_once
     ON task (carried_from) WHERE carried_from IS NOT NULL;
 
+-- Every board, backlog and session-list read filters task by session_id (the
+-- session list twice per row, for its label). Added by the v10 migration.
+CREATE INDEX task_session ON task (session_id, position);
+
 -- Free-text labels the user invents as they go, shared across tasks so the
 -- second card can reuse the first one's tag. A label nothing wears is a
 -- preset: it stays, offered to every card, until it is deleted by name from
@@ -98,6 +102,7 @@ CREATE TABLE analysis (
     recommendation_note TEXT             -- one sentence tying the advice to
                                          -- what was actually observed
 );
+CREATE INDEX analysis_session ON analysis (session_id);  -- v10
 
 -- A meeting the desktop app transcribed: microphone audio captured between an
 -- explicit Start and Stop, turned into text a chunk at a time, then summarized.
@@ -109,12 +114,13 @@ CREATE TABLE meeting (
     ended_at     TEXT,               -- NULL while recording, or if it ended badly
     title        TEXT NOT NULL DEFAULT '',  -- the model's, written at summarize time
     -- What the user typed during the meeting. Never model output. It is the
-    -- glossary the cleaning pass reads names and jargon off, and it is also
-    -- where a todo nobody said out loud gets recorded.
+    -- glossary the notes read names and jargon off, and it is also where a
+    -- todo nobody said out loud gets recorded.
     notes        TEXT NOT NULL DEFAULT '',
-    -- The cleaning pass's output: the raw segments repaired against the notes
-    -- and files. NULL until it has run. meeting_segment stays the record of
-    -- what was actually heard and is never overwritten by it.
+    -- Unused since the transcript-repair pass was removed: the user now edits
+    -- the transcript itself (meeting_segment) before the notes are written.
+    -- Kept rather than dropped so older meetings' repaired text is still
+    -- recoverable; nothing reads or writes it.
     clean_transcript TEXT,
     -- The write-up: one markdown document. The model drafts it at summarize
     -- time -- an opening paragraph, then '## Key points' and, only when there
@@ -124,19 +130,33 @@ CREATE TABLE meeting (
     -- paragraph beside a JSON key_points column and a details column; the v6
     -- migration folded both in.
     summary      TEXT,
-    -- 'recording' while the microphone is live, then two wrap-up states:
-    -- 'cleaning' while the transcript is being repaired and 'summarizing'
-    -- while the notes are written. 'done' once notes landed. 'failed' means
-    -- they never arrived -- but the transcript is still there and still worth
-    -- reading, so a failed meeting is displayed, not hidden.
+    -- 'recording' while the microphone is live (and until the last chunk has
+    -- landed after Stop), then 'done': stopped, with the transcript ready to
+    -- review. summary IS NULL there means no notes have been written yet.
+    -- 'summarizing' while Write notes runs; 'failed' means the notes never
+    -- arrived -- but the transcript is still there and still worth reading,
+    -- so a failed meeting is displayed, not hidden. 'cleaning' belonged to
+    -- the removed repair pass and is no longer written; the startup sweep
+    -- fails any row an older build left there.
     state        TEXT NOT NULL DEFAULT 'recording'
                  CHECK (state IN ('recording', 'cleaning', 'summarizing', 'done', 'failed')),
     error        TEXT,               -- why it failed, shown in the UI
     -- When the user last saved an edit to summary. NULL means the document is
     -- as the model wrote it; finish_meeting clears it, which is what lets the
-    -- app ask before a re-run throws hand-written edits away. Last on purpose:
-    -- the v6 migration adds it with ALTER TABLE, which appends.
-    summary_edited_at TEXT
+    -- app ask before a re-run throws hand-written edits away. Added by the v6
+    -- migration with ALTER TABLE, which appends -- hence its position here.
+    summary_edited_at TEXT,
+    -- When the user last edited the transcript, or a resume started growing
+    -- it. NULL means the segments are as the current write-up saw them;
+    -- non-NULL is exactly the claim "the transcript has changed since these
+    -- notes were written", which is what marks the write-up stale and offers
+    -- Re-run notes.
+    --
+    -- finish_meeting clears it only when it still holds the value the run
+    -- started from: write_notes snapshots the transcript and then the model
+    -- works for minutes, so an edit made during that run was never seen by it
+    -- and must keep the mark. Appended by the v9 migration.
+    transcript_edited_at TEXT
 );
 
 -- One transcribed chunk of audio. Rows land while the meeting is still running,

@@ -1,7 +1,7 @@
-import React, { useEffect, useRef, useState } from "react";
-import { Button, TextInput } from "../src/ui/primitives";
+import React, { useEffect, useRef } from "react";
+import { Button } from "../src/ui/primitives";
 import { post } from "./bridge";
-import type { Ask, Choice } from "./types";
+import type { Blank, Choice } from "./types";
 
 /** The log pane, shared by both question screens.
  *
@@ -35,27 +35,9 @@ function Frame({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function AskScreen({ state }: { state: Ask }) {
-  const [text, setText] = useState("");
-  return (
-    <Frame>
-      {state.log && <Log text={state.log} />}
-      {state.question && (
-        <p className="text-[1.15rem] font-medium text-text">{state.question}</p>
-      )}
-      <div className="flex gap-[0.5rem]">
-        <TextInput
-          value={text}
-          autoFocus
-          placeholder={state.placeholder}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") post("answer", { text }); }}
-          className="flex-1"
-        />
-        <Button tone="primary" onClick={() => post("answer", { text })}>Enter</Button>
-      </div>
-    </Frame>
-  );
+/** Between questions: the question just answered is gone, the log stays. */
+export function BlankScreen({ state }: { state: Blank }) {
+  return <Frame>{state.log && <Log text={state.log} />}</Frame>;
 }
 
 export function ChoiceScreen({ state }: { state: Choice }) {

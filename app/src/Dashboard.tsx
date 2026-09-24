@@ -29,10 +29,13 @@ export default function Dashboard() {
   // starts appears without leaving the tab. The selection stays put once there
   // is one: a session opening must not yank the pane out from under a read.
   const loadSessions = useCallback(() => {
-    api.listSessions(15).then((list) => {
-      setSessions(list);
-      if (list.length > 0) setSelected((cur) => cur ?? list[0].id);
-    });
+    api
+      .listSessions(15)
+      .then((list) => {
+        setSessions(list);
+        if (list.length > 0) setSelected((cur) => cur ?? list[0].id);
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -50,8 +53,20 @@ export default function Dashboard() {
     setObserved(null);
     setAwError(null);
     setExpanded(new Set());
-    api.getSessionTasks(selected).then(setTasks);
-    api.getObserved(selected).then(setObserved).catch((e) => setAwError(String(e)));
+    // Clicking through sessions quickly leaves earlier answers in flight;
+    // only the current selection's may land.
+    let current = true;
+    api
+      .getSessionTasks(selected)
+      .then((list) => current && setTasks(list))
+      .catch(() => current && setTasks([]));
+    api
+      .getObserved(selected)
+      .then((o) => current && setObserved(o))
+      .catch((e) => current && setAwError(String(e)));
+    return () => {
+      current = false;
+    };
   }, [selected]);
 
   const session = sessions.find((s) => s.id === selected);
@@ -79,7 +94,7 @@ export default function Dashboard() {
               "block w-full overflow-hidden text-ellipsis whitespace-nowrap rounded-md " +
               "border px-2.5 py-1.5 text-left transition-colors duration-150 " +
               (s.id === selected
-                ? "border-accent bg-accent text-black"
+                ? "border-accent bg-accent text-bg"
                 : "border-line text-text hover:border-muted")
             }
             onClick={() => setSelected(s.id)}

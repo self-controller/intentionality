@@ -24,13 +24,9 @@ from gate import config, gui, handoff, store, ui
 
 
 class FakeBackend:
-    def __init__(self, asks=(), choices=(), plans=()):
-        self.asks, self.choices, self.plans = list(asks), list(choices), list(plans)
+    def __init__(self, choices=(), plans=()):
+        self.choices, self.plans = list(choices), list(plans)
         self.seen: list[tuple] = []
-
-    def ask(self, prompt):
-        self.seen.append(("ask", prompt))
-        return self.asks.pop(0)
 
     def confirm_choice(self, prompt, choices):
         self.seen.append(("confirm", prompt, choices))
@@ -51,12 +47,6 @@ class BackendCase(unittest.TestCase):
 
 
 class TestUiDispatch(BackendCase):
-    def test_ask_minutes_is_built_on_ask(self):
-        # The backend answers text; the validation loop stays in ui.
-        ui.backend = FakeBackend(asks=["ninety", "0", " 90 "])
-        self.assertEqual(ui.ask_minutes(), 90)
-        self.assertEqual(self.out.getvalue().count("whole number above zero"), 2)
-
     def test_confirm_and_welcome_go_straight_through(self):
         plan = ui.Plan(keep=[], done=[], delete=[], new=[ui.NewTask("x")], intended_minutes=None)
         ui.backend = back = FakeBackend(choices=["n"], plans=[plan])
@@ -71,12 +61,6 @@ class TestUiDispatch(BackendCase):
 
 
 class TestPromptParsing(unittest.TestCase):
-    def test_labels_from_the_prompt(self):
-        self.assertEqual(
-            gui.parse_choices("[y] commit  [r] revise  [q] quit without saving > ", "yrq"),
-            [("y", "commit"), ("r", "revise"), ("q", "quit without saving")],
-        )
-
     def test_known_sets_when_the_prompt_is_bare(self):
         # The debrief prints its legend once and then prompts per task.
         self.assertEqual(
@@ -87,8 +71,7 @@ class TestPromptParsing(unittest.TestCase):
     def test_unknown_key_falls_back_to_itself(self):
         self.assertEqual(gui.parse_choices("pick > ", "ab"), [("a", "a"), ("b", "b")])
 
-    def test_question_text_drops_legend_and_caret(self):
-        self.assertEqual(gui.question_text("[y] commit  [r] revise > "), "")
+    def test_question_text_drops_caret(self):
         self.assertEqual(
             gui.question_text(f"{ui.MINUTES_QUESTION}\n> "), ui.MINUTES_QUESTION
         )

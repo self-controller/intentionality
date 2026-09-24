@@ -50,10 +50,8 @@ export interface Welcome {
   start_enabled: boolean;
 }
 
-export interface Ask {
-  screen: "ask";
-  question: string;
-  placeholder: string;
+export interface Blank {
+  screen: "blank";
   log: string;
 }
 
@@ -64,7 +62,7 @@ export interface Choice {
   log: string;
 }
 
-export type State = Welcome | Ask | Choice;
+export type State = Welcome | Blank | Choice;
 
 /** The uncommitted contents of an open details panel. Lives in Welcome so
  *  Start can commit it in the same message as everything else. */

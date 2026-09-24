@@ -8,7 +8,7 @@ from pathlib import Path
 from . import config
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 
 # Statuses that mean "still open" — what the debrief asks about and the
 # close paths carry into the backlog.
@@ -76,6 +76,12 @@ def init(conn: sqlite3.Connection) -> None:
     if version < 8:
         _backup(conn, suffix=".pre-v8.bak")
         _migrate_v7_to_v8(conn)
+    if version < 9:
+        _backup(conn, suffix=".pre-v9.bak")
+        _migrate_v8_to_v9(conn)
+    if version < 10:
+        _backup(conn, suffix=".pre-v10.bak")
+        _migrate_v9_to_v10(conn)
 
 
 def _backup(conn: sqlite3.Connection, suffix: str) -> None:
@@ -597,6 +603,55 @@ def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
         conn.isolation_level = saved_isolation
 
 
+def _migrate_v8_to_v9(conn: sqlite3.Connection) -> None:
+    """v8 -> v9: meeting.transcript_edited_at, set when a raw segment is edited.
+
+    The raw transcript became editable, and the cleaned text and the write-up
+    are both derived from it -- so there has to be somewhere to record that
+    they are now behind. NULL means the segments are as transcribed, or that
+    the current write-up was made from them.
+
+    One nullable column, no CHECK, so ALTER TABLE ADD COLUMN is the whole
+    migration -- the _migrate_v7_to_v8 idiom. It appends, which is why
+    schema.sql lists it after summary_edited_at. Every existing meeting starts
+    with none: nothing has been hand-edited before this version existed.
+    """
+    saved_isolation = conn.isolation_level
+    conn.isolation_level = None  # autocommit: we manage the transaction
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("ALTER TABLE meeting ADD COLUMN transcript_edited_at TEXT")
+        conn.execute("UPDATE meta SET value = '9' WHERE key = 'schema_version'")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = saved_isolation
+
+
+def _migrate_v9_to_v10(conn: sqlite3.Connection) -> None:
+    """v9 -> v10: indexes on task(session_id, position) and analysis(session_id).
+
+    Nothing but indexes, so no row changes and no rebuild. Every board and
+    session-list read filters by session_id, and the session list does it
+    twice per row -- without these, each was a scan of every task ever made.
+    """
+    saved_isolation = conn.isolation_level
+    conn.isolation_level = None  # autocommit: we manage the transaction
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("CREATE INDEX task_session ON task (session_id, position)")
+        conn.execute("CREATE INDEX analysis_session ON analysis (session_id)")
+        conn.execute("UPDATE meta SET value = '10' WHERE key = 'schema_version'")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = saved_isolation
+
+
 def commit_draft(
     conn: sqlite3.Connection,
     statement: str,
@@ -868,20 +923,23 @@ def get_backlog(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def carry_count(conn: sqlite3.Connection, task_id: int) -> int:
-    """How many sessions this task has been carried through (its ancestry)."""
-    return conn.execute(
-        """
-        WITH RECURSIVE chain(id) AS (
-            SELECT carried_from FROM task WHERE id = ? AND carried_from IS NOT NULL
-            UNION ALL
-            SELECT t.carried_from FROM task t
-            JOIN chain c ON t.id = c.id WHERE t.carried_from IS NOT NULL
-        )
-        SELECT COUNT(*) FROM chain
-        """,
-        (task_id,),
-    ).fetchone()[0]
+def backlog_carry_counts(conn: sqlite3.Connection) -> dict[int, int]:
+    """How many sessions each backlog task has been carried through (its
+    ancestry), in one query. Tasks never carried are absent (count 0)."""
+    return dict(
+        conn.execute(
+            """
+            WITH RECURSIVE chain(root, id) AS (
+                SELECT id, carried_from FROM task
+                WHERE session_id IS NULL AND carried_from IS NOT NULL
+                UNION ALL
+                SELECT c.root, t.carried_from FROM task t
+                JOIN chain c ON t.id = c.id WHERE t.carried_from IS NOT NULL
+            )
+            SELECT root, COUNT(*) FROM chain GROUP BY root
+            """
+        ).fetchall()
+    )
 
 
 def pull_from_backlog(
@@ -978,39 +1036,10 @@ def latest_open_session(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return rows[-1] if rows else None
 
 
-def add_analysis(
-    conn: sqlite3.Connection,
-    session_id: int,
-    window_start: str,
-    window_end: str,
-    headline: str,
-    alignment: int | None,
-    body: str,
-    observed_json: str,
-) -> int:
-    with conn:
-        cur = conn.execute(
-            "INSERT INTO analysis (session_id, created_at, window_start,"
-            " window_end, headline, alignment, body, observed_json)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (session_id, now(), window_start, window_end, headline, alignment,
-             body, observed_json),
-        )
-    return cur.lastrowid
-
-
 def get_analyses(conn: sqlite3.Connection, session_id: int) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM analysis WHERE session_id = ? ORDER BY id", (session_id,)
     ).fetchall()
-
-
-def mark_analysis_seen(conn: sqlite3.Connection, analysis_id: int) -> None:
-    with conn:
-        conn.execute(
-            "UPDATE analysis SET seen_at = ? WHERE id = ? AND seen_at IS NULL",
-            (now(), analysis_id),
-        )
 
 
 def get_setting(conn: sqlite3.Connection, key: str, default: str | None = None) -> str | None:
