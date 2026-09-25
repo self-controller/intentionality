@@ -230,7 +230,7 @@ screen's behaviour is finally covered by `tests/test_webstate.py`. The GTK
 version's state *was* its widget tree, so none of it could be asserted
 without a compositor.
 
-**Sizing.** `INTENTIONALITY_GATE_FONT_PX` (default 20) still means what it
+**Sizing.** `INTENTIONALITY_GATE_FONT_PX` (default 26) still means what it
 always did, now exactly: device pixels per `rem`. The view's zoom is set to
 `(font_px / 16) / monitor_scale`, so one rem is the same *physical* size
 under cage as it is in a window on the desktop. That matters because this
@@ -765,7 +765,7 @@ older than it understands. Inspect it anytime with the `sqlite3` CLI.
 | `INTENTIONALITY_AW_URL` | ActivityWatch API base URL | `http://localhost:5600` |
 | `INTENTIONALITY_SESSION_ID` | Set by the gate for the desktop; the app trusts it only if that session is still open | *(set by handoff)* |
 | `INTENTIONALITY_GATE_UI` | `gtk` asks for the graphical front end; anything else, or no display, is the terminal | *(terminal)* |
-| `INTENTIONALITY_GATE_FONT_PX` | Device pixels per `rem` in the graphical gate — its size knob, on any display | `20` |
+| `INTENTIONALITY_GATE_FONT_PX` | Device pixels per `rem` in the graphical gate — its size knob, on any display | `26` |
 | `INTENTIONALITY_GATE_ZOOM` | Overrides the computed webview zoom outright, when the rule is wrong for a monitor | *(computed)* |
 | `INTENTIONALITY_GATE_SOFTWARE` | Draws the gate without GPU acceleration; pair with the launchers, which also set `WEBKIT_DISABLE_DMABUF_RENDERER` | *(off)* |
 | `INTENTIONALITY_GATE_INSPECT` | Enables the WebKit inspector on the gate, for design work | *(off)* |

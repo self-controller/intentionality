@@ -49,7 +49,7 @@ _KNOWN_LABELS = {
 # many *physical* pixels -- see _zoom(). That is what makes the gate the same
 # size under cage as it is when tested nested inside GNOME, and it is the same
 # knob the console font took in /etc/vconsole.conf.
-DEFAULT_FONT_PX = 20
+DEFAULT_FONT_PX = 26
 REFERENCE_REM_PX = 16
 
 # The built bundle. Committed, because login cannot depend on an npm build.
@@ -237,7 +237,7 @@ class GtkUI:
             except ValueError:
                 pass
         # Hold (zoom x scale) constant and one rem is font_px physical pixels
-        # everywhere: 0.75 x 1.667 under GNOME, 1.25 x 1 under cage.
+        # everywhere: 0.975 x 1.667 under GNOME, 1.625 x 1 under cage.
         return (self.font_px / REFERENCE_REM_PX) / self._device_scale()
 
     def _apply_zoom(self, *_args) -> None:

@@ -57,6 +57,11 @@ textarea {
    copy 2000px below it so the loop never shows a seam. The shadow list lives
    in one custom property per layer so the element and its copy share it.
    Near-white stars on a grey sky that lightens toward the bottom. Positions are a fixed random scatter over 2000x2000px.
+
+   One tile is 2000px wide, but at the real gate (cage, 2880px panel, zoom
+   1.625 at the default font size, more at smaller ones) the viewport can be
+   wider than that, so Stars.tsx lays tiles side by side in .stars-col columns
+   until the width is covered.
    ------------------------------------------------------------------------ */
 .stars-bg {
   position: fixed;
@@ -1069,12 +1074,19 @@ textarea {
     1718px 1053px;
 }
 
-.stars-bg > div,
-.stars-bg > div::after {
+.stars-col {
+  position: absolute;
+  top: 0;
+  width: 2000px;
+  height: 100%;
+}
+
+.stars-col > div,
+.stars-col > div::after {
   background: transparent;
   color: #f8f9fa;
 }
-.stars-bg > div::after {
+.stars-col > div::after {
   content: "";
   position: absolute;
   top: 2000px;
@@ -1083,9 +1095,9 @@ textarea {
   box-shadow: inherit;
 }
 
-#stars { width: 1px; height: 1px; opacity: 0.6; box-shadow: var(--stars-1); animation: animStar 50s linear infinite; }
-#stars2 { width: 2px; height: 2px; opacity: 0.8; box-shadow: var(--stars-2); animation: animStar 100s linear infinite; }
-#stars3 { width: 3px; height: 3px; opacity: 1; box-shadow: var(--stars-3); animation: animStar 150s linear infinite; }
+.stars-1 { width: 1px; height: 1px; opacity: 0.6; box-shadow: var(--stars-1); animation: animStar 50s linear infinite; }
+.stars-2 { width: 2px; height: 2px; opacity: 0.8; box-shadow: var(--stars-2); animation: animStar 100s linear infinite; }
+.stars-3 { width: 3px; height: 3px; opacity: 1; box-shadow: var(--stars-3); animation: animStar 150s linear infinite; }
 
 @keyframes animStar {
   from { transform: translateY(0); }
@@ -1093,5 +1105,5 @@ textarea {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .stars-bg > div { animation: none; }
+  .stars-col > div { animation: none; }
 }
