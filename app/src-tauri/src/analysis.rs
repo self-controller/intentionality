@@ -80,12 +80,11 @@ async fn prepare(app: &AppHandle, session_id: i64) -> Result<Option<Prepared>> {
         let conn = state.conn.lock().unwrap();
         let Some(session) = db::get_session(&conn, session_id)? else { return Ok(None) };
         let tasks = db::session_tasks(&conn, session_id)?;
-        let window_start = db::last_analysis_end(&conn, session_id)?
-            .unwrap_or_else(|| session.started_at.clone());
-        let previous = db::list_analyses(&conn, session_id)?
-            .into_iter()
-            .next()
-            .map(|a| (a.headline, a.alignment));
+        let latest = db::latest_analysis(&conn, session_id)?;
+        let window_start = latest
+            .as_ref()
+            .map_or_else(|| session.started_at.clone(), |a| a.window_end.clone());
+        let previous = latest.map(|a| (a.headline, a.alignment));
         (session, tasks, window_start, previous)
     };
 
@@ -93,10 +92,20 @@ async fn prepare(app: &AppHandle, session_id: i64) -> Result<Option<Prepared>> {
     // A window AW cannot answer for reads as an empty one. `run` then skips it
     // as too quiet, and the checkpoint falls back — neither has to special-case
     // ActivityWatch being down.
-    let window = observed::observed(&window_start, &window_end)
-        .await
-        .unwrap_or_default();
-    let session_total = observed::observed(&session.started_at, &window_end).await.ok();
+    //
+    // The window is the tail of the session, so one fetch of the session's
+    // events answers both. If that larger fetch fails (a long session can
+    // outrun AW's timeout), the window alone is still worth asking for.
+    let (window, session_total) = match observed::fetch(&session.started_at, &window_end).await {
+        Ok(events) => (
+            observed::summarize(&events, &window_start, &window_end).unwrap_or_default(),
+            observed::summarize(&events, &session.started_at, &window_end).ok(),
+        ),
+        Err(_) => (
+            observed::observed(&window_start, &window_end).await.unwrap_or_default(),
+            None,
+        ),
+    };
 
     let elapsed_minutes = observed::parse_ts(&window_end)?
         .signed_duration_since(observed::parse_ts(&session.started_at)?)
@@ -123,7 +132,7 @@ pub async fn run(app: &AppHandle) -> Result<Option<i64>> {
     let Some(session_id) = state.session_id() else { return Ok(None) };
     // One analysis at a time: the two timers plus the manual button could
     // otherwise overlap, double-billing the API and racing on
-    // last_analysis_end (two runs would judge the same window twice).
+    // where the latest analysis ended (two runs would judge the same window twice).
     let _running = state.analysis_lock.lock().await;
 
     let Some(prep) = prepare(app, session_id).await? else { return Ok(None) };
@@ -242,7 +251,6 @@ pub async fn run_checkpoint(app: &AppHandle) -> Result<Option<i64>> {
 /// signal that actually reaches you, and the overlay guarantees the checkpoint
 /// is what is there when you do look.
 fn raise_window(app: &AppHandle) {
-    use tauri::Manager as _;
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();

@@ -3,7 +3,7 @@ use crate::recommendations::Recommendation;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize)]
 pub struct Session {
     pub id: i64,
     pub started_at: String,
@@ -30,6 +30,24 @@ pub struct AudioSource {
     pub label: String,
 }
 
+/// A tag a task wears. Free text the user invented; the colour was assigned
+/// when the label was first created and never changes, so the same word is the
+/// same colour on every card.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct Label {
+    pub name: String,
+    pub color: String,
+}
+
+/// A label as the labels panel and the editor list it: every one there is,
+/// with how many tasks wear it (0 = a preset nothing uses yet).
+#[derive(Serialize, Debug)]
+pub struct LabelSummary {
+    pub name: String,
+    pub color: String,
+    pub uses: i64,
+}
+
 #[derive(Serialize)]
 pub struct Task {
     pub id: i64,
@@ -38,6 +56,12 @@ pub struct Task {
     pub position: i64,
     pub status: String,
     pub carry_count: i64, // 0 for uncarried tasks
+    /// Plain text the user wrote on the card. Never rendered as markdown.
+    pub notes: String,
+    /// The day it is due, `YYYY-MM-DD`; None = no due date.
+    pub due_date: Option<String>,
+    /// Filled in by a second query, so a row read on its own starts empty.
+    pub labels: Vec<Label>,
 }
 
 #[derive(Serialize)]
@@ -45,7 +69,6 @@ pub struct Board {
     pub session: Option<Session>,
     pub tasks: Vec<Task>,   // current session's cards; empty in no-session mode
     pub backlog: Vec<Task>, // session_id NULL
-    pub unseen: i64,        // unread analyses for the badge
 }
 
 /// The entire post-drop board, written atomically. One command instead of
@@ -98,11 +121,18 @@ pub struct Health {
     pub session: Option<Session>,
     pub aw_ok: bool,
     pub build: BuildInfo,
+    /// Why the resume gate will not fire, when it will not. None = installed
+    /// and matching the repo (or no repo to compare against).
+    pub resume_gate: Option<String>,
 }
 
-/// A transcribed meeting. `summary`/`key_points` stay None until the model has
-/// run; `state` says why, so a meeting whose notes failed still displays with
-/// its transcript rather than looking empty.
+/// A transcribed meeting. `state` says where it is, so a meeting whose notes
+/// failed still displays with its transcript rather than looking empty.
+///
+/// This is the list row as well as the detail header, so it deliberately
+/// carries no large text: `notes`, the transcript and the write-up
+/// (`summary`) live on `MeetingDetail`, which is only ever fetched one
+/// meeting at a time.
 #[derive(Serialize)]
 pub struct Meeting {
     pub id: i64,
@@ -110,11 +140,27 @@ pub struct Meeting {
     pub started_at: String,
     pub ended_at: Option<String>,
     pub title: String,
-    pub summary: Option<String>,
-    pub key_points: Vec<String>, // stored as a JSON array; [] until summarized
-    pub state: String,           // "recording" | "summarizing" | "done" | "failed"
+    // "recording" | "summarizing" | "done" | "failed". ('cleaning' is only
+    // ever seen on a row a build with the old repair pass left behind.)
+    pub state: String,
     pub error: Option<String>,
     pub segment_count: i64,
+    /// Whether notes have been written. 'done' without them means stopped
+    /// and waiting for Write notes; this lets the list say so without
+    /// carrying the write-up itself.
+    pub has_summary: bool,
+}
+
+/// The microphone is open on this meeting, and has been since `since`.
+///
+/// `since` is not the meeting's `started_at`: a meeting picked back up a day
+/// after it ended has been recording for minutes, not a day, and the clock on
+/// the record bar should say so. It lives in Rust with the recording itself,
+/// so a tab switch that remounts the UI gets the same answer back.
+#[derive(Serialize)]
+pub struct RecordingNow {
+    pub meeting_id: i64,
+    pub since: String,
 }
 
 #[derive(Serialize)]
@@ -136,11 +182,45 @@ pub struct MeetingAction {
     pub task_id: Option<i64>,
 }
 
+/// A file the user attached as context for one meeting.
+///
+/// Note what is absent: `path` and `extracted`. The webview never learns where
+/// this app put the copy, and never gets the file's text back out -- it went
+/// in as context for the model, and the chip only needs enough to be
+/// recognised and removed.
+#[derive(Serialize)]
+pub struct MeetingFile {
+    pub id: i64,
+    pub position: i64,
+    pub name: String, // the original basename, display only
+    pub kind: String, // "text" | "pdf" | "image" | "office"
+    pub bytes: i64,
+    pub added_at: String,
+}
+
 /// One meeting with everything the detail pane needs, in a single command:
-/// the transcript arrives as segments so the UI can show which chunk failed.
+/// the transcript arrives as segments for the live view while recording, and
+/// stitched into one text for the editor once it has stopped.
 #[derive(Serialize)]
 pub struct MeetingDetail {
     pub meeting: Meeting,
     pub segments: Vec<MeetingSegment>,
     pub actions: Vec<MeetingAction>,
+    /// What the user typed. Never model output.
+    pub notes: String,
+    /// The write-up: one markdown document, the model's draft until the user
+    /// edits it. None until the model has run.
+    pub summary: Option<String>,
+    /// When the user last saved an edit to `summary`; None while it is as the
+    /// model wrote it. The UI asks before a re-run overwrites an edited
+    /// document, and this is how it knows to.
+    pub summary_edited_at: Option<String>,
+    /// `db::transcript`: what the editor shows and what the model is given.
+    pub transcript: String,
+    /// When the user last edited the transcript (or it grew on a resume);
+    /// None while it is as the current write-up saw it. Non-None means the
+    /// write-up was made from an older transcript, which is what the stale
+    /// marker says and what Re-run notes fixes.
+    pub transcript_edited_at: Option<String>,
+    pub files: Vec<MeetingFile>,
 }

@@ -1,53 +1,64 @@
-"""The gate's state machine: PULL -> ELICIT -> CONFIRM -> COMMIT.
+"""The gate's state machine: WELCOME -> COMMIT.
 
 Imports neither sqlite3 nor anything network-facing — the store is reached
-only through its functions. Elicitation is manual by design: the gate is a
-list you type, not a conversation.
+only through its functions. The gate is a list you edit, not a conversation:
+the tasks already waiting, kept, finished or deleted, plus any you add.
+There is no way out of run() without a session of at least one task, other
+than an abort (GateAborted).
 """
 
-from . import manual, store, ui
+from collections.abc import Sequence
+
+from . import store, ui
+
+EMPTY = ui.EMPTY_HINT
+VANISHED = "Those tasks changed while you were here — add one to start."
 
 
-def run(conn) -> int | None:
-    pulled = _pick_backlog(conn, store.get_backlog(conn))
-
-    draft = None
+def run(conn, notes: Sequence[str] = ()) -> int:
+    error = ""
     while True:
-        # ELICIT
-        if draft is None:
-            draft = manual.elicit(allow_empty=bool(pulled))
+        # WELCOME. Read fresh each time round: the desktop app may be running
+        # (a resume gate) and editing the same backlog.
+        labels_of = store.labels_by_task(conn)
+        carried = store.backlog_carry_counts(conn)
+        active = [
+            ui.ActiveTask(
+                id=task["id"],
+                title=task["title"],
+                carry_count=carried.get(task["id"], 0),
+                can_finish=task["carried_from"] is not None,
+                details=ui.Details(
+                    task["notes"], task["due_date"], tuple(labels_of.get(task["id"], ()))
+                ),
+            )
+            for task in store.get_backlog(conn)
+            if task["status"] in store.UNFINISHED
+        ]
+        known = [ui.Label(row["name"], row["color"]) for row in store.list_labels(conn)]
+        plan = ui.welcome(active, notes, error, known)
 
-        # CONFIRM
-        titles = draft.tasks + [f"{t['title']}  (carried)" for t in pulled]
-        ui.show_tasks(draft.intended_minutes, titles)
-        choice = ui.confirm_choice("[y] commit  [r] revise  [q] quit without saving > ", "yrq")
-
-        if choice == "q":
-            return None
-        if choice == "r":
-            draft = None
+        # The front ends refuse an empty list already; this is the rule's
+        # authority, so a front end that slips can't start an empty session.
+        if not plan.keep and not plan.new:
+            error = EMPTY
             continue
 
-        # COMMIT
-        # Empty statement: the gate no longer asks for one. The column stays
-        # for the sessions that have one, and store.session_label falls back
-        # to the tasks for the ones that don't.
-        session_id = store.commit_draft(
-            conn, "", draft.intended_minutes, "manual", draft.tasks,
-            backlog_ids=[t["id"] for t in pulled],
-        )
-        print(f"Session {session_id} started — {len(titles)} task(s).")
+        # COMMIT. The statement is empty: the gate no longer asks for one.
+        # The column stays for the sessions that have one, and
+        # store.session_label falls back to the tasks for the ones that don't.
+        try:
+            session_id = store.commit_plan(
+                conn, plan.intended_minutes, plan.keep, [task.title for task in plan.new],
+                done_ids=plan.done, delete_ids=plan.delete,
+                new_details=[task.details for task in plan.new], edits=plan.edits,
+            )
+        except store.EmptyPlan:
+            # Every kept task left the backlog while the screen was up, and
+            # nothing was typed. Rolled back, so nothing was deleted either.
+            error = VANISHED
+            continue
+        count = len(store.get_tasks(conn, session_id))
+        print(f"Session {session_id} started — {count} task(s).")
         return session_id
 
-
-def _pick_backlog(conn, backlog) -> list:
-    """Offer the backlog; return the rows the user pulls into this session."""
-    if not backlog:
-        return []
-    print("\nCarried over:")
-    for i, task in enumerate(backlog, start=1):
-        count = store.carry_count(conn, task["id"])
-        times = f"  (carried {count}×)" if count else ""
-        print(f"  {i}. {task['title']}{times}")
-    picks = ui.pick_numbers("Pull in? (numbers, blank for none) > ", len(backlog))
-    return [backlog[i - 1] for i in picks]

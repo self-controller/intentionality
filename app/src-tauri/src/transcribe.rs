@@ -101,17 +101,22 @@ pub fn config() -> Result<Config> {
     Ok(Config { model, language })
 }
 
-/// The tail of what has been transcribed so far, on a character boundary.
-/// Slicing a String by bytes would panic mid-codepoint the first time someone
-/// says a word with an accent in it.
-pub fn carry(transcript: &str) -> String {
-    let trimmed = transcript.trim();
-    match trimmed.char_indices().nth_back(CARRY_CHARS.saturating_sub(1)) {
+/// The last `chars` characters, on a character boundary. Slicing a String by
+/// bytes would panic mid-codepoint the first time someone says a word with an
+/// accent in it.
+fn tail(text: &str, chars: usize) -> String {
+    let trimmed = text.trim();
+    match trimmed.char_indices().nth_back(chars.saturating_sub(1)) {
         // The cut can land mid-word, so trim again: a leading fragment is
         // context the model can use, a leading space is just noise.
         Some((i, _)) => trimmed[i..].trim_start().to_string(),
         None => trimmed.to_string(),
     }
+}
+
+/// The tail of what has been transcribed so far, for the next chunk's prompt.
+pub fn carry(transcript: &str) -> String {
+    tail(transcript, CARRY_CHARS)
 }
 
 /// Transcribe one WAV. `context` is the tail of the previous chunk.
@@ -121,11 +126,7 @@ pub fn carry(transcript: &str) -> String {
 /// of a meeting lost.
 pub async fn transcribe(wav: Vec<u8>, context: &str) -> Result<String> {
     let config = config()?;
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(180))
-        .build()
-        .map_err(|e| AppError::Other(e.to_string()))?;
+    let client = crate::http::remote().map_err(|e| AppError::Other(e.to_string()))?;
 
     let part = reqwest::multipart::Part::bytes(wav)
         .file_name("chunk.wav")
@@ -141,6 +142,7 @@ pub async fn transcribe(wav: Vec<u8>, context: &str) -> Result<String> {
 
     let resp = client
         .post(API_URL)
+        .timeout(Duration::from_secs(180))
         .header("Authorization", format!("Bearer {}", api_key()?))
         .multipart(form)
         .send()

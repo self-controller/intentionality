@@ -10,6 +10,15 @@ pub enum AppError {
     BadTimestamp(String),
     #[error("{0}")]
     Other(String),
+    /// `stop_reason: "refusal"`: the API answered (HTTP 200, billed) and the
+    /// model declined on content. Never a key, credit or network problem.
+    /// Carries a ready-made suffix: " (category: …) (request …)".
+    #[error("the model declined this request{0}")]
+    Refused(String),
+    /// A write aimed at a session the gate has since closed — the board on
+    /// screen was stale. Worded for the user: the frontend shows it as is.
+    #[error("session {0} was closed at the gate — showing the current board")]
+    SessionClosed(i64),
 }
 
 // Commands surface errors to the webview as plain strings; the frontend

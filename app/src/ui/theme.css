@@ -1,0 +1,203 @@
+/* The one design system. Imported by both bundles: the Tauri app and the gate.
+   Preflight comes first; katex.min.css is imported after it in Markdown.tsx,
+   because KaTeX relies on unreset table and border behaviour. */
+/* source(none): no automatic scan. Each bundle names its own roots with
+   @source (app.css, gate.css); auto-detection from app/ also read the Rust
+   sources and lockfiles and emitted classes nothing uses. */
+@import "tailwindcss" source(none);
+
+@theme {
+  /* The grey scale, dark end down. The page is a mid-dark grey (#343a40);
+     inputs and wells sink to #212529, cards and chips rise to #495057, and
+     the light end is kept for text and the primary action. */
+  --color-bg: #343a40;
+  --color-surface: #212529;
+  --color-raised: #495057;
+  --color-line: #495057;
+  --color-text: #f8f9fa;
+  --color-muted: #adb5bd;
+  --color-accent: #e9ecef;
+
+  /* Meaning, not hue: good/warn/bad are semantic. Bright enough to read on
+     the dark greys. */
+  --color-good: #9ece6a;
+  --color-warn: #e0af68;
+  --color-bad: #f7768e;
+  --color-info: #2ac3de;
+  --color-violet: #bb9af7;
+
+  /* Gentle shadows. soft lifts a card off the page; lift sits under the
+     light primary button. */
+  --shadow-soft: 0 1px 3px rgb(0 0 0 / 0.25), 0 4px 12px rgb(0 0 0 / 0.2);
+  --shadow-lift: 0 2px 6px rgb(0 0 0 / 0.35);
+}
+
+@layer base {
+  /* Native controls -- the select's popup, the date picker, scrollbars --
+     follow the page rather than the platform's light default. */
+  html { background: var(--color-bg); color-scheme: dark; }
+  body { background: var(--color-bg); color: var(--color-text); }
+  /* Scrolling stays, the bar goes. WebKitGTK honours only the pseudo-element,
+     and both front ends run inside WebKitGTK. */
+  * { scrollbar-width: none; }
+  ::-webkit-scrollbar { display: none; }
+}
+
+@layer components {
+  /* ------------------------------------------------------------------
+     The neumorphic checkbox.
+
+     Kept as plain CSS rather than utilities on purpose: the whole effect is
+     ::before/::after geometry with two transitions staggered in each
+     direction, which as arbitrary variants would be ~20 bracketed values per
+     state. Every dimension is a fraction of --cb, so the proportions hold at
+     any size -- 58px in the gate, 26px in the app's lists.
+
+     Recoloured for the grey page: neumorphism needs the chip to be the page's
+     own colour, lit from the top left and shaded below.
+     The geometry, the cubic-beziers, the 0.3s/0.4s durations and the 0.15s
+     stagger are the reference's, unchanged; the arms take the accent.
+     ------------------------------------------------------------------ */
+  .nb-check {
+    --cb: 58px;
+    position: relative;
+    display: inline-block;
+    width: var(--cb);
+    height: var(--cb);
+    flex: none;
+    cursor: pointer;
+  }
+
+  /* The input covers the whole chip and sits above the painted surface, so a
+     click anywhere on it toggles natively. The reference relied on a wrapping
+     <label>; covering instead lets the component drop into a row that is
+     already a <label> (nested labels are invalid) as well as stand alone. */
+  .nb-check input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    z-index: 1;
+    cursor: inherit;
+  }
+
+  .nb-mark {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: var(--cb);
+    width: var(--cb);
+    background: #343a40;
+    border-radius: calc(var(--cb) * 12 / 58);
+    transition: all 0.4s cubic-bezier(0.42, 0, 0.58, 1);
+    box-shadow:
+      calc(var(--cb) * 4 / 58) calc(var(--cb) * 4 / 58) calc(var(--cb) * 8 / 58) rgba(0, 0, 0, 0.45),
+      calc(var(--cb) * -4 / 58) calc(var(--cb) * -4 / 58) calc(var(--cb) * 8 / 58) rgba(255, 255, 255, 0.07);
+  }
+
+  .nb-mark::before,
+  .nb-mark::after {
+    content: "";
+    position: absolute;
+    background: var(--color-accent);
+    height: calc(var(--cb) * 5 / 58);
+    border-radius: calc(var(--cb) * 2 / 58);
+    transform-origin: 0 0;
+    opacity: 0;
+  }
+
+  /* Short arm */
+  .nb-mark::before {
+    left: calc(var(--cb) * 13 / 58);
+    top: calc(var(--cb) * 25 / 58);
+    width: calc(var(--cb) * 20 / 58);
+    transform: rotate(45deg) scale(0);
+    transition: all 0.3s cubic-bezier(0.5, -1, 0.5, 2);
+  }
+
+  /* Long arm */
+  .nb-mark::after {
+    left: calc(var(--cb) * 21 / 58);
+    top: calc(var(--cb) * 40 / 58);
+    width: calc(var(--cb) * 34 / 58);
+    transform: rotate(-45deg) scale(0);
+    transition: all 0.4s cubic-bezier(0.5, -1, 0.5, 2);
+  }
+
+  .nb-check input:checked + .nb-mark {
+    background: linear-gradient(145deg, #2f343a, #3a4047);
+    box-shadow:
+      inset calc(var(--cb) * 2 / 58) calc(var(--cb) * 2 / 58) calc(var(--cb) * 4 / 58) rgba(0, 0, 0, 0.45),
+      inset calc(var(--cb) * -2 / 58) calc(var(--cb) * -2 / 58) calc(var(--cb) * 4 / 58) rgba(255, 255, 255, 0.07);
+  }
+
+  /* Checked -- short arm first */
+  .nb-check input:checked + .nb-mark::before {
+    opacity: 1;
+    transform: rotate(45deg) scale(1);
+    transition: all 0.3s cubic-bezier(0.5, -1, 0.5, 2);
+  }
+
+  /* Checked -- long arm follows */
+  .nb-check input:checked + .nb-mark::after {
+    opacity: 1;
+    transform: rotate(-45deg) scale(1);
+    transition: all 0.4s cubic-bezier(0.5, -1, 0.5, 2);
+    transition-delay: 0.15s;
+  }
+
+  /* Unchecked -- long arm goes first */
+  .nb-check input:not(:checked) + .nb-mark::after {
+    opacity: 0;
+    transform: rotate(-45deg) scale(0);
+    transition: all 0.3s cubic-bezier(0.5, -1, 0.5, 2);
+    transition-delay: 0s;
+  }
+
+  /* Unchecked -- short arm follows */
+  .nb-check input:not(:checked) + .nb-mark::before {
+    opacity: 0;
+    transform: rotate(45deg) scale(0);
+    transition: all 0.3s cubic-bezier(0.5, -1, 0.5, 2);
+    transition-delay: 0.15s;
+  }
+
+  .nb-check:hover .nb-mark {
+    box-shadow:
+      calc(var(--cb) * 5 / 58) calc(var(--cb) * 5 / 58) calc(var(--cb) * 10 / 58) rgba(0, 0, 0, 0.55),
+      calc(var(--cb) * -5 / 58) calc(var(--cb) * -5 / 58) calc(var(--cb) * 10 / 58) rgba(255, 255, 255, 0.07);
+    transform: scale(1.05);
+  }
+
+  .nb-check input:active + .nb-mark {
+    box-shadow:
+      inset calc(var(--cb) * 2 / 58) calc(var(--cb) * 2 / 58) calc(var(--cb) * 4 / 58) rgba(0, 0, 0, 0.45),
+      inset calc(var(--cb) * -2 / 58) calc(var(--cb) * -2 / 58) calc(var(--cb) * 4 / 58) rgba(255, 255, 255, 0.07);
+    transform: scale(0.95);
+  }
+
+  /* Keyboard users get a ring; pointer users never see it. */
+  .nb-check input:focus-visible + .nb-mark {
+    outline: 2px solid var(--color-accent);
+    outline-offset: calc(var(--cb) * 3 / 58);
+  }
+
+  .nb-check input:disabled + .nb-mark { opacity: 0.5; }
+  .nb-check:has(input:disabled) { cursor: default; }
+  .nb-check:has(input:disabled):hover .nb-mark { transform: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .nb-mark,
+    .nb-mark::before,
+    .nb-mark::after {
+      transition: opacity 0.12s linear !important;
+      transition-delay: 0s !important;
+    }
+    .nb-check:hover .nb-mark,
+    .nb-check input:active + .nb-mark { transform: none; }
+    .nb-check input:checked + .nb-mark::before { transform: rotate(45deg) scale(1); }
+    .nb-check input:checked + .nb-mark::after { transform: rotate(-45deg) scale(1); }
+  }
+}

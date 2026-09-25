@@ -1,8 +1,9 @@
 # intentionality
 
-A gate that sits between login and your desktop: you type a short list of
-what you intend to do, it becomes the session's task list, and at the end of
-the session you debrief against it. Inside the session, a desktop app shows
+A gate that sits between login and your desktop: a welcome screen shows the
+tasks you still have, you keep, finish or delete them and add what else you
+intend to do, and that list becomes the session's task list — no desktop
+until it holds at least one task. Inside the session, a desktop app shows
 those tasks as a kanban board next to what
 [ActivityWatch](https://activitywatch.net/) actually observed, and a model
 periodically writes a short productivity note. It also transcribes meetings on
@@ -13,15 +14,16 @@ included — to the Anthropic API, and each meeting you record sends its audio t
 the OpenAI transcription API and the resulting transcript to Anthropic.
 
 Current status: **v0.5**. The gate is deliberately conversation-free — you
-type the list yourself (the AI chat of v0.4 is gone from the gate; git has
-it). Unfinished tasks carry into a backlog the next gate offers back to you.
+edit the list yourself (the AI chat of v0.4 is gone from the gate; git has
+it). Unfinished tasks carry into a backlog the next gate's welcome screen
+shows you first.
 The Tauri desktop app is the in-session interface: kanban board, activity
 dashboard, randomized-interval analyses, and the meeting note taker.
 
 ## Requirements
 
-- Python 3.11+ (tested on 3.14), stdlib only — the gate and CLI dashboard
-  have zero dependencies.
+- Python 3.11+ (tested on 3.14), stdlib only — the gate has
+  zero dependencies.
 - For the desktop app: Rust + Node (see `app/` below), webkit2gtk, and — for
   the analysis feature only — an Anthropic API key in
   `~/.config/intentionality/api_key` (chmod 600) or `ANTHROPIC_API_KEY`.
@@ -61,12 +63,30 @@ From the repo root:
 python3 -m gate
 ```
 
-If the backlog holds tasks carried from earlier sessions, the gate offers
-them first (`Pull in? (numbers, blank for none)`). Then it asks how long you
-will be here, you type tasks one per line, and you confirm, revise, or quit
-before anything is written. Once confirmed, the session is committed to the
-local store. There is no "what do you want to get done?" question — the list
-is that answer.
+The gate is one welcome screen. It lists your **active tasks** — the backlog:
+whatever earlier sessions left unfinished, plus anything you added to the
+backlog in the app — and you edit that list into this session's:
+
+- **Keep** a task by leaving it alone. Everything still on the list when you
+  start goes on today's board, carried tasks first.
+- **Done** (carried tasks only) records it as done in the session it came
+  from, and takes it off the list.
+- **Delete** removes it for good — the same as the ✕ on the app's backlog.
+- **Add** a task by typing it.
+- **Details** opens a panel under any task, carried or typed: a **due date**
+  (typed, Today / Tomorrow, or a calendar), **notes**, and **labels** — click
+  any label that exists to tag it, or type a new one to create it.
+
+Nothing is written until you start, so Done and Delete are toggles with an
+Undo, and details are written only for tasks you actually changed (the app
+may be editing the same backlog while a resume gate is up). Then say how long
+you will be here (blank = open-ended) and start.
+**Start refuses an empty list**: there is no quit and no way to a desktop
+without at least one task. On the terminal the same screen is text — type a
+task to add it, `d N` / `x N` to mark task N done / deleted (again to undo),
+`e N` to change task N's due date, notes (one line) and labels (blank keeps,
+`-` clears), and a blank line to start. There is no "what do you want to get done?"
+question — the list is that answer.
 
 ### Ending a session
 
@@ -103,8 +123,9 @@ When GNOME exits, logind tears down the whole login scope — the waiting gate
 included — so in a real console login the closing write happens at the *next*
 gate run: it notices the open session, stamps its end from the desktop app's
 last heartbeat (or marks it `recovered` with an honest unknown end when the
-app wasn't running), offers the debrief, and carries what's left into the
-backlog.
+app wasn't running), and carries what's left into the backlog — which is
+the first thing that gate's welcome screen shows, with Done and Delete on each
+task. It asks nothing on its own.
 
 ### Login-time wiring (the real thing)
 
@@ -139,12 +160,14 @@ also logged into a graphical session. Test it by hand first: switch to a free co
 `~/Desktop/projects/intentionality/bin/gate-login`. You should get the gate
 conversation, then a real desktop, then the debrief when you log out of it.
 
-To make it automatic, add this to `~/.config/fish/config.fish` — it fires
-only on a tty1 *login* shell with no desktop running, so other VTs, SSH, and
-terminals inside GNOME are untouched:
+To make it automatic, add this to `~/.config/fish/config.fish`, **above**
+anything that prints (a `fastfetch` or greeting would otherwise sit on screen
+while the gate starts). It fires only on a tty1 *login* shell with no desktop
+running, so other VTs, SSH, and terminals inside GNOME are untouched:
 
 ```fish
 # intentionality gate — tty1 login shells only, never inside a running gate.
+# Keep this above anything that prints: it would show until the gate draws.
 # Escape hatch: `touch ~/.config/intentionality/skip` disables it.
 if status is-login
     and test (tty) = /dev/tty1
@@ -168,6 +191,121 @@ Escape hatches are deliberate: `Ctrl+Alt+F2`+ are normal consoles, the skip
 file above bypasses the gate, and reverting the boot target restores GDM
 exactly as before. This is commitment, not security.
 
+### The graphical gate
+
+The same conversation, in a window, on the same bare console. Install one
+package and both launchers pick it up:
+
+```bash
+sudo dnf install cage
+```
+
+[cage](https://github.com/cage-kiosk/cage) is a Wayland kiosk compositor: it
+runs one program fullscreen and exits when that program exits. No display
+server exists at gate time, and nothing that draws can run without one, so
+this is the smallest thing that can put a window on tty1. Under it the gate
+runs with `INTENTIONALITY_GATE_UI=gtk`, and `gate/gui.py` opens one GTK
+window whose only child is a WebKit view showing `gate/webui/index.html` —
+the React bundle built from `app/gate-ui/`, sharing its Tailwind theme and its
+checkbox with the desktop app, so the two halves look like one product.
+
+It opens on **"Let's get to work."** in white on black, which fades into the
+welcome screen after about a second (any key or click skips it). The screen is
+the task list — one checkbox per task, ticked to bring it into the session and
+unticked to strike it out and delete it on Start — with a Details button per
+row, Done on a task carried from an earlier session, an add box, the minutes,
+and a Start button that stays disabled until there is a task. The details
+panel opens in place under its row, and Start saves it first.
+
+**The React side owns no list logic.** It posts intents; `gate/webstate.py`
+applies them to `ui.WelcomeList` and pushes back a whole screen. Every string
+the screen shows — the greeting, each row's detail line, the status line,
+every refusal — is computed in `gate/ui.py` and travels as finished text, so
+the graphical gate and the terminal gate cannot disagree about what a tick
+means, and `flow.py` does not know which one is on. (`gate close` still asks
+its debrief questions, as a text entry or a row of buttons under a log pane.)
+
+Because `webstate.py` is pure — no `gi`, no WebKit, no display — the welcome
+screen's behaviour is finally covered by `tests/test_webstate.py`. The GTK
+version's state *was* its widget tree, so none of it could be asserted
+without a compositor.
+
+**Sizing.** `INTENTIONALITY_GATE_FONT_PX` (default 26) still means what it
+always did, now exactly: device pixels per `rem`. The view's zoom is set to
+`(font_px / 16) / monitor_scale`, so one rem is the same *physical* size
+under cage as it is in a window on the desktop. That matters because this
+panel is 2880×1800 and GNOME hands a client 1728×1080 at scale 1.667 while
+cage does no scaling at all — without the correction the gate renders 1.667×
+smaller in real life than in any test. `INTENTIONALITY_GATE_ZOOM` overrides
+the computed factor outright.
+
+It fails open, always. No `cage`, no PyGObject, no WebKitGTK, no display — and
+no `gate/webui/index.html`, which is why that file is committed rather than
+built at login: the gate prints one line to stderr saying which, and runs on
+the terminal exactly as before. Rebuild it with `npm run build:gate` in `app/`
+whenever anything under `app/gate-ui/` or `app/src/ui/` changes, and commit the
+result. A graphical gate
+that could fail closed would be one that could lock the login path.
+
+**What it runs without, and why.** `gate/gui.py` sets three things in the
+environment before the webview starts — not the launchers, so a gate started
+any other way is started the same way. `GTK_A11Y=none` and `GIO_USE_VFS=local`
+say that the accessibility bus and gvfs are not there, instead of letting
+WebKit's helpers reach for them and wait. `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1`
+turns off WebKit's bubblewrap sandbox, and that one has a story: with the
+sandbox on, WebKit launches `xdg-dbus-proxy` beside the web process and calls
+`g_error()` if that proxy exits non-zero — `abort()`, which no `except` can
+catch, so the fail-open above is powerless against it. **Every resume gate
+between the webview landing and this change died that way** (`Failed to fully
+launch dbus-proxy: Child process exited with code 1`, read out of the
+coredumps) and fell through to the terminal gate on VT9, which is why the wake
+gate looked like the old one. It never happens at a login, under cage inside
+GNOME, or under a systemd user service — only in the resume unit's own
+context, so *why* the proxy exits 1 there is still unknown. The gate needs
+nothing the sandbox contains: one committed local bundle, no network, no
+remote content, no second origin, and the only strings in it that anyone typed
+go through React's escaping. Set `INTENTIONALITY_GATE_SANDBOX=1` to put the
+sandbox back for a run — with the log below, that is how to catch the proxy's
+own error message the next time the machine wakes.
+
+**Why the login launcher runs two commands.** Cage holds the GPU for as long as
+its client lives, so GNOME cannot be started from inside the gate the way the
+terminal version does it (as a child it waits on). `bin/gate-login` runs the
+conversation under cage, cage exits, and then `python3 -m gate handoff` starts
+the desktop for whichever session was just committed — or nothing, if the
+gate was interrupted. That is unambiguous because the recovery sweep has just closed every
+other open session.
+
+**What it locks.** Cage is started without `-s`, so `Ctrl+Alt+F2`–`F6` do
+nothing until you have answered: the keyboard belongs to the gate. On a resume
+gate that also means `Ctrl+Alt+F1` no longer returns you to GNOME
+mid-question, which is stricter than the text gate on VT9 was. What remains:
+the skip file, SSH, and the power button. Put `-s` in the `cage_opts` line of
+either launcher to get the console switches back.
+
+The window cannot be closed either. It has no title bar, a close request is
+refused (Alt+F4 included, whoever binds it), and Escape does nothing. There is
+no quit button: the only way off the screen is Start, and Start needs a task.
+`kill -INT` on the gate's python over SSH aborts it the way Ctrl-C does on the
+text gate — nothing is saved, and at login no desktop starts.
+
+**What you see.** Between login and the gate, and again for the second or two
+GNOME takes to draw its first frame, the console shows its own text buffer.
+`bin/gate-login` clears that buffer, hides the cursor, and sends everything cage
+and the gate print to `~/.local/state/intentionality/gate.log` instead of the
+console, so both gaps are plain black. The config.fish block has to come before
+anything in that file that prints, such as `fastfetch`. Otherwise that output
+is on screen while cage starts.
+
+`bin/resume-gate` does the same, into the same log — and there it is the only
+record there is. The unit's `StandardOutput=`/`StandardError=` are `/dev/tty9`,
+so nothing a wake gate prints ever reaches the journal; five aborted gates went
+unnoticed for that reason. If the graphical gate does not complete, the
+fall-through line is logged with `systemd-cat` as well, so
+`journalctl -t intentionality-gate` shows it long after VT9 has gone.
+
+For the resume gate, the unit needs one more piece — see the next section.
+
 ### Waking from sleep
 
 Login is not the only way back to a desktop. Close the lid at 15:00, open it at
@@ -177,18 +315,38 @@ or more away and it runs again**, on its own virtual terminal, and hands you
 back to GNOME once you have committed a new session.
 
 It is the same program, not an imitation — the recovery sweep closes the old
-session at its last heartbeat, offers to resolve its tasks, and carries the
-unfinished ones into the backlog the new session then offers back.
+session at its last heartbeat and carries its unfinished tasks into the
+backlog, and the welcome screen shows them to you first. Like the login gate
+it has no quit: **you are not handed back to GNOME until the new session has
+at least one task.** (Before this screen, quitting a wake gate returned you to
+the desktop with no session open; that is gone.)
+
+It is also the same *screen*: `bin/resume-gate` runs the gate under cage on
+VT9 exactly as `bin/gate-login` does on tty1, so a wake shows the black
+welcome screen too. It did not for a while — see "What it runs without, and
+why" above for the abort that sent every wake gate to the terminal fallback,
+and read `~/.local/state/intentionality/gate.log` if one ever looks like the
+terminal gate again.
 
 Two units do it, both in `systemd/`:
 
 ```bash
 sudo cp systemd/intentionality-resume.service \
         systemd/intentionality-resume-gate.service /etc/systemd/system/
+sudo cp systemd/pam.d/intentionality-gate /etc/pam.d/
 sudo systemctl daemon-reload
 sudo systemctl enable intentionality-resume.service   # apply
 sudo systemctl disable intentionality-resume.service  # revert
 ```
+
+The PAM file is for the unit's `PAMName=`: it registers a logind session on
+VT9 for the run. The text gate never needed one; the graphical gate cannot do
+without it, because a compositor only gets the GPU and the input devices from
+logind, and logind gives them only to the active session on that VT. The stack
+is `account` + `session` with `pam_systemd` and nothing else — systemd never
+runs the `auth` stack for `PAMName=`, so no password is asked and none is
+granted. It also sets `XDG_RUNTIME_DIR`, which cage requires; `bin/resume-gate`
+treats its absence as "text gate", not "try anyway".
 
 `intentionality-resume.service` is pulled into `suspend.target` and ordered
 `After=systemd-suspend.service`, which is what makes a unit run on *resume*
@@ -204,6 +362,20 @@ open it as root and hand the fd down to `User=david`, and the `+` prefix on
 same `User=`. No polkit rule, no setuid, no sudo at runtime. VT9 because
 logind's `NAutoVTs=6` autospawns gettys on VT1–6 only, so 7–12 are free and the
 `Ctrl+Alt+F2`–`F6` escape hatches stay exactly as they were.
+
+Its `ExecStart=` is `/usr/bin/fish …/bin/resume-gate`, not the script's own
+path, because of SELinux. Everything under your home directory is labelled
+`user_home_t`, and systemd runs as `init_t`, which is not allowed to execute
+`user_home_t` files: a bare path fails with `status=203/EXEC` right after the
+switch to VT9, so the screen flashes and no gate appears. An interpreter in
+`/usr/bin` is `bin_t`, which moves the process into `unconfined_service_t`, and
+that domain may read the script. `tests/test_units.py` fails if any `Exec*=`
+line points into `/home`.
+
+The desktop app checks the install every time it starts. Its header says
+**resume gate not installed** until `suspend.target.wants/` holds the unit, and
+**resume units in /etc differ from systemd/** when you have edited a unit here
+without copying it again.
 
 **How long counts as away** is `now - session.last_heartbeat`: the store
 already records when the machine stopped being used — it is the timestamp the
@@ -223,15 +395,34 @@ waking a machine with no stated intention is what the gate is for.
 
 Escape hatches, as everywhere: `Ctrl+Alt+F1` returns to GNOME from a
 half-answered gate, `touch ~/.config/intentionality/skip` disables this along
-with the login gate, and disabling the unit reverts it entirely. Quitting with
-`q` is allowed and leaves you with no open session — you declined to state an
-intention, and the record says so.
+with the login gate, and disabling the unit reverts it entirely. There is no
+quit: the gate ends when a session with at least one task has started. (Under
+cage the `Ctrl+Alt+F1` hatch is closed too — see "What it locks".)
 
-Test it by hand before trusting it to a real lid-close:
+Test it by hand before trusting it to a real lid-close. Starting the unit by
+hand still goes through `ExecCondition=`, and while the desktop app is
+heartbeating you have been away for under a minute, so it skips. Drop the
+threshold to 0 for the test. The recovery sweep will then close your current
+session, exactly as a real wake would:
 
 ```bash
+sqlite3 ~/.local/share/intentionality/store.db \
+  "INSERT INTO meta (key, value) VALUES ('resume_min_away_minutes', '0')
+   ON CONFLICT(key) DO UPDATE SET value = excluded.value;"
 sudo systemctl start intentionality-resume-gate.service   # the whole VT dance
 journalctl -u intentionality-resume-gate -b               # what it decided
+```
+
+Then a real suspend, with the threshold set to `1` the same way so a
+two-minute sleep counts. Let `rtcwake` set the wake alarm only and let systemd
+do the suspending. `rtcwake -m mem` suspends through `/sys/power/state` by
+itself, never reaches `suspend.target`, and so never runs these units at all:
+
+```bash
+sudo rtcwake -m no -s 120 && systemctl suspend
+journalctl -b | grep intentionality-resume                # both units ran
+sqlite3 ~/.local/share/intentionality/store.db \
+  "DELETE FROM meta WHERE key = 'resume_min_away_minutes';"   # back to 30
 ```
 
 ## The desktop app
@@ -246,9 +437,22 @@ GNOME can always be alt-tabbed away; the lockout lives at the console). Three
 surfaces, all bare-bones for now:
 
 - **Board** — To Do / Doing / Done lanes over the current session's tasks
-  (drag to move), a collapsed dropped tray, and the backlog in a sidebar:
-  pull items into today, add new ones, delete stale ones. Session cards are
-  history — they can be dropped but never deleted.
+  (drag to move), a dropped tray that is a fourth drop target, and the backlog
+  in a sidebar: pull items into today, add new ones, delete stale ones.
+  Session cards are history — drag one into the tray to drop it, and drag it
+  back out to undo that, but they are never deleted. Clicking any card (or a
+  backlog row) opens it: rename it, write plain-text **notes** on it, give it
+  a **due date** — typed, or picked from the month grid behind
+  **Calendar**, and shown on the card in words ("Due tomorrow", "Overdue ·
+  Sep 9") and beside the task on the gate's welcome screen — and **labels**: every label there is shows as a chip to click, and
+  typing a new name makes a new one. **Details…** beside either add box opens
+  the same editor for a task that doesn't exist yet, so it starts with all of
+  that; Enter still adds the bare title. The **Labels** panel under the
+  backlog lists every label with how many tasks wear it. Make presets there
+  before anything uses them; a label stays until you delete it (one still in
+  use asks first, and deleting takes it off every card).
+  Notes, labels and due dates travel with a task when the gate carries it into
+  the backlog.
 - **Dashboard** — recent sessions, their task outcomes, and per-app active
   time from ActivityWatch with AFK subtracted, each app expandable to the
   window titles that made up its time.
@@ -367,12 +571,41 @@ analysis timer; if that ever becomes a real annoyance the fix is
 ## The meeting note taker
 
 The Meetings tab records a meeting, transcribes it as it goes, and turns the
-transcript into a summary, key points and action items.
+transcript into a write-up and action items. The write-up is one markdown
+document — an opening paragraph, key points, and additional information when
+there is any, with fenced code blocks and `$…$` LaTeX where the meeting had
+code or maths. It is the model's draft until you press **Edit**; then it is
+yours, and **Re-run notes** asks before replacing a document you have changed.
+After a meeting the detail pane has three tabs: **Summary** (the write-up and
+the action items), **Notes** (your scratchpad and context files) and
+**Transcript** (cleaned, with the raw segments behind a toggle).
 
 Pick a microphone, press **Start transcribing** and it opens; press **Stop**
-and it shuts at once, with the button reading **Writing the notes…** until
-they land. Nothing else starts a recording — there is no timer, no scheduler
-and no startup path that can, which is the one hard rule this feature has.
+and it shuts at once. The notes are written behind you — a line under the
+button says whether it is still cleaning the transcript or writing the notes
+— and you can **start the next meeting straight away**: the microphone was
+free the moment Stop returned, and only the model calls are queued, so a
+second wrap-up waits for the first rather than competing with it. Nothing
+else starts a recording — there is no timer, no scheduler and no startup path
+that can, which is the one hard rule this feature has.
+
+### Correcting the transcript
+
+Click any block in the raw transcript to fix what was heard: a mangled name,
+a piece of jargon, or a stretch that failed to transcribe at all, which shows
+as "(this stretch could not be transcribed)" and opens an empty box you can
+type into. It works while the meeting is still recording, while the notes are
+being written, and long afterwards — there is no state in which the record of
+what was said is frozen against you.
+
+Corrections go into the raw segments rather than the cleaned text, because
+the raw segments are what everything else is built from: **Re-run notes**
+re-cleans and re-summarizes from them, so a fix reaches the next write-up.
+The cleaned transcript and the write-up both say when they predate your
+corrections, and offer the re-run rather than taking it — the repair pass is
+minutes of model time, and when to spend it is your call. Editing one block
+never rewrites another, and the timestamps stay put, so the meeting is still
+navigable after a correction.
 While the microphone is open the tab shows a red pulsing indicator, the
 elapsed time, and the level meter described below.
 
@@ -496,21 +729,12 @@ in delimiters the transcript itself cannot forge, and the model is told it is a
 recording of what people said and never instructions to follow. A participant
 saying "ignore your previous instructions" is recorded, not obeyed.
 
-## The CLI dashboard
+## ActivityWatch
 
-```bash
-python3 -m dashboard          # latest session in detail + recent list
-python3 -m dashboard 3        # a specific session
-python3 -m dashboard list     # recent sessions only
-```
-
-Shows each session's intention (tasks, intended duration, and the statement
-for sessions old enough to have one) next to
-what [ActivityWatch](https://activitywatch.net/) observed in the same time
-window: active time per app, minus away time. It reads ActivityWatch's local
-API (`localhost:5600`, override with `INTENTIONALITY_AW_URL`) and works
-without it — sessions and tasks still display, observations show as
-unavailable.
+The app's Dashboard tab and the analyses read
+[ActivityWatch](https://activitywatch.net/)'s local API (`localhost:5600`,
+override with `INTENTIONALITY_AW_URL`) and work without it: sessions and tasks
+still display, and observations show as unavailable.
 
 > **GNOME Wayland caveat:** the window watcher bundled with ActivityWatch is
 > X11-only and records nothing under GNOME Wayland. You need the
@@ -522,7 +746,8 @@ unavailable.
 ## Where your data lives
 
 A single SQLite file: `~/.local/share/intentionality/store.db`. Tables:
-`session`, `task` (rows with `session_id NULL` are the backlog), `analysis`,
+`session`, `task` (rows with `session_id NULL` are the backlog),
+`label` + `task_label` (the tags a task wears), `analysis`,
 `meeting` + `meeting_segment` + `meeting_action` (the note taker), and `meta`
 (schema version + settings). Recorded audio is **not** among them — each chunk
 is transcribed and dropped, so only text is ever stored. Only `gate/store.py` and the app's
@@ -539,11 +764,25 @@ older than it understands. Inspect it anytime with the `sqlite3` CLI.
 | `INTENTIONALITY_DESKTOP_CMD` | Command to launch and wait on after commit | *(none — no handoff)* |
 | `INTENTIONALITY_AW_URL` | ActivityWatch API base URL | `http://localhost:5600` |
 | `INTENTIONALITY_SESSION_ID` | Set by the gate for the desktop; the app trusts it only if that session is still open | *(set by handoff)* |
+| `INTENTIONALITY_GATE_UI` | `gtk` asks for the graphical front end; anything else, or no display, is the terminal | *(terminal)* |
+| `INTENTIONALITY_GATE_FONT_PX` | Device pixels per `rem` in the graphical gate — its size knob, on any display | `26` |
+| `INTENTIONALITY_GATE_ZOOM` | Overrides the computed webview zoom outright, when the rule is wrong for a monitor | *(computed)* |
+| `INTENTIONALITY_GATE_SOFTWARE` | Draws the gate without GPU acceleration; pair with the launchers, which also set `WEBKIT_DISABLE_DMABUF_RENDERER` | *(off)* |
+| `INTENTIONALITY_GATE_INSPECT` | Enables the WebKit inspector on the gate, for design work | *(off)* |
+| `INTENTIONALITY_GATE_SANDBOX` | Puts WebKit's sandbox back for one run — a diagnostic, see "The graphical gate" | *(sandbox off)* |
 
 Two keys, two files, two providers: the Anthropic key at
 `~/.config/intentionality/api_key` (analyses, checkpoints and meeting notes)
 and the OpenAI key at `~/.config/intentionality/openai_key` (transcription
 only). Each is read by exactly one module and neither reaches the webview.
+
+Meeting notes (the transcript repair and the write-up) run on `claude-sonnet-5`;
+analyses and checkpoints stay on `claude-opus-5`. Meeting attachments are
+capped at 25 MB per file and 50 MB per meeting. PDFs and images are uploaded
+to the Anthropic Files API when a notes run starts, referenced by id, and
+deleted when the run ends however it ends. Each upload also carries a 4-hour
+expiry in case the app dies mid-run. Text and Office files send only their
+extracted text.
 
 The analysis model (`claude-opus-5`) lives in `app/src-tauri/src/claude.rs`;
 the key comes from `~/.config/intentionality/api_key` or `ANTHROPIC_API_KEY`
@@ -563,35 +802,44 @@ bin/
 
 systemd/
 ├── intentionality-resume.service       # fires on resume, starts the next unit
-└── intentionality-resume-gate.service  # the gate on VT9 (TTYPath + chvt)
+├── intentionality-resume-gate.service  # the gate on VT9 (TTYPath + chvt + PAMName)
+└── pam.d/intentionality-gate           # the logind session that unit's PAMName= needs
 
 gate/
-├── __main__.py    # entry point: gate / close / migrate / resume / resume-needed
-├── flow.py        # PULL -> ELICIT -> CONFIRM -> COMMIT state machine
+├── __main__.py    # entry point: gate / close / migrate / resume / resume-needed / handoff
+├── flow.py        # WELCOME -> COMMIT: the list in, one session out
 ├── resume.py      # was the machine away long enough to re-gate?
-├── manual.py      # the elicitation: type your list
 ├── handoff.py     # launches the desktop as a child, waits
 ├── debrief.py     # end-of-session per-task resolution
 ├── store.py       # the only Python module that touches sqlite3; owns migrations
-├── schema.sql     # session / task / analysis / meeting / meta tables (v4)
-├── ui.py          # terminal prompt helpers
-└── config.py      # paths and env var names
+├── schema.sql     # session / task / analysis / meeting / meta tables (v10)
+├── ui.py          # the welcome list + questions; terminal by default, or a backend
+├── gui.py         # the WebKit backend, for running under cage
+├── webstate.py    # the welcome screen as data -- pure, no gi, so it is testable
+├── config.py      # paths and env var names
+└── webui/         # the built React bundle (committed: login cannot run npm)
 
-dashboard/          # the CLI dashboard (stdlib only)
-app/                # the Tauri desktop app
-├── src/            # React frontend: Board, Analyses, Meetings, Dashboard
+app/                # the Tauri desktop app, and the gate's front end
+├── src/            # React + Tailwind: Board, Analyses, Meetings, Dashboard
+│   └── ui/         # the shared theme and components, used by both bundles
+├── gate-ui/        # the gate's React, built into gate/webui/ by build:gate
 └── src-tauri/src/  # Rust: db, aw, observed, claude, scheduler, commands,
                     #       meeting + record + gain + level + audio
                     #       + transcribe (the note taker)
 
 tests/
 ├── test_store.py   # data-layer tests: migration, carry, close idempotency
-├── test_debrief.py # what d/n/x do, and that nothing is stranded on Ctrl-C
-└── test_resume.py  # the away-time threshold that decides a resume gate
+├── test_debrief.py # what d/n/x do, and that recovery strands nothing
+├── test_flow.py    # the welcome screen's plan landing, the no-empty-session rule
+├── test_welcome.py # the shared list model and the terminal welcome
+├── test_gui.py     # the ui backend seam, button labels, `gate handoff`
+├── test_webstate.py # the welcome screen's state, with no display and no gi
+├── test_resume.py  # the away-time threshold that decides a resume gate
+└── test_units.py   # the systemd units and launchers: no Exec into /home, PAM
 ```
 
 `flow.py` never imports `sqlite3` or the network — it only calls into
-`store` and `manual`. Run the data-layer tests with
+`store` and `ui`. Run the data-layer tests with
 `python3 -m unittest discover tests`.
 
 ## Not yet built

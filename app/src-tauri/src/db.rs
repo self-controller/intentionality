@@ -4,14 +4,16 @@
 
 use crate::error::{AppError, Result};
 use crate::models::{
-    Analysis, Arrangement, Meeting, MeetingAction, MeetingSegment, Observed, Session, Task,
+    Analysis, Arrangement, Label, LabelSummary, Meeting, MeetingAction, MeetingFile,
+    MeetingSegment, Observed, Session, Task,
 };
 use crate::recommendations;
-use chrono::{Duration, Utc};
-use rusqlite::{params, Connection, TransactionBehavior};
+use chrono::{Duration, NaiveDate, Utc};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 10;
 pub const MIGRATE_HINT: &str = "store schema is out of date — run: python3 -m gate migrate";
 
 pub fn now() -> String {
@@ -111,7 +113,7 @@ pub fn list_sessions(conn: &Connection, limit: i64) -> Result<Vec<Session>> {
 // carry_count follows the carried_from chain — the read-only twin of
 // gate/store.py::carry_count.
 const TASK_SELECT: &str = "
-    SELECT t.id, t.session_id, t.title, t.position, t.status,
+    SELECT t.id, t.session_id, t.title, t.position, t.status, t.notes, t.due_date,
         (WITH RECURSIVE chain(cid) AS (
             SELECT carried_from FROM task WHERE id = t.id AND carried_from IS NOT NULL
             UNION ALL
@@ -128,26 +130,114 @@ fn row_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         position: row.get("position")?,
         status: row.get("status")?,
         carry_count: row.get("carry_count")?,
+        notes: row.get("notes")?,
+        due_date: row.get("due_date")?,
+        // attach_labels fills these; a task read on its own has none.
+        labels: Vec::new(),
     })
+}
+
+/// The colours a new label can be given, cycled by creation order. Stored on
+/// the row at creation so a label's colour survives every later change.
+/// gate/store.py keeps a copy for the labels the gate creates; a Python test
+/// reads this list and fails when the two differ.
+const LABEL_COLORS: [&str; 8] = [
+    "#7aa2f7", "#9ece6a", "#e0af68", "#f7768e", "#bb9af7", "#2ac3de", "#ff9e64", "#41a6b5",
+];
+
+/// One query for the whole join, then distributed over the tasks in hand. The
+/// store is deliberately small enough to copy and open in a shell, so reading
+/// every label beats building a dynamic `IN (…)` per call.
+/// `session_id` is the list the tasks came from (None = the backlog), so only
+/// that list's labels are read, not every tag ever worn.
+fn attach_labels(conn: &Connection, session_id: Option<i64>, tasks: &mut [Task]) -> Result<()> {
+    if tasks.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT tl.task_id, l.name, l.color
+         FROM task_label tl JOIN label l ON l.id = tl.label_id
+         WHERE tl.task_id IN (SELECT id FROM task WHERE session_id IS ?1)
+         ORDER BY l.name",
+    )?;
+    let rows = stmt.query_map([session_id], |r| {
+        Ok((
+            r.get::<_, i64>("task_id")?,
+            Label { name: r.get("name")?, color: r.get("color")? },
+        ))
+    })?;
+    let mut by_task: HashMap<i64, Vec<Label>> = HashMap::new();
+    for row in rows {
+        let (task_id, label) = row?;
+        by_task.entry(task_id).or_default().push(label);
+    }
+    for task in tasks.iter_mut() {
+        if let Some(labels) = by_task.remove(&task.id) {
+            task.labels = labels;
+        }
+    }
+    Ok(())
+}
+
+/// Every label there is, worn or not, with how many tasks wear it. A label
+/// nothing wears is a preset: it stays until it is deleted.
+pub fn list_labels(conn: &Connection) -> Result<Vec<LabelSummary>> {
+    let mut stmt = conn.prepare(
+        "SELECT l.name, l.color, COUNT(tl.task_id) AS uses
+         FROM label l LEFT JOIN task_label tl ON tl.label_id = l.id
+         GROUP BY l.id ORDER BY l.name",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(LabelSummary { name: r.get("name")?, color: r.get("color")?, uses: r.get("uses")? })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Make a label, or find the one there is: label.name is NOCASE, so "Billing"
+/// is "billing" and keeps that one's colour. Returns its id.
+fn ensure_label(conn: &Connection, name: &str) -> Result<i64> {
+    let next: i64 = conn.query_row("SELECT COUNT(*) FROM label", [], |r| r.get(0))?;
+    conn.execute(
+        "INSERT OR IGNORE INTO label (name, color) VALUES (?1, ?2)",
+        params![name, LABEL_COLORS[(next as usize) % LABEL_COLORS.len()]],
+    )?;
+    Ok(conn.query_row("SELECT id FROM label WHERE name = ?1", [name], |r| r.get(0))?)
+}
+
+/// Delete a label everywhere. Its task_label rows go with it by cascade, so
+/// every card that wore it lets it go.
+pub fn delete_label(conn: &Connection, name: &str) -> Result<()> {
+    let changed = conn.execute("DELETE FROM label WHERE name = ?1", [name.trim()])?;
+    if changed == 0 {
+        return Err(AppError::Other(format!("no label {name:?}")));
+    }
+    Ok(())
 }
 
 pub fn session_tasks(conn: &Connection, session_id: i64) -> Result<Vec<Task>> {
     let mut stmt =
         conn.prepare(&format!("{TASK_SELECT} WHERE t.session_id = ?1 ORDER BY t.position"))?;
     let rows = stmt.query_map([session_id], row_task)?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    let mut tasks: Vec<Task> = rows.collect::<rusqlite::Result<_>>()?;
+    attach_labels(conn, Some(session_id), &mut tasks)?;
+    Ok(tasks)
 }
 
 pub fn backlog(conn: &Connection) -> Result<Vec<Task>> {
     let mut stmt =
         conn.prepare(&format!("{TASK_SELECT} WHERE t.session_id IS NULL ORDER BY t.position"))?;
     let rows = stmt.query_map([], row_task)?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    let mut tasks: Vec<Task> = rows.collect::<rusqlite::Result<_>>()?;
+    attach_labels(conn, None, &mut tasks)?;
+    Ok(tasks)
 }
 
 pub fn apply_board(conn: &mut Connection, session_id: i64, arr: &Arrangement) -> Result<()> {
     let ts = now();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Inside the write lock, so the gate cannot close the session between the
+    // check and the moves.
+    ensure_open(&tx, session_id)?;
     for (status, ids) in [
         ("planned", &arr.todo),
         ("doing", &arr.doing),
@@ -177,6 +267,36 @@ pub fn apply_board(conn: &mut Connection, session_id: i64, arr: &Arrangement) ->
 }
 
 pub fn add_task(conn: &Connection, session_id: Option<i64>, title: &str) -> Result<i64> {
+    if let Some(sid) = session_id {
+        ensure_open(conn, sid)?;
+    }
+    insert_task(conn, session_id, title)
+}
+
+/// A new card with everything the editor holds, in one atomic write: the task
+/// and its details land together or not at all.
+pub fn create_task(
+    conn: &mut Connection,
+    session_id: Option<i64>,
+    title: &str,
+    notes: &str,
+    due_date: Option<&str>,
+    labels: &[String],
+) -> Result<i64> {
+    check_due(due_date)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Inside the write lock, as in apply_board.
+    if let Some(sid) = session_id {
+        ensure_open(&tx, sid)?;
+    }
+    let id = insert_task(&tx, session_id, title)?;
+    write_details(&tx, id, title, notes, due_date, labels)?;
+    tx.commit()?;
+    Ok(id)
+}
+
+/// Numbered after the last card where it lands (the session, or the backlog).
+fn insert_task(conn: &Connection, session_id: Option<i64>, title: &str) -> Result<i64> {
     let next: i64 = match session_id {
         Some(sid) => conn.query_row(
             "SELECT COALESCE(MAX(position), 0) + 1 FROM task WHERE session_id = ?1",
@@ -197,8 +317,70 @@ pub fn add_task(conn: &Connection, session_id: Option<i64>, title: &str) -> Resu
     Ok(conn.last_insert_rowid())
 }
 
-pub fn rename_task(conn: &Connection, id: i64, title: &str) -> Result<()> {
-    conn.execute("UPDATE task SET title = ?1 WHERE id = ?2", params![title, id])?;
+/// The whole card in one atomic write — title, notes, due date and the exact
+/// set of labels it should end up wearing. Same contract as apply_board: the
+/// caller sends the end state, not a diff, so a stale editor cannot
+/// half-apply, and a None due date clears it.
+pub fn update_task(
+    conn: &mut Connection,
+    id: i64,
+    title: &str,
+    notes: &str,
+    due_date: Option<&str>,
+    labels: &[String],
+) -> Result<()> {
+    check_due(due_date)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    write_details(&tx, id, title, notes, due_date, labels)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Canonical form only: a fixed-width ISO day is what makes string order
+/// date order. The reformat check refuses "2026-9-1", which chrono parses,
+/// as well as "2026-02-30", which it does not.
+fn check_due(due_date: Option<&str>) -> Result<()> {
+    if let Some(d) = due_date {
+        let canonical = NaiveDate::parse_from_str(d, "%Y-%m-%d")
+            .map(|p| p.format("%Y-%m-%d").to_string() == d)
+            .unwrap_or(false);
+        if !canonical {
+            return Err(AppError::Other(format!("due date must be YYYY-MM-DD, not {d:?}")));
+        }
+    }
+    Ok(())
+}
+
+/// Everything but position and status, for a task that exists. Never deletes
+/// a label: one its last task lets go of stays, as a preset. gate/store.py's
+/// _set_details is the same write for the gate.
+fn write_details(
+    conn: &Connection,
+    id: i64,
+    title: &str,
+    notes: &str,
+    due_date: Option<&str>,
+    labels: &[String],
+) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE task SET title = ?1, notes = ?2, due_date = ?3 WHERE id = ?4",
+        params![title, notes, due_date, id],
+    )?;
+    if changed == 0 {
+        return Err(AppError::Other(format!("no task {id}")));
+    }
+    conn.execute("DELETE FROM task_label WHERE task_id = ?1", [id])?;
+    for name in labels {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let label_id = ensure_label(conn, name)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO task_label (task_id, label_id) VALUES (?1, ?2)",
+            params![id, label_id],
+        )?;
+    }
     Ok(())
 }
 
@@ -218,6 +400,7 @@ pub fn delete_backlog_task(conn: &Connection, id: i64) -> Result<()> {
 /// Backlog -> current session, mid-session. The IS NULL guard makes moving
 /// another session's row impossible.
 pub fn pull_task(conn: &Connection, session_id: i64, id: i64) -> Result<()> {
+    ensure_open(conn, session_id)?;
     let next: i64 = conn.query_row(
         "SELECT COALESCE(MAX(position), 0) + 1 FROM task WHERE session_id = ?1",
         [session_id],
@@ -234,6 +417,31 @@ pub fn pull_task(conn: &Connection, session_id: i64, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Current session -> backlog: pull_task in reverse. The card goes back to
+/// being unstarted work at the end of the backlog; its notes, labels, due date
+/// and carry chain stay. A dropped card is history and stays where it is.
+pub fn unpull_task(conn: &mut Connection, session_id: i64, id: i64) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Inside the write lock, as in apply_board.
+    ensure_open(&tx, session_id)?;
+    let next: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(position), 0) + 1 FROM task WHERE session_id IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    let changed = tx.execute(
+        "UPDATE task SET session_id = NULL, status = 'planned', position = ?1,
+            started_at = NULL, resolved_at = NULL
+         WHERE id = ?2 AND session_id = ?3 AND status <> 'dropped'",
+        params![next, id, session_id],
+    )?;
+    if changed == 0 {
+        return Err(AppError::Other(format!("task {id} is not on this board")));
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /// Returns false once the session is closed — the loop's stop signal. Mirrors
 /// gate/store.py::heartbeat: a closed session can never be resurrected.
 pub fn heartbeat(conn: &Connection, session_id: i64) -> Result<bool> {
@@ -242,6 +450,32 @@ pub fn heartbeat(conn: &Connection, session_id: i64) -> Result<bool> {
         params![now(), session_id],
     )?;
     Ok(changed > 0)
+}
+
+/// Whether a session can still take writes. A missing row is not open. Same
+/// test as latest_open_session: a recovery with no heartbeat to date it closes
+/// the session with close_reason set and ended_at still NULL.
+pub fn session_is_open(conn: &Connection, session_id: i64) -> Result<bool> {
+    match conn.query_row(
+        "SELECT ended_at IS NULL AND close_reason IS NULL FROM session WHERE id = ?1",
+        [session_id],
+        |r| r.get(0),
+    ) {
+        Ok(open) => Ok(open),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Session history is immutable once closed. The app can still be holding a
+/// session the gate has closed — the heartbeat only notices on its next tick —
+/// so every write aimed at "the current session" checks here first.
+fn ensure_open(conn: &Connection, session_id: i64) -> Result<()> {
+    if session_is_open(conn, session_id)? {
+        Ok(())
+    } else {
+        Err(AppError::SessionClosed(session_id))
+    }
 }
 
 fn row_analysis(row: &rusqlite::Row) -> rusqlite::Result<Analysis> {
@@ -268,14 +502,29 @@ fn row_analysis(row: &rusqlite::Row) -> rusqlite::Result<Analysis> {
 
 /// Both listings share row_analysis, so both must supply session_statement.
 /// LEFT JOIN rather than INNER: an orphaned analysis should still be readable.
-const ANALYSIS_SELECT: &str = "SELECT a.*, s.statement AS session_statement
+// Every column row_analysis reads, and not observed_json: that blob is only
+// ever wanted for one row, through analysis_observed.
+const ANALYSIS_SELECT: &str = "SELECT a.id, a.session_id, a.created_at, a.window_start,
+        a.window_end, a.headline, a.alignment, a.body, a.seen_at, a.kind,
+        a.recommendation_id, a.recommendation_note, s.statement AS session_statement
      FROM analysis a LEFT JOIN session s ON s.id = a.session_id";
 
-pub fn list_analyses(conn: &Connection, session_id: i64) -> Result<Vec<Analysis>> {
-    let mut stmt =
-        conn.prepare(&format!("{ANALYSIS_SELECT} WHERE a.session_id = ?1 ORDER BY a.id DESC"))?;
-    let rows = stmt.query_map([session_id], row_analysis)?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+pub fn get_analysis(conn: &Connection, id: i64) -> Result<Option<Analysis>> {
+    Ok(conn
+        .query_row(&format!("{ANALYSIS_SELECT} WHERE a.id = ?1"), [id], row_analysis)
+        .optional()?)
+}
+
+/// The session's most recent analysis: where the next window starts, and
+/// what the model said last time.
+pub fn latest_analysis(conn: &Connection, session_id: i64) -> Result<Option<Analysis>> {
+    Ok(conn
+        .query_row(
+            &format!("{ANALYSIS_SELECT} WHERE a.session_id = ?1 ORDER BY a.id DESC LIMIT 1"),
+            [session_id],
+            row_analysis,
+        )
+        .optional()?)
 }
 
 /// The Analyses tab's history: newest first, across every session. Ordered by
@@ -298,14 +547,6 @@ pub fn analysis_observed(conn: &Connection, id: i64) -> Result<Observed> {
     Ok(json
         .and_then(|j| serde_json::from_str(&j).ok())
         .unwrap_or_default())
-}
-
-pub fn unseen_analyses(conn: &Connection, session_id: i64) -> Result<i64> {
-    Ok(conn.query_row(
-        "SELECT COUNT(*) FROM analysis WHERE session_id = ?1 AND seen_at IS NULL",
-        [session_id],
-        |r| r.get(0),
-    )?)
 }
 
 pub fn mark_analysis_seen(conn: &Connection, id: i64) -> Result<()> {
@@ -344,16 +585,6 @@ pub fn add_analysis(conn: &Connection, a: &NewAnalysis) -> Result<i64> {
         ],
     )?;
     Ok(conn.last_insert_rowid())
-}
-
-pub fn last_analysis_end(conn: &Connection, session_id: i64) -> Result<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT window_end FROM analysis WHERE session_id = ?1 ORDER BY id DESC LIMIT 1",
-            [session_id],
-            |r| r.get(0),
-        )
-        .ok())
 }
 
 pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
@@ -424,32 +655,28 @@ pub fn pending_checkpoint(conn: &Connection, session_id: i64) -> Result<Option<A
 
 // --- meetings ---------------------------------------------------------------
 
+// Deliberately no notes, no transcript and no summary: this drives the list
+// as well as the detail header, and listing 50 meetings must not drag a
+// transcript and a write-up each across the boundary. has_summary is the
+// boolean the UI actually needs.
 const MEETING_SELECT: &str = "
-    SELECT m.id, m.session_id, m.started_at, m.ended_at, m.title, m.summary,
-        m.key_points, m.state, m.error,
+    SELECT m.id, m.session_id, m.started_at, m.ended_at, m.title, m.state, m.error,
+        m.summary IS NOT NULL AS has_summary,
         (SELECT COUNT(*) FROM meeting_segment s WHERE s.meeting_id = m.id)
             AS segment_count
     FROM meeting m";
 
 fn row_meeting(row: &rusqlite::Row) -> rusqlite::Result<Meeting> {
-    // key_points is a JSON array written by this app. A row that somehow holds
-    // anything else reads as no key points rather than failing the whole query:
-    // the transcript is the part worth protecting.
-    let key_points: Option<String> = row.get("key_points")?;
-    let key_points = key_points
-        .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
-        .unwrap_or_default();
     Ok(Meeting {
         id: row.get("id")?,
         session_id: row.get("session_id")?,
         started_at: row.get("started_at")?,
         ended_at: row.get("ended_at")?,
         title: row.get("title")?,
-        summary: row.get("summary")?,
-        key_points,
         state: row.get("state")?,
         error: row.get("error")?,
         segment_count: row.get("segment_count")?,
+        has_summary: row.get("has_summary")?,
     })
 }
 
@@ -493,9 +720,10 @@ pub fn meeting_segments(conn: &Connection, meeting_id: i64) -> Result<Vec<Meetin
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// The transcript as one block, which is what the model is given. Empty
-/// segments (a chunk whose transcription failed) drop out rather than becoming
-/// blank lines the model has to interpret.
+/// The transcript as one text: what the editor shows and what the model is
+/// given. A paragraph per segment, so the box and the prompt agree and a break
+/// the user typed survives. Empty segments (a chunk whose transcription
+/// failed) drop out rather than becoming blank paragraphs.
 pub fn transcript(conn: &Connection, meeting_id: i64) -> Result<String> {
     let segments = meeting_segments(conn, meeting_id)?;
     let parts: Vec<String> = segments
@@ -503,7 +731,7 @@ pub fn transcript(conn: &Connection, meeting_id: i64) -> Result<String> {
         .map(|s| s.text.trim().to_string())
         .filter(|t| !t.is_empty())
         .collect();
-    Ok(parts.join(" "))
+    Ok(parts.join("\n\n"))
 }
 
 pub fn add_segment(conn: &Connection, meeting_id: i64, seq: i64, text: &str) -> Result<i64> {
@@ -515,22 +743,100 @@ pub fn add_segment(conn: &Connection, meeting_id: i64, seq: i64, text: &str) -> 
     Ok(conn.last_insert_rowid())
 }
 
-/// Stop recording. Guarded on 'recording' so the startup orphan sweep and a
-/// real Stop cannot both close the same meeting.
-pub fn meeting_summarizing(conn: &Connection, id: i64) -> Result<bool> {
+/// The microphone is shut: stamp when. Guarded on 'recording' so the startup
+/// orphan sweep and a real Stop cannot both close the same meeting.
+///
+/// The state stays 'recording' while the tail chunk drains; `meeting::stop`
+/// moves it to 'done' once that has landed. Nothing here writes notes.
+pub fn meeting_stopped(conn: &Connection, id: i64) -> Result<bool> {
     let changed = conn.execute(
-        "UPDATE meeting SET state = 'summarizing', ended_at = COALESCE(ended_at, ?1)
+        "UPDATE meeting SET ended_at = COALESCE(ended_at, ?1)
          WHERE id = ?2 AND state = 'recording'",
         params![now(), id],
     )?;
     Ok(changed > 0)
 }
 
+/// A guarded state hop. `from` is what makes this safe to call from a
+/// background task: two of them racing, or a sweep that already failed the
+/// row, cannot drag a meeting back into a wrap-up state it has left.
+pub fn meeting_state(conn: &Connection, id: i64, from: &str, to: &str) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE meeting SET state = ?1 WHERE id = ?2 AND state = ?3",
+        params![to, id, from],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Write (or re-write) the notes for a meeting that has stopped.
+/// Guarded on the two terminal states so a re-run cannot touch a meeting that
+/// is recording or already mid-run, and clears the old error so the UI shows
+/// progress rather than the previous failure.
+pub fn meeting_rerun(conn: &Connection, id: i64) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE meeting SET state = 'summarizing', error = NULL
+         WHERE id = ?1 AND state IN ('done', 'failed')",
+        [id],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Pick a finished meeting back up: the microphone is open on it again. Same
+/// guard as a re-run, for the same reason.
+///
+/// Two columns are cleared, each for a reason of its own. `ended_at`, because
+/// `meeting_stopped` only stamps an empty one, so the next Stop would
+/// otherwise keep the first Stop's time; and `error`, because the sweep keeps
+/// an existing one, so a crash mid-resume would report the old failure
+/// instead of the recording it lost.
+///
+/// The write-up and the action items stay — the next Stop does not replace
+/// them, Write notes does — but `transcript_edited_at` is stamped, because the
+/// transcript is about to grow past what they were written from, and that
+/// mark is what says so on screen.
+pub fn meeting_resume(conn: &Connection, id: i64) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE meeting SET state = 'recording', ended_at = NULL, error = NULL,
+             transcript_edited_at = ?1
+         WHERE id = ?2 AND state IN ('done', 'failed')",
+        params![now(), id],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Where a resumed recording carries on from: the next free `seq`, and the
+/// last thing actually transcribed, which becomes the context for its first
+/// chunk exactly as the previous chunk's tail would have been.
+pub fn resume_point(conn: &Connection, meeting_id: i64) -> Result<(i64, String)> {
+    let next: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(seq), -1) + 1 FROM meeting_segment WHERE meeting_id = ?1",
+        [meeting_id],
+        |r| r.get(0),
+    )?;
+    let last: String = conn
+        .query_row(
+            "SELECT text FROM meeting_segment
+             WHERE meeting_id = ?1 AND TRIM(text) != ''
+             ORDER BY seq DESC LIMIT 1",
+            [meeting_id],
+            |r| r.get(0),
+        )
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(String::new()),
+            e => Err(e),
+        })?;
+    Ok((next, last))
+}
+
+/// 'cleaning' is no longer written — the repair pass is gone — but a row a
+/// build before that left there must still be failable, and a row stranded in
+/// any live state is a Start button that never comes back. This guard and the
+/// sweep's below have to move together.
 pub fn meeting_failed(conn: &Connection, id: i64, error: &str) -> Result<()> {
     conn.execute(
         "UPDATE meeting SET state = 'failed', error = ?1,
              ended_at = COALESCE(ended_at, ?2)
-         WHERE id = ?3 AND state IN ('recording', 'summarizing')",
+         WHERE id = ?3 AND state IN ('recording', 'cleaning', 'summarizing')",
         params![error, now(), id],
     )?;
     Ok(())
@@ -541,7 +847,7 @@ pub fn meeting_failed(conn: &Connection, id: i64, error: &str) -> Result<()> {
 /// app happened to be started again. Same principle as inferring a session's
 /// ended_at from its last heartbeat.
 ///
-/// 'summarizing' is swept too, and not as an afterthought: Stop now returns as
+/// Both wrap-up states are swept too, and not as an afterthought: Stop now returns as
 /// soon as the microphone is shut and finishes the notes in a background task,
 /// so a row can sit in that state for a whole model call. A crash in there
 /// would otherwise strand it forever — and the record bar keys "writing the
@@ -560,32 +866,318 @@ pub fn sweep_orphan_meetings(conn: &Connection) -> Result<usize> {
                  ended_at,
                  (SELECT MAX(started_at) FROM meeting_segment s WHERE s.meeting_id = meeting.id),
                  started_at)
-         WHERE state IN ('recording', 'summarizing')",
+         WHERE state IN ('recording', 'cleaning', 'summarizing')",
         [],
     )?)
 }
 
-pub struct MeetingNotes<'a> {
-    pub title: &'a str,
-    pub summary: &'a str,
-    pub key_points: &'a [String],
-    pub action_items: &'a [String],
-}
-
-/// The notes and their action items land together — a summary on screen whose
-/// action items failed to insert would be a lie about what was saved.
-pub fn finish_meeting(conn: &mut Connection, id: i64, notes: &MeetingNotes) -> Result<()> {
-    let key_points = serde_json::to_string(notes.key_points).unwrap_or_else(|_| "[]".into());
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let changed = tx.execute(
-        "UPDATE meeting SET title = ?1, summary = ?2, key_points = ?3,
-             state = 'done', error = NULL, ended_at = COALESCE(ended_at, ?4)
-         WHERE id = ?5",
-        params![notes.title, notes.summary, key_points, now(), id],
+/// The scratchpad. Writable in any state: it is the user's own text, and
+/// locking it because a model call is in flight would lose whatever they were
+/// mid-sentence on.
+pub fn set_meeting_notes(conn: &Connection, id: i64, notes: &str) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE meeting SET notes = ?1 WHERE id = ?2",
+        params![notes, id],
     )?;
     if changed == 0 {
         return Err(AppError::Other("no such meeting".into()));
     }
+    Ok(())
+}
+
+pub fn meeting_notes_text(conn: &Connection, id: i64) -> Result<String> {
+    Ok(conn.query_row("SELECT notes FROM meeting WHERE id = ?1", [id], |r| r.get(0))?)
+}
+
+/// The write-up and when the user last edited it, for the detail pane.
+pub fn meeting_summary(conn: &Connection, id: i64) -> Result<(Option<String>, Option<String>)> {
+    Ok(conn.query_row(
+        "SELECT summary, summary_edited_at FROM meeting WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
+/// The user's edit to the write-up. Only once the model is done with it: a
+/// save landing while the notes are being written would be overwritten by
+/// finish_meeting moments later, and the UI hides the editor in those states
+/// anyway -- refusing here is what makes that a guarantee rather than a hope.
+/// The stamp is what lets a later re-run ask before throwing the edit away.
+pub fn set_meeting_summary(conn: &Connection, id: i64, summary: &str) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE meeting SET summary = ?1, summary_edited_at = ?2
+         WHERE id = ?3 AND state IN ('done', 'failed')",
+        params![summary, now(), id],
+    )?;
+    if changed == 0 {
+        return Err(AppError::Other(
+            "that meeting's notes are still being written, or it no longer exists".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// When the transcript was last edited by hand (or grew on a resume); None =
+/// as transcribed, or the
+/// current write-up was made from it. write_notes reads this in the same
+/// locked snapshot it takes the transcript in, and hands it back to
+/// finish_meeting as the value the clear is allowed to overwrite.
+pub fn transcript_edited_at(conn: &Connection, id: i64) -> Result<Option<String>> {
+    Ok(conn.query_row("SELECT transcript_edited_at FROM meeting WHERE id = ?1", [id], |r| {
+        r.get(0)
+    })?)
+}
+
+/// Replace the whole transcript with the user's edited text.
+///
+/// The editor is one box, so the stored form collapses to match: the first
+/// segment takes the text and the rest are deleted. A meeting with no segments
+/// at all (nothing was heard, or every chunk failed) gets one at seq 0, so
+/// text typed into an empty transcript still reaches the notes. A later resume
+/// carries on at MAX(seq)+1 exactly as before.
+///
+/// Refused while recording: capture is still inserting segments, and the UI
+/// keeps the box read-only until the tail chunk has landed. Allowed while the
+/// notes are being written — an edit then is caught by `finish_meeting`'s
+/// compare-and-swap rather than refused.
+///
+/// All in one transaction: a replaced transcript that did not mark the
+/// write-up stale would be the more dangerous half to land alone.
+pub fn set_meeting_transcript(conn: &mut Connection, meeting_id: i64, text: &str) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let state: Option<(String, String)> = tx
+        .query_row(
+            "SELECT state, started_at FROM meeting WHERE id = ?1",
+            [meeting_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((state, started_at)) = state else {
+        return Err(AppError::Other("no such meeting".into()));
+    };
+    if state == "recording" {
+        return Err(AppError::Other(
+            "that meeting is still recording — edit it once it has stopped".into(),
+        ));
+    }
+    let first: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM meeting_segment WHERE meeting_id = ?1 ORDER BY seq LIMIT 1",
+            [meeting_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match first {
+        Some(first) => {
+            tx.execute(
+                "UPDATE meeting_segment SET text = ?1 WHERE id = ?2",
+                params![text, first],
+            )?;
+            tx.execute(
+                "DELETE FROM meeting_segment WHERE meeting_id = ?1 AND id != ?2",
+                params![meeting_id, first],
+            )?;
+        }
+        None => {
+            tx.execute(
+                "INSERT INTO meeting_segment (meeting_id, seq, started_at, text)
+                 VALUES (?1, 0, ?2, ?3)",
+                params![meeting_id, started_at, text],
+            )?;
+        }
+    }
+    tx.execute(
+        "UPDATE meeting SET transcript_edited_at = ?1 WHERE id = ?2",
+        params![now(), meeting_id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// One attached file as the model pipeline needs it: enough to build a
+/// content block, including the path the webview never sees.
+pub struct FileRow {
+    pub name: String,
+    pub kind: String,
+    pub path: String,
+    pub extracted: Option<String>,
+}
+
+pub fn meeting_file_rows(conn: &Connection, meeting_id: i64) -> Result<Vec<FileRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT name, kind, path, extracted FROM meeting_file
+         WHERE meeting_id = ?1 ORDER BY position",
+    )?;
+    let rows = stmt.query_map([meeting_id], |row| {
+        Ok(FileRow {
+            name: row.get(0)?,
+            kind: row.get(1)?,
+            path: row.get(2)?,
+            extracted: row.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub struct NewFile<'a> {
+    pub name: &'a str,
+    pub path: &'a str,
+    pub kind: &'a str,
+    pub bytes: i64,
+    pub extracted: Option<&'a str>,
+}
+
+/// Insert the row for a staged file, or refuse.
+///
+/// The aggregate limits are checked here, inside the transaction, and not only
+/// in the UI: two attach clicks racing would each see room under the cap and
+/// both proceed, and the whole point of a total is that it holds.
+///
+/// The row goes in before the file is moved into place. That order is the
+/// deliberate one — the two cannot share a transaction, so one of them has to
+/// be able to fail last, and a row without its file is recoverable (delete the
+/// row) while a file without its row is invisible litter.
+pub fn add_meeting_file(
+    conn: &mut Connection,
+    meeting_id: i64,
+    file: &NewFile,
+    max_files: i64,
+    max_total_bytes: i64,
+    max_total_chars: i64,
+) -> Result<i64> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let exists: bool = tx
+        .query_row("SELECT 1 FROM meeting WHERE id = ?1", [meeting_id], |_| Ok(()))
+        .is_ok();
+    if !exists {
+        return Err(AppError::Other("no such meeting".into()));
+    }
+    let (count, total, chars): (i64, i64, i64) = tx.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(bytes), 0), COALESCE(SUM(LENGTH(extracted)), 0)
+         FROM meeting_file WHERE meeting_id = ?1",
+        [meeting_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    if count >= max_files {
+        return Err(AppError::Other(format!(
+            "that meeting already has {max_files} files — remove one first"
+        )));
+    }
+    if total + file.bytes > max_total_bytes {
+        return Err(AppError::Other(format!(
+            "that would take the meeting over its {} MB of attachments",
+            max_total_bytes / (1024 * 1024)
+        )));
+    }
+    let new_chars = file.extracted.map(|e| e.chars().count() as i64).unwrap_or(0);
+    if chars + new_chars > max_total_chars {
+        return Err(AppError::Other(
+            "that would take the meeting over the amount of text this can send".into(),
+        ));
+    }
+    let position: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM meeting_file WHERE meeting_id = ?1",
+        [meeting_id],
+        |r| r.get(0),
+    )?;
+    tx.execute(
+        "INSERT INTO meeting_file (meeting_id, position, name, path, kind, bytes,
+             extracted, added_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            meeting_id,
+            position,
+            file.name,
+            file.path,
+            file.kind,
+            file.bytes,
+            file.extracted,
+            now()
+        ],
+    )?;
+    let id = tx.last_insert_rowid();
+    tx.commit()?;
+    Ok(id)
+}
+
+/// Remove one attachment's row, returning the copy the caller must now unlink.
+/// The row goes first: a file left on disk is swept, a row pointing at nothing
+/// is a broken attachment in the UI.
+pub fn delete_meeting_file(conn: &Connection, meeting_id: i64, file_id: i64) -> Result<String> {
+    let path: String = conn
+        .query_row(
+            "SELECT path FROM meeting_file WHERE id = ?1 AND meeting_id = ?2",
+            params![file_id, meeting_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| AppError::Other("no such file".into()))?;
+    conn.execute("DELETE FROM meeting_file WHERE id = ?1", [file_id])?;
+    Ok(path)
+}
+
+/// What the webview is allowed to know about the attached files. `path` and
+/// `extracted` stay in this module -- see the note on `MeetingFile`.
+pub fn meeting_files(conn: &Connection, meeting_id: i64) -> Result<Vec<MeetingFile>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, position, name, kind, bytes, added_at FROM meeting_file
+         WHERE meeting_id = ?1 ORDER BY position",
+    )?;
+    let rows = stmt.query_map([meeting_id], |row| {
+        Ok(MeetingFile {
+            id: row.get(0)?,
+            position: row.get(1)?,
+            name: row.get(2)?,
+            kind: row.get(3)?,
+            bytes: row.get(4)?,
+            added_at: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub struct MeetingNotes<'a> {
+    pub title: &'a str,
+    /// The write-up, as markdown.
+    pub summary: &'a str,
+    pub action_items: &'a [String],
+    /// What `transcript_edited_at` read when this run snapshotted the
+    /// transcript. The mark is cleared only if it still reads the same, so an
+    /// edit made while the model was working keeps it — see below.
+    pub transcript_seen: Option<&'a str>,
+}
+
+/// The notes and their action items land together — a summary on screen whose
+/// action items failed to insert would be a lie about what was saved.
+///
+/// No state guard, deliberately: this is also the re-run path, and a meeting
+/// being re-summarized starts from 'done' or 'failed'. `summary_edited_at` is
+/// cleared on the same principle: whatever the user had changed, the document
+/// is the model's again -- the UI asked before letting a re-run get this far.
+///
+/// `transcript_edited_at` is the one mark that is NOT cleared unconditionally.
+/// The raw transcript stays editable while the notes are being written, and
+/// write_notes snapshots it minutes before this runs, so an edit landing in
+/// that window was never seen by the model that produced these notes. Clearing
+/// it blind would call the write-up current when it is already behind; the
+/// compare-and-swap leaves the mark standing in exactly that case.
+pub fn finish_meeting(conn: &mut Connection, id: i64, notes: &MeetingNotes) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let changed = tx.execute(
+        "UPDATE meeting SET title = ?1, summary = ?2, summary_edited_at = NULL,
+             state = 'done', error = NULL, ended_at = COALESCE(ended_at, ?3)
+         WHERE id = ?4",
+        params![notes.title, notes.summary, now(), id],
+    )?;
+    if changed == 0 {
+        return Err(AppError::Other("no such meeting".into()));
+    }
+    // IS, not =, so the ordinary case (nothing was edited, both sides NULL)
+    // matches. A stamp that moved since the snapshot makes this a no-op.
+    tx.execute(
+        "UPDATE meeting SET transcript_edited_at = NULL
+         WHERE id = ?1 AND transcript_edited_at IS ?2",
+        params![id, notes.transcript_seen],
+    )?;
     // Re-running the summary replaces the proposals, but never the ones already
     // accepted: those are real tasks now, and deleting the row would orphan them.
     tx.execute("DELETE FROM meeting_action WHERE meeting_id = ?1 AND task_id IS NULL", [id])?;
@@ -673,17 +1265,414 @@ pub fn delete_meeting(conn: &Connection, id: i64) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The real schema, so these tests break if schema.sql and this file drift.
-    fn store() -> Connection {
+    pub(crate) fn store() -> Connection {
         let schema = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../gate/schema.sql");
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(&std::fs::read_to_string(schema).unwrap()).unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         conn
+    }
+
+    /// An open session with one card on it, which is what every task test
+    /// below needs before it can do anything.
+    fn session_with_task(conn: &Connection) -> (i64, i64) {
+        conn.execute(
+            "INSERT INTO session (started_at, mode) VALUES (?1, 'manual')",
+            [now()],
+        )
+        .unwrap();
+        let session_id = conn.last_insert_rowid();
+        let task_id = add_task(conn, Some(session_id), "write the thing").unwrap();
+        (session_id, task_id)
+    }
+
+    fn label_names(conn: &Connection, task_id: i64) -> Vec<String> {
+        let tasks = session_tasks(
+            conn,
+            conn.query_row("SELECT session_id FROM task WHERE id = ?1", [task_id], |r| {
+                r.get(0)
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        tasks
+            .into_iter()
+            .find(|t| t.id == task_id)
+            .unwrap()
+            .labels
+            .into_iter()
+            .map(|l| l.name)
+            .collect()
+    }
+
+    /// Labels are read per list: the backlog (session_id IS NULL) must get
+    /// its own tags and not a session task's, and the other way round.
+    #[test]
+    fn each_list_reads_only_its_own_labels() {
+        let mut conn = store();
+        let (_, task_id) = session_with_task(&conn);
+        let later = add_task(&conn, None, "later").unwrap();
+        update_task(&mut conn, later, "later", "", None, &["someday".into()]).unwrap();
+        update_task(&mut conn, task_id, "write the thing", "", None, &["now".into()]).unwrap();
+
+        let backlog = backlog(&conn).unwrap();
+        assert_eq!(backlog.len(), 1);
+        assert_eq!(
+            backlog[0].labels.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
+            ["someday"]
+        );
+        assert_eq!(label_names(&conn, task_id), ["now"]);
+    }
+
+    #[test]
+    fn update_task_round_trips_title_notes_and_labels() {
+        let mut conn = store();
+        let (session_id, task_id) = session_with_task(&conn);
+        update_task(
+            &mut conn,
+            task_id,
+            "write the other thing",
+            "two paragraphs\nof plain text",
+            None,
+            &["billing".into(), "urgent".into()],
+        )
+        .unwrap();
+
+        let task = session_tasks(&conn, session_id).unwrap().pop().unwrap();
+        assert_eq!(task.title, "write the other thing");
+        assert_eq!(task.notes, "two paragraphs\nof plain text");
+        // Sorted by name, so the chips are in the same order every render.
+        assert_eq!(
+            task.labels.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
+            ["billing", "urgent"]
+        );
+        assert!(task.labels.iter().all(|l| l.color.starts_with('#')));
+        assert_eq!(list_labels(&conn).unwrap().len(), 2);
+    }
+
+    /// The store's NOCASE unique index is what makes "Billing" the same tag as
+    /// "billing" -- including keeping the colour it was first given.
+    #[test]
+    fn a_label_is_reused_across_tasks_whatever_its_case() {
+        let mut conn = store();
+        let (session_id, first) = session_with_task(&conn);
+        let second = add_task(&conn, Some(session_id), "another").unwrap();
+        update_task(&mut conn, first, "a", "", None, &["billing".into()]).unwrap();
+        let color = list_labels(&conn).unwrap()[0].color.clone();
+
+        update_task(&mut conn, second, "b", "", None, &["BILLING".into()]).unwrap();
+        let labels = list_labels(&conn).unwrap();
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].name, "billing");
+        assert_eq!(labels[0].color, color);
+        assert_eq!(label_names(&conn, second), ["billing"]);
+    }
+
+    /// A label nothing wears any more is a preset now: it stays offered until
+    /// someone deletes it.
+    #[test]
+    fn a_label_outlives_its_last_task() {
+        let mut conn = store();
+        let (session_id, first) = session_with_task(&conn);
+        let second = add_task(&conn, Some(session_id), "another").unwrap();
+        update_task(&mut conn, first, "a", "", None, &["billing".into()]).unwrap();
+        update_task(&mut conn, second, "b", "", None, &["billing".into(), "urgent".into()]).unwrap();
+        let uses = |conn: &Connection| -> Vec<(String, i64)> {
+            list_labels(conn).unwrap().into_iter().map(|l| (l.name, l.uses)).collect()
+        };
+        assert_eq!(uses(&conn), [("billing".into(), 2), ("urgent".into(), 1)]);
+
+        update_task(&mut conn, first, "a", "", None, &[]).unwrap();
+        update_task(&mut conn, second, "b", "", None, &[]).unwrap();
+        assert_eq!(uses(&conn), [("billing".into(), 0), ("urgent".into(), 0)]);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM task_label", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_label_is_reused_by_name_and_keeps_its_colour() {
+        let mut conn = store();
+        let (session_id, task_id) = session_with_task(&conn);
+        let other = add_task(&conn, Some(session_id), "another").unwrap();
+        update_task(&mut conn, task_id, "a", "", None, &["  Reading  ".into()]).unwrap();
+        let made = list_labels(&conn).unwrap().pop().unwrap();
+        assert_eq!((made.name.as_str(), made.uses), ("Reading", 1));
+        // Tagging with it again, in another case, is the same label.
+        update_task(&mut conn, other, "b", "", None, &["READING".into()]).unwrap();
+        let labels = list_labels(&conn).unwrap();
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].uses, 2);
+        let task = session_tasks(&conn, session_id).unwrap().pop().unwrap();
+        assert_eq!(task.labels, [Label { name: "Reading".into(), color: made.color }]);
+    }
+
+    #[test]
+    fn deleting_a_label_takes_it_off_every_card() {
+        let mut conn = store();
+        let (session_id, task_id) = session_with_task(&conn);
+        update_task(&mut conn, task_id, "a", "", None, &["billing".into(), "urgent".into()])
+            .unwrap();
+        delete_label(&conn, "Billing").unwrap();
+        assert_eq!(label_names(&conn, task_id), ["urgent"]);
+        assert_eq!(list_labels(&conn).unwrap().len(), 1);
+        assert!(delete_label(&conn, "billing").is_err());
+        assert_eq!(session_tasks(&conn, session_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn create_task_writes_the_whole_card_at_once() {
+        let mut conn = store();
+        let (session_id, first) = session_with_task(&conn);
+        let id = create_task(
+            &mut conn,
+            Some(session_id),
+            "with details",
+            "some notes",
+            Some("2026-10-01"),
+            &["billing".into()],
+        )
+        .unwrap();
+        let tasks = session_tasks(&conn, session_id).unwrap();
+        assert_eq!(tasks.iter().map(|t| t.id).collect::<Vec<_>>(), [first, id]);
+        let task = &tasks[1];
+        assert_eq!(
+            (task.title.as_str(), task.notes.as_str(), task.due_date.as_deref(), task.position),
+            ("with details", "some notes", Some("2026-10-01"), 2)
+        );
+        assert_eq!(label_names(&conn, id), ["billing"]);
+
+        let backlog_id =
+            create_task(&mut conn, None, "for later", "", None, &["later".into()]).unwrap();
+        let rows = backlog(&conn).unwrap();
+        assert_eq!(rows.iter().map(|t| t.id).collect::<Vec<_>>(), [backlog_id]);
+        assert_eq!(rows[0].labels.len(), 1);
+    }
+
+    #[test]
+    fn create_task_writes_nothing_when_refused() {
+        let mut conn = store();
+        let (session_id, _) = session_with_task(&conn);
+        let count = |conn: &Connection, table: &str| -> i64 {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap()
+        };
+        assert!(create_task(&mut conn, Some(session_id), "t", "", Some("2026-9-1"), &[]).is_err());
+        conn.execute("UPDATE session SET ended_at = ?1 WHERE id = ?2", params![now(), session_id])
+            .unwrap();
+        assert!(matches!(
+            create_task(&mut conn, Some(session_id), "t", "n", None, &["x".into()]),
+            Err(AppError::SessionClosed(_))
+        ));
+        assert_eq!(count(&conn, "task"), 1);
+        assert_eq!(count(&conn, "label"), 0);
+    }
+
+    /// Blank and repeated entries are what a text field actually produces.
+    #[test]
+    fn update_task_ignores_blank_and_repeated_labels() {
+        let mut conn = store();
+        let (_, task_id) = session_with_task(&conn);
+        update_task(
+            &mut conn,
+            task_id,
+            "a",
+            "",
+            None,
+            &["  billing  ".into(), "".into(), "Billing".into()],
+        )
+        .unwrap();
+        assert_eq!(label_names(&conn, task_id), ["billing"]);
+    }
+
+    /// The old rename_task reported success for an id that was never there.
+    #[test]
+    fn update_task_refuses_an_unknown_id() {
+        let mut conn = store();
+        assert!(update_task(&mut conn, 404, "a", "", None, &[]).is_err());
+    }
+
+    /// A due date is a day. Set, read back, then cleared by sending None --
+    /// the editor's Clear is the same end-state write as any other save.
+    #[test]
+    fn update_task_sets_and_clears_the_due_date() {
+        let mut conn = store();
+        let (session_id, task_id) = session_with_task(&conn);
+        update_task(&mut conn, task_id, "a", "", Some("2026-09-18"), &[]).unwrap();
+        let task = session_tasks(&conn, session_id).unwrap().pop().unwrap();
+        assert_eq!(task.due_date.as_deref(), Some("2026-09-18"));
+
+        update_task(&mut conn, task_id, "a", "", None, &[]).unwrap();
+        let task = session_tasks(&conn, session_id).unwrap().pop().unwrap();
+        assert_eq!(task.due_date, None);
+    }
+
+    /// Only the canonical form is stored, because string order has to be date
+    /// order. "2026-9-1" is the one chrono would happily parse.
+    #[test]
+    fn update_task_refuses_a_malformed_due_date() {
+        let mut conn = store();
+        let (session_id, task_id) = session_with_task(&conn);
+        for bad in ["tomorrow", "2026-02-30", "2026-9-1", "2026-09-18T10:00", ""] {
+            assert!(
+                update_task(&mut conn, task_id, "a", "", Some(bad), &[]).is_err(),
+                "{bad:?} was accepted"
+            );
+        }
+        // Refused before the transaction: nothing else on the card changed.
+        let task = session_tasks(&conn, session_id).unwrap().pop().unwrap();
+        assert_eq!(task.title, "write the thing");
+        assert_eq!(task.due_date, None);
+    }
+
+    /// Dropping a card is a status, not a delete: it stays on the board's
+    /// history and comes back with resolved_at cleared.
+    #[test]
+    fn a_card_can_be_dropped_and_restored() {
+        let mut conn = store();
+        let (session_id, task_id) = session_with_task(&conn);
+        let arrange = |conn: &mut Connection, arr: Arrangement| {
+            apply_board(conn, session_id, &arr).unwrap();
+            session_tasks(conn, session_id).unwrap().pop().unwrap()
+        };
+
+        let dropped = arrange(
+            &mut conn,
+            Arrangement { todo: vec![], doing: vec![], done: vec![], dropped: vec![task_id] },
+        );
+        assert_eq!(dropped.status, "dropped");
+        let resolved: Option<String> = conn
+            .query_row("SELECT resolved_at FROM task WHERE id = ?1", [task_id], |r| r.get(0))
+            .unwrap();
+        assert!(resolved.is_some());
+
+        let restored = arrange(
+            &mut conn,
+            Arrangement { todo: vec![task_id], doing: vec![], done: vec![], dropped: vec![] },
+        );
+        assert_eq!(restored.status, "planned");
+        let resolved: Option<String> = conn
+            .query_row("SELECT resolved_at FROM task WHERE id = ?1", [task_id], |r| r.get(0))
+            .unwrap();
+        assert!(resolved.is_none());
+    }
+
+    /// Dragging a card to the Backlog column: it lands last, unstarted, with
+    /// its details intact.
+    #[test]
+    fn unpull_sends_a_card_back_to_the_end_of_the_backlog() {
+        let mut conn = store();
+        let (session_id, task_id) = session_with_task(&conn);
+        let first = add_task(&conn, None, "already waiting").unwrap();
+        update_task(&mut conn, task_id, "write the thing", "a note", Some("2026-10-01"), &["school".into()]).unwrap();
+        let doing = Arrangement { todo: vec![], doing: vec![task_id], done: vec![], dropped: vec![] };
+        apply_board(&mut conn, session_id, &doing).unwrap();
+
+        unpull_task(&mut conn, session_id, task_id).unwrap();
+
+        assert!(session_tasks(&conn, session_id).unwrap().is_empty());
+        let back = backlog(&conn).unwrap();
+        assert_eq!(back.iter().map(|t| t.id).collect::<Vec<_>>(), vec![first, task_id]);
+        let t = &back[1];
+        assert_eq!(t.status, "planned");
+        assert_eq!(t.notes, "a note");
+        assert_eq!(t.due_date.as_deref(), Some("2026-10-01"));
+        assert_eq!(t.labels.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), vec!["school"]);
+        let started: Option<String> = conn
+            .query_row("SELECT started_at FROM task WHERE id = ?1", [task_id], |r| r.get(0))
+            .unwrap();
+        assert!(started.is_none());
+    }
+
+    /// Only this board's cards, and never a dropped one or a backlog row.
+    #[test]
+    fn unpull_refuses_what_is_not_on_this_board() {
+        let mut conn = store();
+        let (session_id, task_id) = session_with_task(&conn);
+        let backlog_id = add_task(&conn, None, "a backlog item").unwrap();
+        assert!(unpull_task(&mut conn, session_id, backlog_id).is_err());
+        assert!(unpull_task(&mut conn, session_id + 1, task_id).is_err());
+        let dropped = Arrangement { todo: vec![], doing: vec![], done: vec![], dropped: vec![task_id] };
+        apply_board(&mut conn, session_id, &dropped).unwrap();
+        assert!(unpull_task(&mut conn, session_id, task_id).is_err());
+        assert_eq!(session_tasks(&conn, session_id).unwrap().len(), 1);
+    }
+
+    /// The board on screen can outlive its session: the resume gate closes it
+    /// on another VT and the heartbeat only notices on its next tick. A drag in
+    /// that window used to rewrite the closed session's history.
+    #[test]
+    fn a_closed_session_refuses_board_writes() {
+        let mut conn = store();
+        let (session_id, task_id) = session_with_task(&conn);
+        let backlog_id = add_task(&conn, None, "a backlog item").unwrap();
+        conn.execute(
+            "UPDATE session SET ended_at = ?1 WHERE id = ?2",
+            params![now(), session_id],
+        )
+        .unwrap();
+
+        let moved = Arrangement { todo: vec![], doing: vec![task_id], done: vec![], dropped: vec![] };
+        assert!(matches!(
+            apply_board(&mut conn, session_id, &moved),
+            Err(AppError::SessionClosed(id)) if id == session_id
+        ));
+        assert!(matches!(add_task(&conn, Some(session_id), "late"), Err(AppError::SessionClosed(_))));
+        assert!(matches!(pull_task(&conn, session_id, backlog_id), Err(AppError::SessionClosed(_))));
+        assert!(matches!(unpull_task(&mut conn, session_id, task_id), Err(AppError::SessionClosed(_))));
+
+        let (status, started): (String, Option<String>) = conn
+            .query_row("SELECT status, started_at FROM task WHERE id = ?1", [task_id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((status.as_str(), started), ("planned", None));
+        assert_eq!(session_tasks(&conn, session_id).unwrap().len(), 1);
+        assert_eq!(backlog(&conn).unwrap().len(), 1);
+        // The backlog belongs to no session and stays writable between them.
+        assert!(add_task(&conn, None, "still fine").is_ok());
+    }
+
+    #[test]
+    fn a_missing_session_is_not_open() {
+        assert!(!session_is_open(&store(), 404).unwrap());
+    }
+
+    /// What the gate leaves when it recovers a session nothing heartbeated:
+    /// closed, with no time to put in ended_at.
+    #[test]
+    fn a_session_closed_with_an_unknown_end_is_not_open() {
+        let conn = store();
+        let (session_id, _) = session_with_task(&conn);
+        assert!(session_is_open(&conn, session_id).unwrap());
+        conn.execute("UPDATE session SET close_reason = 'recovered' WHERE id = ?1", [session_id])
+            .unwrap();
+        assert!(!session_is_open(&conn, session_id).unwrap());
+    }
+
+    /// Deleting a backlog row must not leave a label looking as though
+    /// something still wears it. The label itself stays, as a preset.
+    #[test]
+    fn deleting_a_backlog_task_releases_its_labels() {
+        let mut conn = store();
+        let task_id = add_task(&conn, None, "a backlog item").unwrap();
+        update_task(&mut conn, task_id, "a backlog item", "", None, &["billing".into()]).unwrap();
+        assert_eq!(backlog(&conn).unwrap()[0].labels.len(), 1);
+
+        delete_backlog_task(&conn, task_id).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM task_label", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let labels = list_labels(&conn).unwrap();
+        assert_eq!((labels[0].name.as_str(), labels[0].uses), ("billing", 0));
     }
 
     #[test]
@@ -694,7 +1683,6 @@ mod tests {
         assert_eq!(m.state, "recording");
         assert_eq!(m.session_id, None);
         assert_eq!(m.segment_count, 0);
-        assert!(m.key_points.is_empty());
     }
 
     /// A chunk that failed to transcribe is stored as an empty segment so the
@@ -707,7 +1695,7 @@ mod tests {
         add_segment(&conn, id, 0, "First part.").unwrap();
         add_segment(&conn, id, 1, "").unwrap();
         add_segment(&conn, id, 2, "  Third part.  ").unwrap();
-        assert_eq!(transcript(&conn, id).unwrap(), "First part. Third part.");
+        assert_eq!(transcript(&conn, id).unwrap(), "First part.\n\nThird part.");
         assert_eq!(get_meeting(&conn, id).unwrap().unwrap().segment_count, 3);
     }
 
@@ -718,8 +1706,8 @@ mod tests {
         finish_meeting(&mut conn, id, &MeetingNotes {
             title: "Migration plan",
             summary: "We agreed a date.",
-            key_points: &["Thursday".to_string()],
             action_items: &["Send the doc".to_string(), "Book a slot".to_string()],
+            transcript_seen: None,
         }).unwrap();
 
         let actions = meeting_actions(&conn, id).unwrap();
@@ -743,6 +1731,516 @@ mod tests {
 
     /// Re-running the summary replaces the proposals nobody accepted, but an
     /// action already approved is a real task now — deleting its row would
+    /// Stop, as `meeting::stop` does it: stamp the end, then move to 'done'
+    /// once the tail chunk has landed. No notes yet.
+    fn stop(conn: &Connection, id: i64) {
+        assert!(meeting_stopped(conn, id).unwrap());
+        assert!(meeting_state(conn, id, "recording", "done").unwrap());
+    }
+
+    /// Stop, then Write notes: the model call is in flight.
+    fn writing(conn: &Connection, id: i64) {
+        stop(conn, id);
+        assert!(meeting_rerun(conn, id).unwrap());
+    }
+
+    #[test]
+    fn the_scratchpad_round_trips_in_any_state() {
+        let conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        assert_eq!(meeting_notes_text(&conn, id).unwrap(), "");
+        set_meeting_notes(&conn, id, "Ana Kirtsova, not 'on a curt so far'").unwrap();
+        assert_eq!(
+            meeting_notes_text(&conn, id).unwrap(),
+            "Ana Kirtsova, not 'on a curt so far'"
+        );
+        // Still writable once the meeting is over: a debounced autosave can
+        // land after Stop, and rejecting it would lose what was typed last.
+        writing(&conn, id);
+        set_meeting_notes(&conn, id, "and a todo nobody said out loud").unwrap();
+        assert_eq!(
+            meeting_notes_text(&conn, id).unwrap(),
+            "and a todo nobody said out loud"
+        );
+        assert!(set_meeting_notes(&conn, id + 99, "nowhere").is_err());
+    }
+
+    /// Stop writes no notes. The row stays 'recording' while the tail chunk
+    /// drains -- which is what keeps the transcript read-only for that window
+    /// -- then lands in 'done' with no summary, waiting for Write notes.
+    #[test]
+    fn stopping_leaves_a_meeting_done_with_no_notes() {
+        let conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        add_segment(&conn, id, 0, "we agreed thursday").unwrap();
+        assert!(meeting_stopped(&conn, id).unwrap());
+        let m = get_meeting(&conn, id).unwrap().unwrap();
+        assert_eq!(m.state, "recording");
+        assert!(m.ended_at.is_some(), "the end is when the microphone shut");
+
+        assert!(meeting_state(&conn, id, "recording", "done").unwrap());
+        let m = get_meeting(&conn, id).unwrap().unwrap();
+        assert_eq!(m.state, "done");
+        assert!(!m.has_summary);
+        assert_eq!(meeting_summary(&conn, id).unwrap(), (None, None));
+        assert!(meeting_actions(&conn, id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn writing_notes_moves_a_stopped_meeting_to_summarizing() {
+        let mut conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        writing(&conn, id);
+        assert_eq!(get_meeting(&conn, id).unwrap().unwrap().state, "summarizing");
+        finish_meeting(&mut conn, id, &MeetingNotes {
+            title: "t", summary: "s", action_items: &[],
+            transcript_seen: None,
+        }).unwrap();
+        let m = get_meeting(&conn, id).unwrap().unwrap();
+        assert_eq!(m.state, "done");
+        assert!(m.has_summary);
+    }
+
+    /// A re-run is only for a meeting that has finished. Anything else is
+    /// either still recording or already mid-run, and starting a second run
+    /// over it would race the first.
+    #[test]
+    fn a_rerun_only_moves_a_finished_meeting() {
+        let mut conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        assert!(!meeting_rerun(&conn, id).unwrap()); // recording
+        meeting_stopped(&conn, id).unwrap();
+        assert!(!meeting_rerun(&conn, id).unwrap()); // stopped, tail still draining
+        meeting_state(&conn, id, "recording", "done").unwrap();
+        assert!(meeting_rerun(&conn, id).unwrap()); // stopped, no notes yet
+        assert!(!meeting_rerun(&conn, id).unwrap()); // mid-run
+
+        meeting_failed(&conn, id, "the model timed out").unwrap();
+        assert!(meeting_rerun(&conn, id).unwrap());
+        let m = get_meeting(&conn, id).unwrap().unwrap();
+        assert_eq!(m.state, "summarizing");
+        assert!(m.error.is_none(), "the old failure must not still be on screen");
+
+        finish_meeting(&mut conn, id, &MeetingNotes {
+            title: "t", summary: "s", action_items: &[],
+            transcript_seen: None,
+        }).unwrap();
+        assert!(meeting_rerun(&conn, id).unwrap()); // done is re-runnable too
+    }
+
+    /// Resuming opens the microphone on a meeting again, so it has the same
+    /// guard as a re-run: a meeting still recording or mid-run is not finished.
+    #[test]
+    fn a_resume_only_moves_a_finished_meeting() {
+        let mut conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        assert!(!meeting_resume(&conn, id).unwrap()); // recording
+        writing(&conn, id);
+        assert!(!meeting_resume(&conn, id).unwrap()); // summarizing
+
+        finish_meeting(&mut conn, id, &MeetingNotes {
+            title: "t", summary: "s", action_items: &[],
+            transcript_seen: None,
+        }).unwrap();
+        assert!(meeting_resume(&conn, id).unwrap());
+        assert_eq!(get_meeting(&conn, id).unwrap().unwrap().state, "recording");
+        // And a second resume of the same meeting is refused, not stacked.
+        assert!(!meeting_resume(&conn, id).unwrap());
+
+        meeting_stopped(&conn, id).unwrap();
+        meeting_failed(&conn, id, "the model timed out").unwrap();
+        assert!(meeting_resume(&conn, id).unwrap()); // failed is resumable too
+    }
+
+    /// The notes stay -- Write notes replaces them, not the next Stop -- but
+    /// they are marked stale, because the transcript is about to grow past
+    /// what they were written from.
+    #[test]
+    fn a_resume_keeps_the_notes_and_marks_them_stale() {
+        let mut conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        add_segment(&conn, id, 0, "we agreed thursday").unwrap();
+        stop(&conn, id);
+        finish_meeting(&mut conn, id, &MeetingNotes {
+            title: "Planning",
+            summary: "Thursday.",
+            action_items: &["Send the doc".to_string()],
+            transcript_seen: None,
+        }).unwrap();
+        let action = meeting_actions(&conn, id).unwrap()[0].id;
+        approve_actions(&mut conn, id, &[action]).unwrap();
+        let first_end = get_meeting(&conn, id).unwrap().unwrap().ended_at;
+        assert!(first_end.is_some());
+
+        assert!(meeting_resume(&conn, id).unwrap());
+        let m = get_meeting(&conn, id).unwrap().unwrap();
+        assert!(m.ended_at.is_none(), "the next Stop has to be able to stamp its own end");
+        assert!(m.error.is_none());
+        assert!(m.has_summary);
+        assert!(transcript_edited_at(&conn, id).unwrap().is_some());
+        assert_eq!(m.title, "Planning");
+        assert_eq!(meeting_summary(&conn, id).unwrap().0.as_deref(), Some("Thursday."));
+        assert!(meeting_actions(&conn, id).unwrap()[0].task_id.is_some());
+        assert_eq!(transcript(&conn, id).unwrap(), "we agreed thursday");
+
+        // The next Stop stamps a fresh end rather than keeping the first one.
+        meeting_stopped(&conn, id).unwrap();
+        assert!(get_meeting(&conn, id).unwrap().unwrap().ended_at.is_some());
+    }
+
+    /// A failed meeting's error is cleared too — otherwise the sweep, which
+    /// keeps an existing error, would blame a crash mid-resume on the old one.
+    #[test]
+    fn a_crash_mid_resume_is_swept_as_a_lost_recording() {
+        let conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        add_segment(&conn, id, 0, "first part").unwrap();
+        meeting_stopped(&conn, id).unwrap();
+        meeting_failed(&conn, id, "the model timed out").unwrap();
+
+        assert!(meeting_resume(&conn, id).unwrap());
+        add_segment(&conn, id, 1, "second part").unwrap();
+        let last: String = conn
+            .query_row("SELECT started_at FROM meeting_segment WHERE meeting_id = ?1 AND seq = 1",
+                [id], |r| r.get(0))
+            .unwrap();
+
+        assert_eq!(sweep_orphan_meetings(&conn).unwrap(), 1);
+        let m = get_meeting(&conn, id).unwrap().unwrap();
+        assert_eq!(m.state, "failed");
+        assert_eq!(m.error.as_deref(), Some("recording stopped when the app did"));
+        assert_eq!(m.ended_at.as_deref(), Some(last.as_str()));
+    }
+
+    /// A resumed recording carries on after the highest seq — the unique index
+    /// would refuse a reused one — and its first chunk gets the last thing
+    /// actually transcribed as context, not a failed chunk's empty text.
+    #[test]
+    fn a_resume_carries_on_from_the_last_segment() {
+        let conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        assert_eq!(resume_point(&conn, id).unwrap(), (0, String::new()));
+
+        add_segment(&conn, id, 0, "first part").unwrap();
+        add_segment(&conn, id, 1, "second part").unwrap();
+        add_segment(&conn, id, 2, "  ").unwrap();
+        assert_eq!(resume_point(&conn, id).unwrap(), (3, "second part".to_string()));
+
+        let (next, _) = resume_point(&conn, id).unwrap();
+        add_segment(&conn, id, next, "after the break").unwrap();
+        assert_eq!(
+            transcript(&conn, id).unwrap(),
+            "first part\n\nsecond part\n\nafter the break"
+        );
+    }
+
+    /// 'cleaning' is no longer written, but a build with the repair pass may
+    /// have left a row there, and a stranded row is a Start button that never
+    /// comes back.
+    #[test]
+    fn the_orphan_sweep_fails_a_row_an_older_build_left_cleaning() {
+        let conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        add_segment(&conn, id, 0, "said something").unwrap();
+        conn.execute("UPDATE meeting SET state = 'cleaning' WHERE id = ?1", [id]).unwrap();
+
+        assert_eq!(sweep_orphan_meetings(&conn).unwrap(), 1);
+        let m = get_meeting(&conn, id).unwrap().unwrap();
+        assert_eq!(m.state, "failed");
+        assert_eq!(m.error.unwrap(), "the app closed before the notes were written");
+        // The transcript survives, which is what makes a re-run worth offering.
+        assert_eq!(transcript(&conn, id).unwrap(), "said something");
+    }
+
+    /// The write-up is the user's to edit once the model is done with it, and
+    /// the store remembers that it was -- so a re-run can ask first. A re-run
+    /// then hands the document back to the model and clears the mark.
+    #[test]
+    fn editing_the_summary_marks_it_and_a_rerun_clears_the_mark() {
+        let mut conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        assert_eq!(meeting_summary(&conn, id).unwrap(), (None, None));
+        // Not while the notes are being written: finish_meeting would only
+        // overwrite it moments later.
+        writing(&conn, id);
+        assert!(set_meeting_summary(&conn, id, "too early").is_err());
+        assert_eq!(meeting_summary(&conn, id).unwrap(), (None, None));
+
+        finish_meeting(&mut conn, id, &MeetingNotes {
+            title: "Roadmap",
+            summary: "We picked Q4.\n\n## Key points\n- Ship in Q4",
+            action_items: &[],
+            transcript_seen: None,
+        }).unwrap();
+        let (doc, edited) = meeting_summary(&conn, id).unwrap();
+        assert_eq!(doc.as_deref(), Some("We picked Q4.\n\n## Key points\n- Ship in Q4"));
+        assert!(edited.is_none());
+
+        set_meeting_summary(&conn, id, "We picked Q4, and $x^2$.").unwrap();
+        let (doc, edited) = meeting_summary(&conn, id).unwrap();
+        assert_eq!(doc.as_deref(), Some("We picked Q4, and $x^2$."));
+        assert!(edited.is_some());
+
+        // A failed meeting is editable too: the document may be a previous
+        // run's, or written by hand from the transcript.
+        assert!(meeting_rerun(&conn, id).unwrap());
+        meeting_failed(&conn, id, "the model timed out").unwrap();
+        set_meeting_summary(&conn, id, "by hand").unwrap();
+
+        // The re-run's notes are the model's again.
+        finish_meeting(&mut conn, id, &MeetingNotes {
+            title: "Roadmap", summary: "Second pass.", action_items: &[],
+            transcript_seen: None,
+        }).unwrap();
+        assert_eq!(meeting_summary(&conn, id).unwrap(), (Some("Second pass.".into()), None));
+        assert!(set_meeting_summary(&conn, id + 99, "nowhere").is_err());
+    }
+
+    /// The editor is one box, so the stored form collapses to one segment.
+    #[test]
+    fn the_edited_transcript_replaces_the_segments_with_one() {
+        let mut conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        add_segment(&conn, id, 0, "on a curt so far said").unwrap();
+        add_segment(&conn, id, 1, "").unwrap();
+        add_segment(&conn, id, 2, "thursday works").unwrap();
+        assert_eq!(transcript(&conn, id).unwrap(), "on a curt so far said\n\nthursday works");
+
+        // Not while capture is still inserting segments.
+        assert!(set_meeting_transcript(&mut conn, id, "too early").is_err());
+        assert!(transcript_edited_at(&conn, id).unwrap().is_none());
+        assert_eq!(meeting_segments(&conn, id).unwrap().len(), 3);
+
+        stop(&conn, id);
+        let edited = "Ana Kirtsova said\n\nThursday works.";
+        set_meeting_transcript(&mut conn, id, edited).unwrap();
+        let segs = meeting_segments(&conn, id).unwrap();
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].seq, 0);
+        assert_eq!(transcript(&conn, id).unwrap(), edited);
+        assert!(transcript_edited_at(&conn, id).unwrap().is_some());
+
+        // A resume carries on after it, with the edited text as context.
+        assert!(meeting_resume(&conn, id).unwrap());
+        let (next, last) = resume_point(&conn, id).unwrap();
+        assert_eq!((next, last.as_str()), (1, edited));
+        add_segment(&conn, id, next, "and one more thing").unwrap();
+        assert_eq!(
+            transcript(&conn, id).unwrap(),
+            format!("{edited}\n\nand one more thing")
+        );
+
+        assert!(set_meeting_transcript(&mut conn, id + 99, "nowhere").is_err());
+    }
+
+    /// Nothing was heard (or every chunk failed): what the user types still
+    /// needs somewhere to live, or it could never reach the notes.
+    #[test]
+    fn text_typed_into_an_empty_transcript_gets_a_segment() {
+        let mut conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        stop(&conn, id);
+        set_meeting_transcript(&mut conn, id, "typed from memory").unwrap();
+        let segs = meeting_segments(&conn, id).unwrap();
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].seq, 0);
+        assert_eq!(segs[0].started_at, get_meeting(&conn, id).unwrap().unwrap().started_at);
+        assert_eq!(transcript(&conn, id).unwrap(), "typed from memory");
+
+        // Editable while the notes are being written, unlike the write-up:
+        // finish_meeting's compare-and-swap catches it instead.
+        assert!(meeting_rerun(&conn, id).unwrap());
+        set_meeting_transcript(&mut conn, id, "fixed mid-run").unwrap();
+        assert_eq!(transcript(&conn, id).unwrap(), "fixed mid-run");
+    }
+
+    #[test]
+    fn notes_clear_the_transcript_mark_only_if_it_did_not_move() {
+        let mut conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        add_segment(&conn, id, 0, "as heard").unwrap();
+        stop(&conn, id);
+
+        // The ordinary case: nothing was edited, so both sides are NULL and
+        // the meeting finishes unmarked.
+        finish_meeting(&mut conn, id, &MeetingNotes {
+            title: "t", summary: "s", action_items: &[],
+            transcript_seen: None,
+        }).unwrap();
+        assert!(transcript_edited_at(&conn, id).unwrap().is_none());
+
+        // Edited, then a re-run that read that edit: the mark is cleared,
+        // because these notes were written from the corrected text.
+        set_meeting_transcript(&mut conn, id, "as corrected").unwrap();
+        let seen = transcript_edited_at(&conn, id).unwrap();
+        assert!(seen.is_some());
+        finish_meeting(&mut conn, id, &MeetingNotes {
+            title: "t", summary: "s", action_items: &[],
+            transcript_seen: seen.as_deref(),
+        }).unwrap();
+        assert!(transcript_edited_at(&conn, id).unwrap().is_none());
+
+        // Edited *while* the model was working: the run snapshotted the
+        // transcript before the fix, so its notes are already behind and the
+        // mark has to survive. Clearing blind here is the bug this guards.
+        let before = transcript_edited_at(&conn, id).unwrap();
+        set_meeting_transcript(&mut conn, id, "corrected again, mid-run").unwrap();
+        finish_meeting(&mut conn, id, &MeetingNotes {
+            title: "t", summary: "s", action_items: &[],
+            transcript_seen: before.as_deref(),
+        }).unwrap();
+        assert!(transcript_edited_at(&conn, id).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_meeting_can_start_while_another_is_still_wrapping_up() {
+        let conn = store();
+        let first = start_meeting(&conn, None).unwrap();
+        add_segment(&conn, first, 0, "the first meeting").unwrap();
+        writing(&conn, first);
+
+        // The microphone is shut the moment Stop returns, so nothing about a
+        // meeting whose notes are still being written may block the next one.
+        // The data layer has no guard against this and must not grow one:
+        // the only thing that ever refused it was the record bar's UI.
+        let second = start_meeting(&conn, None).unwrap();
+        assert_ne!(first, second);
+        add_segment(&conn, second, 0, "the second meeting").unwrap();
+
+        assert_eq!(get_meeting(&conn, first).unwrap().unwrap().state, "summarizing");
+        assert_eq!(get_meeting(&conn, second).unwrap().unwrap().state, "recording");
+        assert_eq!(transcript(&conn, first).unwrap(), "the first meeting");
+        assert_eq!(transcript(&conn, second).unwrap(), "the second meeting");
+    }
+
+    fn file<'a>(name: &'a str, path: &'a str, bytes: i64, text: &'a str) -> NewFile<'a> {
+        NewFile { name, path, kind: "text", bytes, extracted: Some(text) }
+    }
+
+    /// Enforced in SQL under the transaction, not just in the UI: two attach
+    /// clicks racing would each see room under the cap and both proceed.
+    #[test]
+    fn the_attachment_limits_hold_against_the_aggregate() {
+        let mut conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        for i in 0..3 {
+            add_meeting_file(
+                &mut conn, id, &file("a.txt", &format!("p{i}"), 100, "x"), 3, 10_000, 10_000,
+            )
+            .unwrap();
+        }
+        // The count cap.
+        let err = add_meeting_file(
+            &mut conn, id, &file("d.txt", "p3", 100, "x"), 3, 10_000, 10_000,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("already has 3 files"), "{err}");
+
+        // The byte cap, on the total rather than the one file.
+        let err = add_meeting_file(
+            &mut conn, id, &file("e.txt", "p4", 9_000, "x"), 9, 1024 * 1024, 10_000,
+        );
+        assert!(err.is_ok(), "9 kB fits inside 1 MB");
+        let err = add_meeting_file(
+            &mut conn, id, &file("f.txt", "p5", 2 * 1024 * 1024, "x"), 9, 1024 * 1024, 10_000,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("attachments"), "{err}");
+
+        // The character cap -- the one that bounds the bill rather than disk.
+        let long = "y".repeat(9_000);
+        let err = add_meeting_file(
+            &mut conn, id, &file("g.txt", "p6", 10, &long), 9, 1024 * 1024, 100,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("text this can send"), "{err}");
+    }
+
+    #[test]
+    fn attaching_to_a_missing_meeting_is_refused() {
+        let mut conn = store();
+        assert!(add_meeting_file(
+            &mut conn, 999, &file("a.txt", "p", 1, "x"), 8, 10_000, 10_000
+        )
+        .is_err());
+    }
+
+    /// Deleting hands back the copy to unlink -- the row goes first, so a file
+    /// left behind is litter the sweep collects rather than a broken chip.
+    #[test]
+    fn deleting_an_attachment_returns_the_path_to_unlink() {
+        let mut conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        let file_id = add_meeting_file(
+            &mut conn, id, &file("deck.pptx", "/tmp/opaque123", 4096, "slides"), 8, 10_000, 10_000,
+        )
+        .unwrap();
+        assert_eq!(meeting_file_rows(&conn, id).unwrap()[0].path, "/tmp/opaque123");
+
+        let path = delete_meeting_file(&conn, id, file_id).unwrap();
+        assert_eq!(path, "/tmp/opaque123");
+        assert!(meeting_files(&conn, id).unwrap().is_empty());
+        // A second delete is not a second unlink.
+        assert!(delete_meeting_file(&conn, id, file_id).is_err());
+    }
+
+    /// Positions keep counting up, so removing the first chip does not make
+    /// the next attachment collide with the second.
+    #[test]
+    fn attachment_positions_do_not_collide_after_a_removal() {
+        let mut conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        let first = add_meeting_file(
+            &mut conn, id, &file("a", "p0", 1, "x"), 8, 10_000, 10_000,
+        ).unwrap();
+        add_meeting_file(&mut conn, id, &file("b", "p1", 1, "x"), 8, 10_000, 10_000).unwrap();
+        delete_meeting_file(&conn, id, first).unwrap();
+        add_meeting_file(&mut conn, id, &file("c", "p2", 1, "x"), 8, 10_000, 10_000).unwrap();
+
+        let files = meeting_files(&conn, id).unwrap();
+        let positions: Vec<i64> = files.iter().map(|f| f.position).collect();
+        assert_eq!(positions, vec![1, 2]);
+        assert_eq!(files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["b", "c"]);
+    }
+
+    /// The model pipeline's view carries the path; the webview's does not.
+    #[test]
+    fn only_the_model_side_sees_the_stored_path() {
+        let mut conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        add_meeting_file(
+            &mut conn, id, &file("spec.md", "/tmp/opaque", 12, "the body"), 8, 10_000, 10_000,
+        )
+        .unwrap();
+        let rows = meeting_file_rows(&conn, id).unwrap();
+        assert_eq!(rows[0].path, "/tmp/opaque");
+        assert_eq!(rows[0].extracted.as_deref(), Some("the body"));
+
+        let shown = serde_json::to_string(&meeting_files(&conn, id).unwrap()).unwrap();
+        assert!(!shown.contains("opaque"), "the path reached the webview: {shown}");
+        assert!(!shown.contains("the body"), "the contents reached the webview");
+        assert!(shown.contains("spec.md"));
+    }
+
+    #[test]
+    fn a_meeting_lists_its_files() {
+        let conn = store();
+        let id = start_meeting(&conn, None).unwrap();
+        assert!(meeting_files(&conn, id).unwrap().is_empty());
+        conn.execute(
+            "INSERT INTO meeting_file (meeting_id, position, name, path, kind, bytes, added_at)
+             VALUES (?1, 0, 'deck.pptx', 'ab12cd34', 'office', 4096, ?2)",
+            params![id, now()],
+        ).unwrap();
+        let files = meeting_files(&conn, id).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "deck.pptx");
+        assert_eq!(files[0].kind, "office");
+    }
+
     /// orphan that task and offer the same work twice.
     #[test]
     fn resummarizing_keeps_approved_actions_and_replaces_the_rest() {
@@ -751,8 +2249,8 @@ mod tests {
         finish_meeting(&mut conn, id, &MeetingNotes {
             title: "First pass",
             summary: "s",
-            key_points: &[],
             action_items: &["Keep me".to_string(), "Replace me".to_string()],
+            transcript_seen: None,
         }).unwrap();
         let keep = meeting_actions(&conn, id).unwrap()[0].id;
         approve_actions(&mut conn, id, &[keep]).unwrap();
@@ -760,8 +2258,8 @@ mod tests {
         finish_meeting(&mut conn, id, &MeetingNotes {
             title: "Second pass",
             summary: "s2",
-            key_points: &[],
             action_items: &["Brand new".to_string()],
+            transcript_seen: None,
         }).unwrap();
 
         let after: Vec<String> =
@@ -800,7 +2298,7 @@ mod tests {
         let conn = store();
         let id = start_meeting(&conn, None).unwrap();
         add_segment(&conn, id, 0, "something said").unwrap();
-        assert!(meeting_summarizing(&conn, id).unwrap());
+        writing(&conn, id);
         let stopped_at = get_meeting(&conn, id).unwrap().unwrap().ended_at;
         assert!(stopped_at.is_some(), "Stop records ended_at before the notes");
 
@@ -821,8 +2319,9 @@ mod tests {
         let id = start_meeting(&conn, None).unwrap();
         add_segment(&conn, id, 0, "said").unwrap();
         finish_meeting(&mut conn, id, &MeetingNotes {
-            title: "t", summary: "s", key_points: &[],
+            title: "t", summary: "s",
             action_items: &["Do the thing".to_string()],
+            transcript_seen: None,
         }).unwrap();
         let action = meeting_actions(&conn, id).unwrap()[0].id;
         approve_actions(&mut conn, id, &[action]).unwrap();
@@ -836,11 +2335,18 @@ mod tests {
         assert_eq!(backlog[0].title, "Do the thing");
     }
 
+    /// Two Stops are kept apart by `take_meeting`; the store's part is that a
+    /// second stamp never moves the first end, and a meeting that has already
+    /// stopped cannot be stopped again.
     #[test]
-    fn stopping_a_meeting_twice_only_moves_it_once() {
+    fn stopping_keeps_the_first_end_and_refuses_a_stopped_meeting() {
         let conn = store();
         let id = start_meeting(&conn, None).unwrap();
-        assert!(meeting_summarizing(&conn, id).unwrap());
-        assert!(!meeting_summarizing(&conn, id).unwrap());
+        assert!(meeting_stopped(&conn, id).unwrap());
+        let first = get_meeting(&conn, id).unwrap().unwrap().ended_at;
+        assert!(meeting_stopped(&conn, id).unwrap());
+        assert_eq!(get_meeting(&conn, id).unwrap().unwrap().ended_at, first);
+        meeting_state(&conn, id, "recording", "done").unwrap();
+        assert!(!meeting_stopped(&conn, id).unwrap());
     }
 }
