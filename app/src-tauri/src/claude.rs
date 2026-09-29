@@ -232,11 +232,10 @@ fn build_prompt(ctx: &Context) -> String {
 }
 
 /// One request, one response. Transport, status handling and refusals — but
-/// not the shape of the answer, because the meeting pipeline wants plain text
-/// back from one call and a tool call from the next.
+/// not the shape of the answer, which each caller reads for itself.
 ///
 /// The timeout is a parameter and not a constant because the spread is real:
-/// a two-sentence check is done in seconds, and repairing an hour of
+/// a two-sentence check is done in seconds, and summarizing an hour of
 /// transcript is not.
 async fn post(body: Value, timeout: Duration) -> Result<Value> {
     let resp = remote()?

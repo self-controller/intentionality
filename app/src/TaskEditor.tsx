@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import { addDays, ISO_DAY, localDate } from "./format";
 import Calendar from "./ui/Calendar";
-import type { Label, LabelSummary } from "./types";
+import ColorPicker from "./ui/ColorPicker";
+import type { Label, LabelSummary, Priority } from "./types";
 
 // What the editor starts from: a Task has all of these, and a card that does
 // not exist yet is the same shape with nothing filled in.
@@ -10,6 +11,7 @@ export interface TaskFields {
   title: string;
   notes: string;
   due_date: string | null;
+  priority: Priority;
   labels: Label[];
 }
 
@@ -17,8 +19,16 @@ export const blankTask = (title: string): TaskFields => ({
   title,
   notes: "",
   due_date: null,
+  priority: "medium",
   labels: [],
 });
+
+// High first, as the board orders them. The colour matches the card's footer.
+const PRIORITIES: { value: Priority; label: string; on: string }[] = [
+  { value: "high", label: "High", on: "border-bad text-bad" },
+  { value: "medium", label: "Medium", on: "border-warn text-warn" },
+  { value: "low", label: "Low", on: "border-muted text-text" },
+];
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
@@ -46,12 +56,19 @@ export function TaskForm({
   // The whole card as it should end up; `labels` is the full set. Whatever
   // follows a save (the card landing) is part of this promise: the form stays
   // busy until it settles, and shows its error if it fails.
-  save: (title: string, notes: string, dueDate: string | null, labels: string[]) => Promise<unknown>;
+  save: (
+    title: string,
+    notes: string,
+    dueDate: string | null,
+    priority: Priority,
+    labels: string[],
+  ) => Promise<unknown>;
   onClose: () => void;
   // Only offered for a backlog row: a session card is history, and the way
   // off the board is a drag back to the Backlog column.
   onDelete: (() => void) | null;
-  // A label was deleted outright, so other cards on screen changed too.
+  // A label was deleted or recoloured outright, so other cards on screen
+  // changed too.
   onLabelsChanged?: () => void;
 }) {
   const [title, setTitle] = useState(initial.title);
@@ -61,6 +78,7 @@ export function TaskForm({
   // The month grid is open. Closed by default: most cards get Today, Tomorrow
   // or nothing at all, and the grid is a third of the dialog's height.
   const [cal, setCal] = useState(false);
+  const [priority, setPriority] = useState<Priority>(initial.priority);
   const [labels, setLabels] = useState<string[]>(initial.labels.map((l) => l.name));
   // Names typed here that no label has yet. They stay offered once unticked,
   // so a click can bring one back.
@@ -69,6 +87,9 @@ export function TaskForm({
   const [known, setKnown] = useState<LabelSummary[]>([]);
   // A label in use waiting on its inline confirm before it is deleted.
   const [confirming, setConfirming] = useState<LabelSummary | null>(null);
+  // A stored label whose colour is being picked. Like deleting, recolouring
+  // is not part of Save: the colour is the label's, on every card at once.
+  const [picking, setPicking] = useState<LabelSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const titleRef = useRef<HTMLInputElement>(null);
@@ -78,12 +99,17 @@ export function TaskForm({
     titleRef.current?.focus();
   }, []);
 
-  // Esc cancels, like every other overlay in the app.
+  // Esc cancels, like every other overlay in the app -- the colour picker
+  // first, if one is open, then the card.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (picking) setPicking(null);
+      else onClose();
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, picking]);
 
   // Every label there is, then what this card wears that the list lacks (one
   // deleted meanwhile), then what was typed here. One chip per name whatever
@@ -134,6 +160,18 @@ export function TaskForm({
       .catch((e) => setError(String(e)));
   };
 
+  const recolor = (name: string, color: string) => {
+    setError(null);
+    api
+      .setLabelColor(name, color)
+      .then(() => {
+        setPicking(null);
+        api.listLabels().then(setKnown).catch(() => setKnown([]));
+        onLabelsChanged?.();
+      })
+      .catch((e) => setError(String(e)));
+  };
+
   const submit = () => {
     if (!title.trim()) return;
     // The grid and the two buttons only ever produce this shape, so anything
@@ -147,7 +185,7 @@ export function TaskForm({
     setError(null);
     // Whatever is half-typed in the label box counts as meant.
     const all = draft.trim() && !has(draft.trim()) ? [...labels, draft.trim()] : labels;
-    save(title.trim(), notes, due || null, all).catch((e) => {
+    save(title.trim(), notes, due || null, priority, all).catch((e) => {
       setError(String(e));
       setBusy(false);
     });
@@ -165,6 +203,25 @@ export function TaskForm({
         onChange={(e) => setTitle(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && submit()}
       />
+
+      <p className="mb-1.5 mt-4 block text-[13px] uppercase tracking-[0.06em] text-muted" id="task-priority">
+        Priority
+      </p>
+      {/* The board orders every column by this, high first. */}
+      <div className="flex flex-wrap items-center gap-2" role="radiogroup" aria-labelledby="task-priority">
+        {PRIORITIES.map((p) => (
+          <button
+            key={p.value}
+            role="radio"
+            aria-checked={priority === p.value}
+            disabled={busy}
+            className={priority === p.value ? p.on : ""}
+            onClick={() => setPriority(p.value)}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
 
       <label className="mb-1.5 mt-4 block text-[13px] uppercase tracking-[0.06em] text-muted" htmlFor="task-due">
         Due
@@ -242,11 +299,31 @@ export function TaskForm({
             const stored = known.find((l) => same(l.name, name));
             return (
               <li key={name.toLowerCase()} className="flex max-w-full items-stretch">
+                {/* A stored label's colour is a button of its own: it opens
+                    the picker. A name typed here has no colour until saved. */}
+                {stored && (
+                  <button
+                    className={
+                      "flex flex-none items-center rounded-l-sm border border-r-0 border-line px-1.5 " +
+                      "transition-colors hover:border-muted disabled:cursor-default " +
+                      (picking && same(picking.name, name) ? "bg-raised" : "")
+                    }
+                    title={`Change the colour of ${stored.name}`}
+                    aria-label={`Change the colour of ${stored.name}`}
+                    disabled={busy}
+                    onClick={() => {
+                      setConfirming(null);
+                      setPicking(picking && same(picking.name, name) ? null : stored);
+                    }}
+                  >
+                    <span className="h-2.5 w-2.5 rounded-[2px]" style={{ background: stored.color }} />
+                  </button>
+                )}
                 <button
                   className={
                     "flex min-w-0 items-center gap-1.5 border border-line py-1 pl-1.5 text-xs " +
                     "transition-colors duration-150 " +
-                    (stored ? "rounded-l-sm border-r-0 pr-1.5 " : "rounded-sm pr-2.5 ") +
+                    (stored ? "border-r-0 pr-1.5 " : "rounded-sm pr-2.5 ") +
                     "disabled:cursor-default " +
                     // The tick is what says it is on; the fill only reinforces it.
                     (on ? "bg-raised text-text" : "bg-transparent text-muted hover:text-text")
@@ -257,14 +334,16 @@ export function TaskForm({
                   onClick={() => toggle(name)}
                 >
                   <span className="w-[1em] flex-none text-center text-accent">{on ? "✓" : ""}</span>
-                  <span
-                    className={
-                      "h-2 w-2 flex-none rounded-[2px]" +
-                      // A name typed here that no label wears yet: no colour until saved.
-                      (color ? "" : " border border-muted")
-                    }
-                    style={color ? { background: color } : undefined}
-                  />
+                  {!stored && (
+                    <span
+                      className={
+                        "h-2 w-2 flex-none rounded-[2px]" +
+                        // A name typed here that no label wears yet: no colour until saved.
+                        (color ? "" : " border border-muted")
+                      }
+                      style={color ? { background: color } : undefined}
+                    />
+                  )}
                   <span className="overflow-hidden text-ellipsis whitespace-nowrap">{name}</span>
                 </button>
                 {/* Only a stored label can be deleted; a name typed here and
@@ -274,7 +353,11 @@ export function TaskForm({
                     className="rounded-r-sm border border-l-0 border-line px-1.5 text-xs text-muted transition-colors hover:text-bad disabled:cursor-default"
                     title={`Delete ${stored.name} from every task`}
                     disabled={busy}
-                    onClick={() => (stored.uses ? setConfirming(stored) : removeLabel(stored.name))}
+                    onClick={() => {
+                      setPicking(null);
+                      if (stored.uses) setConfirming(stored);
+                      else removeLabel(stored.name);
+                    }}
                   >
                     ×
                   </button>
@@ -285,6 +368,17 @@ export function TaskForm({
         </ul>
       ) : (
         <p className="text-xs text-muted">No labels yet. Type one below to make it.</p>
+      )}
+      {picking && (
+        <ColorPicker
+          // Remounted per label, so it starts from that label's colour.
+          key={picking.name.toLowerCase()}
+          title={`Colour of “${picking.name}”, on every card that wears it`}
+          value={picking.color}
+          busy={busy}
+          onApply={(hex) => recolor(picking.name, hex)}
+          onCancel={() => setPicking(null)}
+        />
       )}
       {confirming && (
         <div className="mt-2 flex flex-wrap items-center gap-1.5">

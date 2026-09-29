@@ -9,7 +9,7 @@ CREATE TABLE meta (
     value TEXT NOT NULL
 );
 
-INSERT INTO meta (key, value) VALUES ('schema_version', '10');
+INSERT INTO meta (key, value) VALUES ('schema_version', '11');
 
 CREATE TABLE session (
     id                INTEGER PRIMARY KEY,
@@ -50,9 +50,14 @@ CREATE TABLE task (
     notes        TEXT NOT NULL DEFAULT '',
     -- The day the task is due, 'YYYY-MM-DD' on the user's own calendar: a
     -- day, not an instant, so it never shifts with a timezone, and the fixed
-    -- width makes string order date order. NULL = no due date. Notes and
-    -- due_date are last because each arrived by ADD COLUMN, which appends.
-    due_date     TEXT
+    -- width makes string order date order. NULL = no due date. Notes,
+    -- due_date and priority are last because each arrived by ADD COLUMN,
+    -- which appends.
+    due_date     TEXT,
+    -- How much it matters. The board orders every column by it (high first),
+    -- keeping the user's own order within each level.
+    priority     TEXT NOT NULL DEFAULT 'medium'
+                 CHECK (priority IN ('high', 'medium', 'low'))
 );
 
 -- A task can be carried into the backlog at most once, whatever the close

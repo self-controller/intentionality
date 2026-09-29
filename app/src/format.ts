@@ -67,12 +67,11 @@ export type DueClass = "overdue" | "today" | "soon" | "later";
 // A due date in words, relative to today. The words carry the meaning and the
 // class only colours it, the same rule band() follows. `date` is the plain
 // short date, for a finished card that should keep the date but not the alarm.
-export function dueInfo(due: string): { text: string; cls: DueClass; date: string } {
+export function dueInfo(due: string, now = new Date()): { text: string; cls: DueClass; date: string } {
   // Local midnight: new Date("2026-09-18") would be UTC midnight, which is
   // the previous evening here.
   const [y, m, d] = due.split("-").map(Number);
   const day = new Date(y, m - 1, d);
-  const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   // Rounded, because a DST change makes one day 23 or 25 hours long.
   const days = Math.round((day.getTime() - today.getTime()) / 86_400_000);

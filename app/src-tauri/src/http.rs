@@ -22,7 +22,7 @@ fn cached(
 
 /// The Anthropic and OpenAI APIs. Callers set the overall timeout per
 /// request, because the spread is real: a two-sentence check is done in
-/// seconds, repairing an hour of transcript is not.
+/// seconds, summarizing an hour of transcript is not.
 pub fn remote() -> Result<&'static reqwest::Client, reqwest::Error> {
     cached(&REMOTE, reqwest::Client::builder().connect_timeout(Duration::from_secs(3)))
 }

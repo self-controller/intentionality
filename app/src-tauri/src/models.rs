@@ -60,6 +60,8 @@ pub struct Task {
     pub notes: String,
     /// The day it is due, `YYYY-MM-DD`; None = no due date.
     pub due_date: Option<String>,
+    /// "high", "medium" or "low". The board orders each column by it.
+    pub priority: String,
     /// Filled in by a second query, so a row read on its own starts empty.
     pub labels: Vec<Label>,
 }

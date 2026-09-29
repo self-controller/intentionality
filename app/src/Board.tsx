@@ -6,8 +6,9 @@ import type { CardMoveEvent, KanbanCardData, KanbanColumnData, KanbanTheme } fro
 import type { KanbanBoard3DHandle } from "threejs-elements/react";
 import * as api from "./api";
 import CardEditor3D from "./CardEditor3D";
+import { dueInfo, localDate } from "./format";
 import { TaskForm, blankTask } from "./TaskEditor";
-import type { Board as BoardData, Status, Task } from "./types";
+import type { Board as BoardData, Priority, Status, Task } from "./types";
 
 const KanbanBoard3D = lazy(() =>
   import("threejs-elements/react").then((m) => ({ default: m.KanbanBoard3D })),
@@ -56,6 +57,7 @@ const FALLBACK: Record<string, string> = {
   text: "#f8f9fa",
   muted: "#adb5bd",
   warn: "#e0af68",
+  bad: "#f7768e",
   good: "#9ece6a",
   violet: "#bb9af7",
 };
@@ -82,31 +84,69 @@ function boardTheme(): Partial<KanbanTheme> {
   };
 }
 
+// The canvas colours for what a card's footer says, read once from the theme.
+type Palette = { muted: string; warn: string; bad: string };
+
+const PRIORITY_TEXT: Record<Priority, string> = { high: "High", medium: "Med", low: "Low" };
+const PRIORITY_COLOR: Record<Priority, keyof Palette> = { high: "bad", medium: "warn", low: "muted" };
+
 // One tag fits on a card face; the rest are counted, and all of them are in
-// the editor a click away.
-function toCard(t: Task, muted: string): KanbanCardData {
+// the editor a click away. The footer says the priority and when it is due,
+// in words; colour only reinforces them. A card burns on the day it is due,
+// unless it is done -- as done cards show their date muted, with no alarm.
+function toCard(t: Task, palette: Palette, today: string): KanbanCardData {
   const [first, ...rest] = t.labels;
+  const done = t.status === "done";
+  const details = [{ text: PRIORITY_TEXT[t.priority], color: palette[PRIORITY_COLOR[t.priority]] }];
+  if (t.due_date) {
+    const due = dueInfo(t.due_date, dayOf(today));
+    details.push(
+      done
+        ? { text: `Due ${due.date}`, color: palette.muted }
+        : {
+            text: due.text,
+            color: due.cls === "overdue" ? palette.bad : due.cls === "today" ? palette.warn : palette.muted,
+          },
+    );
+  }
   return {
     id: String(t.id),
     title: t.title,
     tag: first ? first.name + (rest.length ? ` +${rest.length}` : "") : undefined,
-    color: first?.color ?? muted,
+    color: first?.color ?? palette.muted,
+    details,
+    burning: !done && t.due_date === today,
   };
 }
 
-// The session's cards per status, in board order. Dropped is carried along
-// because apply_board wants the whole arrangement.
+// "YYYY-MM-DD" as local midnight.
+function dayOf(iso: string): Date {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+// High first. Within a level the user's own order stands: Array.sort is
+// stable, and the tasks arrive in position order.
+const RANK: Record<Priority, number> = { high: 0, medium: 1, low: 2 };
+const byPriority = (tasks: Task[]) => [...tasks].sort((a, b) => RANK[a.priority] - RANK[b.priority]);
+
+// The session's cards per status, in board order: by priority, then position.
+// Dropped is carried along because apply_board wants the whole arrangement.
 type Lanes = Record<Status, Task[]>;
 
 function lanesOf(tasks: Task[]): Lanes {
-  const by = (s: Status) => tasks.filter((t) => t.status === s);
+  const by = (s: Status) => byPriority(tasks.filter((t) => t.status === s));
   return { planned: by("planned"), doing: by("doing"), done: by("done"), dropped: by("dropped") };
 }
 
-// `task` taken out of wherever it was and put into `target` at `index`.
+// `task` taken out of wherever it was and put into `target` at `index`, then
+// the lane re-sorted. The sort is stable, so a drop among cards of its own
+// priority stays where it was put, and one among another priority's cards
+// goes to the nearest edge of its own group.
 function moved(tasks: Task[], task: Task, target: Status, index: number): Task[] {
   const lanes = lanesOf(tasks.filter((t) => t.id !== task.id));
   lanes[target].splice(index, 0, { ...task, status: target });
+  lanes[target] = byPriority(lanes[target]);
   return [...lanes.planned, ...lanes.doing, ...lanes.done, ...lanes.dropped];
 }
 
@@ -142,6 +182,16 @@ export default function Board() {
   // Read once: the board takes its theme on mount only.
   const theme = useMemo(boardTheme, []);
   const laneColors = useMemo(() => Object.fromEntries(LANES.map((l) => [l.lane, token(l.token)])), []);
+  const palette = useMemo<Palette>(() => ({ muted: token("muted"), warn: token("warn"), bad: token("bad") }), []);
+
+  // The local day, so a card catches fire at midnight (and one due yesterday
+  // goes out) without a reload. Polled rather than timed to midnight: a
+  // timeout does not count the hours the laptop spent asleep.
+  const [today, setToday] = useState(() => localDate(new Date()));
+  useEffect(() => {
+    const tick = setInterval(() => setToday(localDate(new Date())), 30_000);
+    return () => clearInterval(tick);
+  }, []);
 
   const refresh = useCallback(() => {
     api.getBoard().then(setBoard).catch((e) => setErr(String(e)));
@@ -162,18 +212,16 @@ export default function Board() {
   // move is undone: the 3D board animates to whatever it is handed.
   const columns = useMemo<KanbanColumnData[]>(() => {
     if (!board) return [];
-    const muted = token("muted");
+    const lanes = lanesOf(board.tasks);
     return LANES.map(({ lane, label }) => ({
       id: lane,
       title: label,
       color: laneColors[lane],
       // The session lanes' "+" only means something while a session is open.
       canAdd: lane === "backlog" || board.session != null,
-      cards: (lane === "backlog" ? board.backlog : board.tasks.filter((t) => t.status === lane)).map((t) =>
-        toCard(t, muted),
-      ),
+      cards: (lane === "backlog" ? byPriority(board.backlog) : lanes[lane]).map((t) => toCard(t, palette, today)),
     }));
-  }, [board, laneColors]);
+  }, [board, laneColors, palette, today]);
 
   if (err) return <div className="p-12 text-center text-muted">{err}</div>;
   if (!board) return null;
@@ -252,7 +300,7 @@ export default function Board() {
     api.getBoard().then((b) => {
       const task = b.tasks.find((t) => t.id === id) ?? b.backlog.find((t) => t.id === id);
       leave();
-      boardRef.current?.closeCard(task ? { data: toCard(task, token("muted")) } : { remove: true });
+      boardRef.current?.closeCard(task ? { data: toCard(task, palette, today) } : { remove: true });
       setNotice(null);
       setBoard(b);
     });
@@ -324,9 +372,9 @@ export default function Board() {
                 initial={blankTask("")}
                 heading={`New task in ${laneLabel(open.lane)}`}
                 saveText="Add task"
-                save={(title, notes, dueDate, labels) =>
+                save={(title, notes, dueDate, priority, labels) =>
                   api
-                    .createTask(title, notes, dueDate, labels, open.lane === "backlog")
+                    .createTask(title, notes, dueDate, priority, labels, open.lane === "backlog")
                     // A new session card starts in To Do.
                     .then((id) =>
                       (open.lane === "backlog" || open.lane === "planned"
@@ -344,8 +392,10 @@ export default function Board() {
                 key={open.task.id}
                 initial={open.task}
                 saveText="Save"
-                save={(title, notes, dueDate, labels) =>
-                  api.updateTask(open.task.id, title, notes, dueDate, labels).then(() => land(open.task.id))
+                save={(title, notes, dueDate, priority, labels) =>
+                  api
+                    .updateTask(open.task.id, title, notes, dueDate, priority, labels)
+                    .then(() => land(open.task.id))
                 }
                 onClose={cancel}
                 onLabelsChanged={refresh}
