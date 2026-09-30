@@ -152,6 +152,7 @@ fn main() {
             commands::create_task,
             commands::update_task,
             commands::list_labels,
+            commands::set_label_color,
             commands::delete_label,
             commands::delete_task,
             commands::pull_task,

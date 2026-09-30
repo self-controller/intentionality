@@ -13,7 +13,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 pub const MIGRATE_HINT: &str = "store schema is out of date — run: python3 -m gate migrate";
 
 pub fn now() -> String {
@@ -113,7 +113,7 @@ pub fn list_sessions(conn: &Connection, limit: i64) -> Result<Vec<Session>> {
 // carry_count follows the carried_from chain — the read-only twin of
 // gate/store.py::carry_count.
 const TASK_SELECT: &str = "
-    SELECT t.id, t.session_id, t.title, t.position, t.status, t.notes, t.due_date,
+    SELECT t.id, t.session_id, t.title, t.position, t.status, t.notes, t.due_date, t.priority,
         (WITH RECURSIVE chain(cid) AS (
             SELECT carried_from FROM task WHERE id = t.id AND carried_from IS NOT NULL
             UNION ALL
@@ -132,6 +132,7 @@ fn row_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         carry_count: row.get("carry_count")?,
         notes: row.get("notes")?,
         due_date: row.get("due_date")?,
+        priority: row.get("priority")?,
         // attach_labels fills these; a task read on its own has none.
         labels: Vec::new(),
     })
@@ -202,6 +203,23 @@ fn ensure_label(conn: &Connection, name: &str) -> Result<i64> {
         params![name, LABEL_COLORS[(next as usize) % LABEL_COLORS.len()]],
     )?;
     Ok(conn.query_row("SELECT id FROM label WHERE name = ?1", [name], |r| r.get(0))?)
+}
+
+/// Recolour a label everywhere it is worn. `#rrggbb` only, stored lowercase,
+/// so the palette's own values and a picked colour look alike in the store.
+pub fn set_label_color(conn: &Connection, name: &str, color: &str) -> Result<()> {
+    let color = color.trim().to_ascii_lowercase();
+    let canonical = color.len() == 7
+        && color.starts_with('#')
+        && color[1..].bytes().all(|b| b.is_ascii_hexdigit());
+    if !canonical {
+        return Err(AppError::Other(format!("colour must be #rrggbb, not {color:?}")));
+    }
+    let changed = conn.execute("UPDATE label SET color = ?1 WHERE name = ?2", [&color, name.trim()])?;
+    if changed == 0 {
+        return Err(AppError::Other(format!("no label {name:?}")));
+    }
+    Ok(())
 }
 
 /// Delete a label everywhere. Its task_label rows go with it by cascade, so
@@ -281,16 +299,18 @@ pub fn create_task(
     title: &str,
     notes: &str,
     due_date: Option<&str>,
+    priority: &str,
     labels: &[String],
 ) -> Result<i64> {
     check_due(due_date)?;
+    check_priority(priority)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Inside the write lock, as in apply_board.
     if let Some(sid) = session_id {
         ensure_open(&tx, sid)?;
     }
     let id = insert_task(&tx, session_id, title)?;
-    write_details(&tx, id, title, notes, due_date, labels)?;
+    write_details(&tx, id, title, notes, due_date, priority, labels)?;
     tx.commit()?;
     Ok(id)
 }
@@ -327,11 +347,13 @@ pub fn update_task(
     title: &str,
     notes: &str,
     due_date: Option<&str>,
+    priority: &str,
     labels: &[String],
 ) -> Result<()> {
     check_due(due_date)?;
+    check_priority(priority)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    write_details(&tx, id, title, notes, due_date, labels)?;
+    write_details(&tx, id, title, notes, due_date, priority, labels)?;
     tx.commit()?;
     Ok(())
 }
@@ -351,6 +373,15 @@ fn check_due(due_date: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// The three levels task.priority's CHECK allows. Refused here too, so a bad
+/// value is a readable error rather than a constraint failure.
+fn check_priority(priority: &str) -> Result<()> {
+    match priority {
+        "high" | "medium" | "low" => Ok(()),
+        other => Err(AppError::Other(format!("priority must be high, medium or low, not {other:?}"))),
+    }
+}
+
 /// Everything but position and status, for a task that exists. Never deletes
 /// a label: one its last task lets go of stays, as a preset. gate/store.py's
 /// _set_details is the same write for the gate.
@@ -360,11 +391,12 @@ fn write_details(
     title: &str,
     notes: &str,
     due_date: Option<&str>,
+    priority: &str,
     labels: &[String],
 ) -> Result<()> {
     let changed = conn.execute(
-        "UPDATE task SET title = ?1, notes = ?2, due_date = ?3 WHERE id = ?4",
-        params![title, notes, due_date, id],
+        "UPDATE task SET title = ?1, notes = ?2, due_date = ?3, priority = ?4 WHERE id = ?5",
+        params![title, notes, due_date, priority, id],
     )?;
     if changed == 0 {
         return Err(AppError::Other(format!("no task {id}")));
@@ -1317,8 +1349,8 @@ pub(crate) mod tests {
         let mut conn = store();
         let (_, task_id) = session_with_task(&conn);
         let later = add_task(&conn, None, "later").unwrap();
-        update_task(&mut conn, later, "later", "", None, &["someday".into()]).unwrap();
-        update_task(&mut conn, task_id, "write the thing", "", None, &["now".into()]).unwrap();
+        update_task(&mut conn, later, "later", "", None, "medium", &["someday".into()]).unwrap();
+        update_task(&mut conn, task_id, "write the thing", "", None, "medium", &["now".into()]).unwrap();
 
         let backlog = backlog(&conn).unwrap();
         assert_eq!(backlog.len(), 1);
@@ -1339,6 +1371,7 @@ pub(crate) mod tests {
             "write the other thing",
             "two paragraphs\nof plain text",
             None,
+            "medium",
             &["billing".into(), "urgent".into()],
         )
         .unwrap();
@@ -1362,10 +1395,10 @@ pub(crate) mod tests {
         let mut conn = store();
         let (session_id, first) = session_with_task(&conn);
         let second = add_task(&conn, Some(session_id), "another").unwrap();
-        update_task(&mut conn, first, "a", "", None, &["billing".into()]).unwrap();
+        update_task(&mut conn, first, "a", "", None, "medium", &["billing".into()]).unwrap();
         let color = list_labels(&conn).unwrap()[0].color.clone();
 
-        update_task(&mut conn, second, "b", "", None, &["BILLING".into()]).unwrap();
+        update_task(&mut conn, second, "b", "", None, "medium", &["BILLING".into()]).unwrap();
         let labels = list_labels(&conn).unwrap();
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0].name, "billing");
@@ -1380,15 +1413,15 @@ pub(crate) mod tests {
         let mut conn = store();
         let (session_id, first) = session_with_task(&conn);
         let second = add_task(&conn, Some(session_id), "another").unwrap();
-        update_task(&mut conn, first, "a", "", None, &["billing".into()]).unwrap();
-        update_task(&mut conn, second, "b", "", None, &["billing".into(), "urgent".into()]).unwrap();
+        update_task(&mut conn, first, "a", "", None, "medium", &["billing".into()]).unwrap();
+        update_task(&mut conn, second, "b", "", None, "medium", &["billing".into(), "urgent".into()]).unwrap();
         let uses = |conn: &Connection| -> Vec<(String, i64)> {
             list_labels(conn).unwrap().into_iter().map(|l| (l.name, l.uses)).collect()
         };
         assert_eq!(uses(&conn), [("billing".into(), 2), ("urgent".into(), 1)]);
 
-        update_task(&mut conn, first, "a", "", None, &[]).unwrap();
-        update_task(&mut conn, second, "b", "", None, &[]).unwrap();
+        update_task(&mut conn, first, "a", "", None, "medium", &[]).unwrap();
+        update_task(&mut conn, second, "b", "", None, "medium", &[]).unwrap();
         assert_eq!(uses(&conn), [("billing".into(), 0), ("urgent".into(), 0)]);
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM task_label", [], |r| r.get::<_, i64>(0))
@@ -1402,11 +1435,11 @@ pub(crate) mod tests {
         let mut conn = store();
         let (session_id, task_id) = session_with_task(&conn);
         let other = add_task(&conn, Some(session_id), "another").unwrap();
-        update_task(&mut conn, task_id, "a", "", None, &["  Reading  ".into()]).unwrap();
+        update_task(&mut conn, task_id, "a", "", None, "medium", &["  Reading  ".into()]).unwrap();
         let made = list_labels(&conn).unwrap().pop().unwrap();
         assert_eq!((made.name.as_str(), made.uses), ("Reading", 1));
         // Tagging with it again, in another case, is the same label.
-        update_task(&mut conn, other, "b", "", None, &["READING".into()]).unwrap();
+        update_task(&mut conn, other, "b", "", None, "medium", &["READING".into()]).unwrap();
         let labels = list_labels(&conn).unwrap();
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0].uses, 2);
@@ -1418,7 +1451,7 @@ pub(crate) mod tests {
     fn deleting_a_label_takes_it_off_every_card() {
         let mut conn = store();
         let (session_id, task_id) = session_with_task(&conn);
-        update_task(&mut conn, task_id, "a", "", None, &["billing".into(), "urgent".into()])
+        update_task(&mut conn, task_id, "a", "", None, "medium", &["billing".into(), "urgent".into()])
             .unwrap();
         delete_label(&conn, "Billing").unwrap();
         assert_eq!(label_names(&conn, task_id), ["urgent"]);
@@ -1437,6 +1470,7 @@ pub(crate) mod tests {
             "with details",
             "some notes",
             Some("2026-10-01"),
+            "medium",
             &["billing".into()],
         )
         .unwrap();
@@ -1450,7 +1484,7 @@ pub(crate) mod tests {
         assert_eq!(label_names(&conn, id), ["billing"]);
 
         let backlog_id =
-            create_task(&mut conn, None, "for later", "", None, &["later".into()]).unwrap();
+            create_task(&mut conn, None, "for later", "", None, "medium", &["later".into()]).unwrap();
         let rows = backlog(&conn).unwrap();
         assert_eq!(rows.iter().map(|t| t.id).collect::<Vec<_>>(), [backlog_id]);
         assert_eq!(rows[0].labels.len(), 1);
@@ -1463,11 +1497,11 @@ pub(crate) mod tests {
         let count = |conn: &Connection, table: &str| -> i64 {
             conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap()
         };
-        assert!(create_task(&mut conn, Some(session_id), "t", "", Some("2026-9-1"), &[]).is_err());
+        assert!(create_task(&mut conn, Some(session_id), "t", "", Some("2026-9-1"), "medium", &[]).is_err());
         conn.execute("UPDATE session SET ended_at = ?1 WHERE id = ?2", params![now(), session_id])
             .unwrap();
         assert!(matches!(
-            create_task(&mut conn, Some(session_id), "t", "n", None, &["x".into()]),
+            create_task(&mut conn, Some(session_id), "t", "n", None, "medium", &["x".into()]),
             Err(AppError::SessionClosed(_))
         ));
         assert_eq!(count(&conn, "task"), 1);
@@ -1485,6 +1519,7 @@ pub(crate) mod tests {
             "a",
             "",
             None,
+            "medium",
             &["  billing  ".into(), "".into(), "Billing".into()],
         )
         .unwrap();
@@ -1495,7 +1530,7 @@ pub(crate) mod tests {
     #[test]
     fn update_task_refuses_an_unknown_id() {
         let mut conn = store();
-        assert!(update_task(&mut conn, 404, "a", "", None, &[]).is_err());
+        assert!(update_task(&mut conn, 404, "a", "", None, "medium", &[]).is_err());
     }
 
     /// A due date is a day. Set, read back, then cleared by sending None --
@@ -1504,11 +1539,11 @@ pub(crate) mod tests {
     fn update_task_sets_and_clears_the_due_date() {
         let mut conn = store();
         let (session_id, task_id) = session_with_task(&conn);
-        update_task(&mut conn, task_id, "a", "", Some("2026-09-18"), &[]).unwrap();
+        update_task(&mut conn, task_id, "a", "", Some("2026-09-18"), "medium", &[]).unwrap();
         let task = session_tasks(&conn, session_id).unwrap().pop().unwrap();
         assert_eq!(task.due_date.as_deref(), Some("2026-09-18"));
 
-        update_task(&mut conn, task_id, "a", "", None, &[]).unwrap();
+        update_task(&mut conn, task_id, "a", "", None, "medium", &[]).unwrap();
         let task = session_tasks(&conn, session_id).unwrap().pop().unwrap();
         assert_eq!(task.due_date, None);
     }
@@ -1516,12 +1551,61 @@ pub(crate) mod tests {
     /// Only the canonical form is stored, because string order has to be date
     /// order. "2026-9-1" is the one chrono would happily parse.
     #[test]
+    fn update_task_sets_the_priority_and_create_task_takes_one() {
+        let mut conn = store();
+        let (session_id, task_id) = session_with_task(&conn);
+        assert_eq!(session_tasks(&conn, session_id).unwrap()[0].priority, "medium");
+        update_task(&mut conn, task_id, "a", "", None, "high", &[]).unwrap();
+        assert_eq!(session_tasks(&conn, session_id).unwrap()[0].priority, "high");
+        let id = create_task(&mut conn, None, "later", "", None, "low", &[]).unwrap();
+        let backlog = backlog(&conn).unwrap();
+        assert_eq!(backlog.iter().find(|t| t.id == id).unwrap().priority, "low");
+    }
+
+    #[test]
+    fn a_priority_outside_the_three_levels_is_refused_before_any_write() {
+        let mut conn = store();
+        let (session_id, task_id) = session_with_task(&conn);
+        for bad in ["urgent", "HIGH", ""] {
+            assert!(update_task(&mut conn, task_id, "changed", "", None, bad, &[]).is_err(), "{bad:?}");
+            assert!(create_task(&mut conn, Some(session_id), "new", "", None, bad, &[]).is_err(), "{bad:?}");
+        }
+        let tasks = session_tasks(&conn, session_id).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_ne!(tasks[0].title, "changed");
+    }
+
+    #[test]
+    fn set_label_color_recolours_every_card_wearing_it() {
+        let mut conn = store();
+        let (session_id, task_id) = session_with_task(&conn);
+        update_task(&mut conn, task_id, "a", "", None, "medium", &["billing".into()]).unwrap();
+        set_label_color(&conn, "BILLING", "#12AB9f").unwrap();
+        let task = &session_tasks(&conn, session_id).unwrap()[0];
+        assert_eq!(task.labels[0].color, "#12ab9f");
+        assert_eq!(list_labels(&conn).unwrap()[0].color, "#12ab9f");
+    }
+
+    #[test]
+    fn set_label_color_refuses_a_bad_colour_or_an_unknown_label() {
+        let mut conn = store();
+        let (_, task_id) = session_with_task(&conn);
+        update_task(&mut conn, task_id, "a", "", None, "medium", &["billing".into()]).unwrap();
+        let before = list_labels(&conn).unwrap()[0].color.clone();
+        for bad in ["12ab9f", "#12ab9", "#12ab9fz", "#gggggg", "red", ""] {
+            assert!(set_label_color(&conn, "billing", bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(list_labels(&conn).unwrap()[0].color, before);
+        assert!(set_label_color(&conn, "nobody", "#000000").is_err());
+    }
+
+    #[test]
     fn update_task_refuses_a_malformed_due_date() {
         let mut conn = store();
         let (session_id, task_id) = session_with_task(&conn);
         for bad in ["tomorrow", "2026-02-30", "2026-9-1", "2026-09-18T10:00", ""] {
             assert!(
-                update_task(&mut conn, task_id, "a", "", Some(bad), &[]).is_err(),
+                update_task(&mut conn, task_id, "a", "", Some(bad), "medium", &[]).is_err(),
                 "{bad:?} was accepted"
             );
         }
@@ -1570,7 +1654,7 @@ pub(crate) mod tests {
         let mut conn = store();
         let (session_id, task_id) = session_with_task(&conn);
         let first = add_task(&conn, None, "already waiting").unwrap();
-        update_task(&mut conn, task_id, "write the thing", "a note", Some("2026-10-01"), &["school".into()]).unwrap();
+        update_task(&mut conn, task_id, "write the thing", "a note", Some("2026-10-01"), "medium", &["school".into()]).unwrap();
         let doing = Arrangement { todo: vec![], doing: vec![task_id], done: vec![], dropped: vec![] };
         apply_board(&mut conn, session_id, &doing).unwrap();
 
@@ -1662,7 +1746,7 @@ pub(crate) mod tests {
     fn deleting_a_backlog_task_releases_its_labels() {
         let mut conn = store();
         let task_id = add_task(&conn, None, "a backlog item").unwrap();
-        update_task(&mut conn, task_id, "a backlog item", "", None, &["billing".into()]).unwrap();
+        update_task(&mut conn, task_id, "a backlog item", "", None, "medium", &["billing".into()]).unwrap();
         assert_eq!(backlog(&conn).unwrap()[0].labels.len(), 1);
 
         delete_backlog_task(&conn, task_id).unwrap();

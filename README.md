@@ -598,12 +598,11 @@ type into. It works while the meeting is still recording, while the notes are
 being written, and long afterwards — there is no state in which the record of
 what was said is frozen against you.
 
-Corrections go into the raw segments rather than the cleaned text, because
-the raw segments are what everything else is built from: **Re-run notes**
-re-cleans and re-summarizes from them, so a fix reaches the next write-up.
-The cleaned transcript and the write-up both say when they predate your
-corrections, and offer the re-run rather than taking it — the repair pass is
-minutes of model time, and when to spend it is your call. Editing one block
+Corrections go into the raw segments, because the raw segments are what the
+notes are built from: **Re-run notes** re-summarizes from them, so a fix
+reaches the next write-up. The write-up says when it predates your
+corrections, and offers the re-run rather than taking it — a re-run is a
+model call, and when to spend it is your call. Editing one block
 never rewrites another, and the timestamps stay put, so the meeting is still
 navigable after a correction.
 While the microphone is open the tab shows a red pulsing indicator, the
@@ -776,7 +775,7 @@ Two keys, two files, two providers: the Anthropic key at
 and the OpenAI key at `~/.config/intentionality/openai_key` (transcription
 only). Each is read by exactly one module and neither reaches the webview.
 
-Meeting notes (the transcript repair and the write-up) run on `claude-sonnet-5`;
+Meeting notes run on `claude-sonnet-5`;
 analyses and checkpoints stay on `claude-opus-5`. Meeting attachments are
 capped at 25 MB per file and 50 MB per meeting. PDFs and images are uploaded
 to the Anthropic Files API when a notes run starts, referenced by id, and

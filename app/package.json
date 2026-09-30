@@ -21,7 +21,7 @@
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
     "three": "^0.186.1",
-    "threejs-elements": "file:../../threejs_test/threejs-elements-0.1.0.tgz"
+    "threejs-elements": "file:../../threejs_test/threejs-elements-0.2.0.tgz"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

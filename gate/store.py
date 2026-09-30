@@ -8,7 +8,7 @@ from pathlib import Path
 from . import config
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # Statuses that mean "still open" — what the debrief asks about and the
 # close paths carry into the backlog.
@@ -82,6 +82,9 @@ def init(conn: sqlite3.Connection) -> None:
     if version < 10:
         _backup(conn, suffix=".pre-v10.bak")
         _migrate_v9_to_v10(conn)
+    if version < 11:
+        _backup(conn, suffix=".pre-v11.bak")
+        _migrate_v10_to_v11(conn)
 
 
 def _backup(conn: sqlite3.Connection, suffix: str) -> None:
@@ -652,6 +655,31 @@ def _migrate_v9_to_v10(conn: sqlite3.Connection) -> None:
         conn.isolation_level = saved_isolation
 
 
+def _migrate_v10_to_v11(conn: sqlite3.Connection) -> None:
+    """v10 -> v11: task.priority, high / medium / low. Every task starts medium.
+
+    ADD COLUMN may carry a CHECK (SQLite tests it against the existing rows,
+    which the NOT NULL DEFAULT satisfies), so this is the _migrate_v7_to_v8
+    idiom, no rebuild. It appends, which is why schema.sql lists priority
+    after due_date.
+    """
+    saved_isolation = conn.isolation_level
+    conn.isolation_level = None  # autocommit: we manage the transaction
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "ALTER TABLE task ADD COLUMN priority TEXT NOT NULL DEFAULT 'medium'"
+            " CHECK (priority IN ('high', 'medium', 'low'))"
+        )
+        conn.execute("UPDATE meta SET value = '11' WHERE key = 'schema_version'")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = saved_isolation
+
+
 def commit_draft(
     conn: sqlite3.Connection,
     statement: str,
@@ -886,7 +914,7 @@ def carry_unfinished(conn: sqlite3.Connection, session_id: int) -> int:
     """
     with conn:
         rows = conn.execute(
-            f"SELECT id, title, notes, due_date FROM task WHERE session_id = ?"
+            f"SELECT id, title, notes, due_date, priority FROM task WHERE session_id = ?"
             f" AND status IN {UNFINISHED} ORDER BY position",
             (session_id,),
         ).fetchall()
@@ -900,10 +928,10 @@ def carry_unfinished(conn: sqlite3.Connection, session_id: int) -> int:
             cur = conn.execute(
                 "INSERT OR IGNORE INTO task"
                 " (session_id, title, position, status, source, carried_from,"
-                "  created_at, notes, due_date)"
-                " VALUES (NULL, ?, ?, 'planned', 'gate', ?, ?, ?, ?)",
+                "  created_at, notes, due_date, priority)"
+                " VALUES (NULL, ?, ?, 'planned', 'gate', ?, ?, ?, ?, ?)",
                 (row["title"], position, row["id"], created, row["notes"],
-                 row["due_date"]),
+                 row["due_date"], row["priority"]),
             )
             carried += cur.rowcount
             if cur.rowcount:

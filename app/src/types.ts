@@ -14,6 +14,10 @@ export interface Session {
 
 export type Status = "planned" | "doing" | "done" | "dropped";
 
+// How much a task matters. Every board column is ordered by it, high first,
+// keeping the user's own order within each level.
+export type Priority = "high" | "medium" | "low";
+
 // A tag a task wears. The colour was fixed when the label was first created,
 // so the same word looks the same on every card.
 export interface Label {
@@ -40,6 +44,7 @@ export interface Task {
   // The day it is due, "YYYY-MM-DD" on the local calendar; null = none. A day,
   // not an instant, so it never drifts with the timezone.
   due_date: string | null;
+  priority: Priority;
   labels: Label[];
 }
 

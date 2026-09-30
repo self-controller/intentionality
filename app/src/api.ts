@@ -11,6 +11,7 @@ import type {
   Meeting,
   MeetingDetail,
   Observed,
+  Priority,
   RecordingNow,
   Session,
   Task,
@@ -26,9 +27,10 @@ export const createTask = (
   title: string,
   notes: string,
   dueDate: string | null,
+  priority: Priority,
   labels: string[],
   toBacklog: boolean,
-) => invoke<number>("create_task", { title, notes, dueDate, labels, toBacklog });
+) => invoke<number>("create_task", { title, notes, dueDate, priority, labels, toBacklog });
 // The editor saves the whole card at once; `labels` is the full set it should
 // end up wearing, not an addition, and a null `dueDate` clears the date.
 export const updateTask = (
@@ -36,10 +38,14 @@ export const updateTask = (
   title: string,
   notes: string,
   dueDate: string | null,
+  priority: Priority,
   labels: string[],
-) => invoke<void>("update_task", { id, title, notes, dueDate, labels });
+) => invoke<void>("update_task", { id, title, notes, dueDate, priority, labels });
 // Every label there is, worn or not, with how many tasks wear each.
 export const listLabels = () => invoke<LabelSummary[]>("list_labels");
+// Recolours the label on every card that wears it. "#rrggbb".
+export const setLabelColor = (name: string, color: string) =>
+  invoke<void>("set_label_color", { name, color });
 // Takes the label off every card that wears it.
 export const deleteLabel = (name: string) => invoke<void>("delete_label", { name });
 export const deleteTask = (id: number) => invoke<void>("delete_task", { id });

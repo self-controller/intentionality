@@ -440,6 +440,14 @@ V9_SCHEMA = V8_SCHEMA.replace(
     "    summary_edited_at TEXT,\n    transcript_edited_at TEXT\n",
 )
 
+# v10 = v9 + the two session indexes.
+V10_SCHEMA = V9_SCHEMA.replace(
+    "('schema_version', '9')", "('schema_version', '10')"
+) + """
+CREATE INDEX task_session ON task (session_id, position);
+CREATE INDEX analysis_session ON analysis (session_id);
+"""
+
 
 class StoreCase(unittest.TestCase):
     def setUp(self):
@@ -640,23 +648,23 @@ class StoreCase(unittest.TestCase):
 
 
 class TestInitAndMigration(StoreCase):
-    def test_fresh_init_is_v10(self):
+    def test_fresh_init_is_v11(self):
         conn = self.fresh()
         version = conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()[0]
-        self.assertEqual(version, "10")
+        self.assertEqual(version, "11")
 
     def test_init_idempotent(self):
         conn = self.fresh()
         store.init(conn)  # second run must be a no-op, not a re-create
-        self.assertEqual(store.get_setting(conn, "schema_version"), "10")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
 
     def test_migrates_v1_preserving_rows(self):
         self.v1_fixture()
         conn = self.fresh()
         # A v1 store walks all the way up, not just one step.
-        self.assertEqual(store.get_setting(conn, "schema_version"), "10")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
         session = store.get_session(conn, 1)
         self.assertEqual(session["statement"], "old session")
         self.assertIsNone(session["last_heartbeat"])
@@ -684,7 +692,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v2_preserving_rows(self):
         self.v2_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "10")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
         (row,) = store.get_analyses(conn, 1)
         self.assertEqual(row["headline"], "Steady")
         self.assertEqual(row["kind"], "check")  # the default the rebuild gives
@@ -721,7 +729,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v3_preserving_rows(self):
         self.v3_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "10")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
         # The task rebuild is the risky half of this migration: everything
         # below was copied out of the old table and back into a new one.
         (task,) = store.get_tasks(conn, 1)
@@ -895,6 +903,27 @@ class TestInitAndMigration(StoreCase):
             )
         conn.close()
 
+    def v10_fixture(self) -> None:
+        """The shape before task.priority: one session with two tasks, one
+        of them carried into the backlog."""
+        conn = sqlite3.connect(config.STORE_PATH)
+        conn.executescript(V10_SCHEMA)
+        with conn:
+            conn.execute(
+                "INSERT INTO session (id, started_at, statement, intended_minutes,"
+                " mode) VALUES (1, '2026-09-27T09:00:00+00:00', '', 60, 'manual')"
+            )
+            conn.executemany(
+                "INSERT INTO task (id, session_id, title, position, notes, due_date,"
+                " carried_from, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, '2026-09-27T09:00:00+00:00')",
+                [
+                    (1, 1, "ship it", 1, "the notes", "2026-09-28", None),
+                    (2, None, "ship it", 1, "the notes", "2026-09-28", 1),
+                ],
+            )
+        conn.close()
+
     def test_migration_end_state_matches_schema_sql(self):
         """schema.sql promises to describe what the migrations produce.
 
@@ -914,6 +943,7 @@ class TestInitAndMigration(StoreCase):
             "v7_fixture",
             "v8_fixture",
             "v9_fixture",
+            "v10_fixture",
         ):
             with self.subTest(fixture=name):
                 self._assert_end_state_matches(getattr(self, name))
@@ -1003,7 +1033,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v4_preserving_rows(self):
         self.v4_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "10")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
         # The v5 meeting rebuild is the risky half: every row was copied out
         # of the old table and back into a new one with two more columns.
         meeting = conn.execute("SELECT * FROM meeting WHERE id = 1").fetchone()
@@ -1127,7 +1157,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v5_preserving_rows(self):
         self.v5_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "10")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
         meeting = conn.execute("SELECT * FROM meeting WHERE id = 1").fetchone()
         self.assertEqual(meeting["title"], "Roadmap")
         self.assertEqual(meeting["notes"], "Dana = Dana K.")
@@ -1169,7 +1199,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v6_preserving_rows(self):
         self.v6_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "10")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
         rows = conn.execute("SELECT * FROM task ORDER BY id").fetchall()
         self.assertEqual([r["title"] for r in rows], ["on the board", "carried once"])
         # Every existing task starts with empty notes, never NULL.
@@ -1269,7 +1299,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v7_preserving_rows(self):
         self.v7_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "10")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
         rows = conn.execute("SELECT * FROM task ORDER BY id").fetchall()
         self.assertEqual([r["notes"] for r in rows], ["half done", "half done"])
         # Every existing task starts with no due date.
@@ -1301,7 +1331,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v8_preserving_rows(self):
         self.v8_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "10")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
         meeting = conn.execute("SELECT * FROM meeting WHERE id = 1").fetchone()
         # Nothing the meeting already held may be disturbed by the new column.
         self.assertEqual(meeting["title"], "Standup")
@@ -1338,7 +1368,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v9_preserving_rows_and_using_the_index(self):
         self.v9_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "10")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM task").fetchone()[0], 2)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM analysis").fetchone()[0], 1)
         plan = " ".join(
@@ -1348,6 +1378,52 @@ class TestInitAndMigration(StoreCase):
         )
         self.assertIn("task_session", plan)
         self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
+    def test_v11_migration_makes_backup(self):
+        self.v10_fixture()
+        self.fresh()
+        backup = Path(str(config.STORE_PATH) + ".pre-v11.bak")
+        bconn = sqlite3.connect(backup)
+        self.assertEqual(  # the backup is still v10
+            bconn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0],
+            "10",
+        )
+        bconn.close()
+
+    def test_migrates_v10_preserving_rows_at_medium_priority(self):
+        self.v10_fixture()
+        conn = self.fresh()
+        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
+        rows = conn.execute(
+            "SELECT id, title, notes, due_date, carried_from, priority FROM task ORDER BY id"
+        ).fetchall()
+        self.assertEqual(
+            [tuple(r) for r in rows],
+            [
+                (1, "ship it", "the notes", "2026-09-28", None, "medium"),
+                (2, "ship it", "the notes", "2026-09-28", 1, "medium"),
+            ],
+        )
+        self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_priority_refuses_anything_but_the_three_levels(self):
+        for fixture in (None, self.v10_fixture):
+            with self.subTest(migrated=fixture is not None):
+                for leftover in Path(self._tmp.name).glob("store.db*"):
+                    leftover.unlink()
+                if fixture:
+                    fixture()
+                conn = self.fresh()
+                sid = store.commit_draft(conn, "s", None, "manual", ["a"])
+                (task,) = store.get_tasks(conn, sid)
+                self.assertEqual(task["priority"], "medium")
+                with conn:
+                    conn.execute("UPDATE task SET priority = 'high' WHERE id = ?", (task["id"],))
+                with self.assertRaises(sqlite3.IntegrityError):
+                    with conn:
+                        conn.execute("UPDATE task SET priority = 'urgent' WHERE id = ?", (task["id"],))
+                conn.close()
 
     def test_future_schema_refused(self):
         conn = self.fresh()
@@ -1445,6 +1521,20 @@ class TestCloseAndCarry(StoreCase):
         self.assertEqual(
             [(t["title"], t["due_date"]) for t in store.get_backlog(conn)],
             [("a", "2026-09-18"), ("b", None)],
+        )
+
+    def test_carry_copies_priority(self):
+        """How much a task matters doesn't reset because the session ended."""
+        conn = self.fresh()
+        sid = store.commit_draft(conn, "s", None, "manual", ["a", "b"])
+        a, _ = store.get_tasks(conn, sid)
+        with conn:
+            conn.execute("UPDATE task SET priority = 'high' WHERE id = ?", (a["id"],))
+        store.close_session(conn, sid)
+        store.carry_unfinished(conn, sid)
+        self.assertEqual(
+            [(t["title"], t["priority"]) for t in store.get_backlog(conn)],
+            [("a", "high"), ("b", "medium")],
         )
 
     def test_carry_copies_unfinished_as_planned(self):

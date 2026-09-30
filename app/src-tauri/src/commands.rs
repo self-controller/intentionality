@@ -80,6 +80,7 @@ pub fn create_task(
     title: String,
     notes: String,
     due_date: Option<String>,
+    priority: String,
     labels: Vec<String>,
     to_backlog: bool,
 ) -> Result<i64> {
@@ -93,7 +94,7 @@ pub fn create_task(
     }
     let due_date = blank_is_none(due_date.as_deref());
     let mut conn = state.conn.lock().unwrap();
-    db::create_task(&mut conn, session_id, title, notes.trim(), due_date, &labels)
+    db::create_task(&mut conn, session_id, title, notes.trim(), due_date, &priority, &labels)
 }
 
 /// The task editor saves everything it holds at once — `labels` is the full
@@ -106,6 +107,7 @@ pub fn update_task(
     title: String,
     notes: String,
     due_date: Option<String>,
+    priority: String,
     labels: Vec<String>,
 ) -> Result<()> {
     let title = title.trim();
@@ -114,7 +116,7 @@ pub fn update_task(
     }
     let due_date = blank_is_none(due_date.as_deref());
     let mut conn = state.conn.lock().unwrap();
-    db::update_task(&mut conn, id, title, notes.trim(), due_date, &labels)
+    db::update_task(&mut conn, id, title, notes.trim(), due_date, &priority, &labels)
 }
 
 /// An empty field means "no due date", however the webview spells it.
@@ -126,6 +128,14 @@ fn blank_is_none(due_date: Option<&str>) -> Option<&str> {
 pub fn list_labels(state: State<'_, AppState>) -> Result<Vec<LabelSummary>> {
     let conn = state.conn.lock().unwrap();
     db::list_labels(&conn)
+}
+
+/// A label's colour is the label's, not a card's: every card wearing it
+/// changes at once, so this is its own write and not part of an editor save.
+#[tauri::command]
+pub fn set_label_color(state: State<'_, AppState>, name: String, color: String) -> Result<()> {
+    let conn = state.conn.lock().unwrap();
+    db::set_label_color(&conn, &name, &color)
 }
 
 #[tauri::command]
