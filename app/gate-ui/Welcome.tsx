@@ -75,6 +75,9 @@ export default function Welcome({ state }: { state: WelcomeState }) {
           )}
 
           <SectionHeading className="mt-[2.2rem]">Your tasks</SectionHeading>
+          <p className="mt-[0.3rem] text-[0.8rem] text-muted">
+            Tick what you are doing today. The rest stays in your backlog.
+          </p>
 
           {state.rows.length === 0 ? (
             <p className="mt-[0.8rem] text-[0.95rem] text-muted">

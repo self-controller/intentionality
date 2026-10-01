@@ -114,13 +114,13 @@ export function size(bytes: number): string {
 export const ALIGN_TEXT: Record<string, string> = {
   good: "text-good",
   warn: "text-warn",
-  bad: "text-bad",
-  none: "text-muted",
+  bad: "text-destructive",
+  none: "text-muted-foreground",
 };
 
 export const DUE_TEXT: Record<DueClass, string> = {
-  overdue: "text-bad",
+  overdue: "text-destructive",
   today: "text-warn",
-  soon: "text-text",
-  later: "text-muted",
+  soon: "text-foreground",
+  later: "text-muted-foreground",
 };

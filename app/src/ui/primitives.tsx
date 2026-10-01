@@ -1,6 +1,8 @@
 
-/** Small shared pieces, used by both the gate and the app so the two cannot
- *  drift apart on the things a user reads as "the same control". */
+/** The gate's small shared pieces. The app has its own design system now
+ *  (src/components/ui: shadcn Tabs, ReUI Button) on its own palette, and
+ *  nothing in it imports these. This file stays under src/ui/, which gate.css
+ *  scans, so the gate's look is unchanged. */
 
 type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
   /** ghost: the default, a quiet outline. primary: the one action that
@@ -65,28 +67,5 @@ export function SectionHeading({
     >
       {children}
     </h2>
-  );
-}
-
-/** A tab / segmented control. Used by the app's header nav and the meeting
- *  detail tabs, which is why it is here rather than in either of them. */
-export function Tab({
-  active,
-  className = "",
-  ...rest
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & { active: boolean }) {
-  return (
-    <button
-      {...rest}
-      aria-current={active ? "page" : undefined}
-      className={
-        "rounded-[0.45rem] border px-3 py-1 transition-colors duration-150 " +
-        "outline-none focus-visible:ring-2 focus-visible:ring-accent " +
-        (active
-          ? "border-accent bg-accent font-medium text-bg"
-          : "border-line text-muted hover:border-muted hover:text-text") +
-        ` ${className}`
-      }
-    />
   );
 }

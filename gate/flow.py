@@ -2,9 +2,9 @@
 
 Imports neither sqlite3 nor anything network-facing — the store is reached
 only through its functions. The gate is a list you edit, not a conversation:
-the tasks already waiting, kept, finished or deleted, plus any you add.
-There is no way out of run() without a session of at least one task, other
-than an abort (GateAborted).
+the backlog tasks already waiting, each ticked for today or left where it is,
+finished or deleted, plus any you add. There is no way out of run() without a
+session of at least one task, other than an abort (GateAborted).
 """
 
 from collections.abc import Sequence
@@ -40,7 +40,7 @@ def run(conn, notes: Sequence[str] = ()) -> int:
 
         # The front ends refuse an empty list already; this is the rule's
         # authority, so a front end that slips can't start an empty session.
-        if not plan.keep and not plan.new:
+        if not plan.today and not plan.new:
             error = EMPTY
             continue
 
@@ -49,13 +49,16 @@ def run(conn, notes: Sequence[str] = ()) -> int:
         # store.session_label falls back to the tasks for the ones that don't.
         try:
             session_id = store.commit_plan(
-                conn, plan.intended_minutes, plan.keep, [task.title for task in plan.new],
+                conn, plan.intended_minutes, plan.today, [task.title for task in plan.new],
                 done_ids=plan.done, delete_ids=plan.delete,
                 new_details=[task.details for task in plan.new], edits=plan.edits,
+                backlog_titles=[task.title for task in plan.new_backlog],
+                backlog_details=[task.details for task in plan.new_backlog],
             )
         except store.EmptyPlan:
-            # Every kept task left the backlog while the screen was up, and
-            # nothing was typed. Rolled back, so nothing was deleted either.
+            # Every task ticked for today left the backlog while the screen
+            # was up, and nothing typed was ticked. Rolled back, so nothing
+            # was deleted either.
             error = VANISHED
             continue
         count = len(store.get_tasks(conn, session_id))

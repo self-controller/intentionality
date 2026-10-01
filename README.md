@@ -1,9 +1,10 @@
 # intentionality
 
 A gate that sits between login and your desktop: a welcome screen shows the
-tasks you still have, you keep, finish or delete them and add what else you
-intend to do, and that list becomes the session's task list — no desktop
-until it holds at least one task. Inside the session, a desktop app shows
+tasks you still have, you tick the ones you will do today (the rest stay in
+your backlog), finish or delete others and add what else you intend to do, and
+the ticked ones become the session's task list — no desktop until at least one
+task is ticked. Inside the session, a desktop app shows
 those tasks as a kanban board next to what
 [ActivityWatch](https://activitywatch.net/) actually observed, and a model
 periodically writes a short productivity note. It also transcribes meetings on
@@ -67,11 +68,15 @@ The gate is one welcome screen. It lists your **active tasks** — the backlog:
 whatever earlier sessions left unfinished, plus anything you added to the
 backlog in the app — and you edit that list into this session's:
 
-- **Keep** a task by leaving it alone. Everything still on the list when you
-  start goes on today's board, carried tasks first.
+- **Tick** a task to do it today: ticked tasks go on today's board (To Do),
+  carried tasks first. Tasks start **unticked** and stay in the backlog, so
+  unfinished work carried over from earlier sessions is never put on the board
+  unless you choose it. A task you type starts ticked; unticking it saves it to
+  the backlog instead.
 - **Done** (carried tasks only) records it as done in the session it came
   from, and takes it off the list.
-- **Delete** removes it for good — the same as the ✕ on the app's backlog.
+- **Delete** removes it for good (struck through until you start; press it
+  again to undo). The app's card editor has the same Delete button.
 - **Add** a task by typing it.
 - **Details** opens a panel under any task, carried or typed: a **due date**
   (typed, Today / Tomorrow, or a calendar), **notes**, and **labels** — click
@@ -81,9 +86,10 @@ Nothing is written until you start, so Done and Delete are toggles with an
 Undo, and details are written only for tasks you actually changed (the app
 may be editing the same backlog while a resume gate is up). Then say how long
 you will be here (blank = open-ended) and start.
-**Start refuses an empty list**: there is no quit and no way to a desktop
-without at least one task. On the terminal the same screen is text — type a
-task to add it, `d N` / `x N` to mark task N done / deleted (again to undo),
+**Start refuses until at least one task is ticked**: there is no quit and no way
+to a desktop without at least one task for today. On the terminal the same
+screen is text — type a task to add it (for today), `t N` to tick / untick task
+N, `d N` / `x N` to mark task N done / deleted (again to undo),
 `e N` to change task N's due date, notes (one line) and labels (blank keeps,
 `-` clears), and a blank line to start. There is no "what do you want to get done?"
 question — the list is that answer.
@@ -124,8 +130,9 @@ included — so in a real console login the closing write happens at the *next*
 gate run: it notices the open session, stamps its end from the desktop app's
 last heartbeat (or marks it `recovered` with an honest unknown end when the
 app wasn't running), and carries what's left into the backlog — which is
-the first thing that gate's welcome screen shows, with Done and Delete on each
-task. It asks nothing on its own.
+the first thing that gate's welcome screen shows (unticked, so it stays in the
+backlog unless you tick it for today), with Done and Delete on each task. It
+asks nothing on its own.
 
 ### Login-time wiring (the real thing)
 
@@ -393,6 +400,17 @@ the screen never flickers to VT9 on a lid-close you did not think of as
 leaving. With no open session, or one the app never heartbeated, it fires:
 waking a machine with no stated intention is what the gate is for.
 
+It also skips while **another gate is already on screen**. Close the lid on
+the login gate's welcome screen and there is no open session either (the
+recovery sweep has closed the old one, and nothing is committed yet), so on
+its own that would fire a second gate on VT9. Answering both used to split
+your tasks over two sessions and start the desktop for only one of them.
+Every gate now holds an `flock` on `gate.lock`, next to the store, while its
+welcome screen is up, and the check stands down while one is held, so you
+wake up on the gate you left. The kernel drops the lock whenever the holder
+exits, however it exits, so a crashed gate can never keep a later wake from
+firing.
+
 Escape hatches, as everywhere: `Ctrl+Alt+F1` returns to GNOME from a
 half-answered gate, `touch ~/.config/intentionality/skip` disables this along
 with the login gate, and disabling the unit reverts it entirely. There is no
@@ -439,9 +457,10 @@ surfaces, all bare-bones for now:
 - **Board** — To Do / Doing / Done lanes over the current session's tasks
   (drag to move), a dropped tray that is a fourth drop target, and the backlog
   in a sidebar: pull items into today, add new ones, delete stale ones.
-  Session cards are history — drag one into the tray to drop it, and drag it
-  back out to undo that, but they are never deleted. Clicking any card (or a
-  backlog row) opens it: rename it, write plain-text **notes** on it, give it
+  Drag a session card into the tray to drop it (history stays), and back out
+  to undo that. To remove a task completely, open it and press **Delete** in
+  its editor (it asks once; works for session cards and backlog rows alike).
+  Clicking any card (or a backlog row) opens it: rename it, write plain-text **notes** on it, give it
   a **due date** — typed, or picked from the month grid behind
   **Calendar**, and shown on the card in words ("Due tomorrow", "Overdue ·
   Sep 9") and beside the task on the gate's welcome screen — and **labels**: every label there is shows as a chip to click, and
@@ -808,6 +827,7 @@ gate/
 ├── __main__.py    # entry point: gate / close / migrate / resume / resume-needed / handoff
 ├── flow.py        # WELCOME -> COMMIT: the list in, one session out
 ├── resume.py      # was the machine away long enough to re-gate?
+├── lock.py        # one gate on screen at a time (an flock the resume check honours)
 ├── handoff.py     # launches the desktop as a child, waits
 ├── debrief.py     # end-of-session per-task resolution
 ├── store.py       # the only Python module that touches sqlite3; owns migrations

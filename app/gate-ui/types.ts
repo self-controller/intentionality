@@ -9,6 +9,8 @@ export interface Row {
   index: number;
   title: string;
   mark: Mark;
+  /** Ticked for today: goes to To Do on Start. Unticked stays in the backlog. */
+  today: boolean;
   /** ui.row_detail(), or the mark's word when the row is marked. */
   detail: string;
   /** Only a task carried from an earlier session can be marked done. */

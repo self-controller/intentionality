@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -21,6 +22,9 @@ function katexWoff2Only(): Plugin {
 // Tauri expects a fixed dev port; clearScreen off keeps cargo output visible.
 export default defineConfig({
   plugins: [katexWoff2Only(), react(), tailwindcss()],
+  // `@/` is src/, the shadcn convention, so components pasted from shadcn and
+  // ReUI keep their imports (`@/components/ui/...`, `@/lib/utils`) as written.
+  resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } },
   clearScreen: false,
   server: { port: 1420, strictPort: true },
 });

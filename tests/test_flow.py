@@ -32,9 +32,12 @@ class Screen:
         return self.answers.pop(0)({t.title: t for t in tasks})
 
 
-def plan(keep=(), done=(), delete=(), new=(), minutes=None, edits=None):
+def plan(today=(), done=(), delete=(), new=(), minutes=None, edits=None, backlog=()):
     new = [n if isinstance(n, NewTask) else NewTask(n) for n in new]
-    return ui.Plan(list(keep), list(done), list(delete), new, minutes, edits or {})
+    backlog = [n if isinstance(n, NewTask) else NewTask(n) for n in backlog]
+    return ui.Plan(
+        list(today), list(done), list(delete), new, minutes, backlog, edits or {}
+    )
 
 
 class TestRun(unittest.TestCase):
@@ -71,7 +74,7 @@ class TestRun(unittest.TestCase):
                 " VALUES (NULL, 'from a meeting', 9, ?)",
                 (store.now(),),
             )
-        ui.backend = screen = Screen(lambda t: plan(keep=[x.id for x in t.values()]))
+        ui.backend = screen = Screen(lambda t: plan(today=[x.id for x in t.values()]))
 
         flow.run(self.conn, ["Session 1 ended around 9:00 AM, Sep 17."])
 
@@ -85,9 +88,48 @@ class TestRun(unittest.TestCase):
         self.assertEqual(notes, ["Session 1 ended around 9:00 AM, Sep 17."])
         self.assertEqual(error, "")
 
-    def test_keep_all_puts_the_backlog_on_the_board_first(self):
+    def test_unticked_backlog_tasks_stay_in_the_backlog(self):
+        self.carry("a", "b", "c")
+        ui.backend = Screen(lambda t: plan(today=[t["b"].id]))
+
+        sid = flow.run(self.conn)
+
+        self.assertEqual(self.titles(sid), ["b"])
+        self.assertEqual([t["title"] for t in store.get_backlog(self.conn)], ["a", "c"])
+
+    def test_a_typed_task_left_unticked_goes_to_the_backlog(self):
+        self.carry("a")
+        ui.backend = Screen(lambda t: plan(
+            today=[t["a"].id],
+            new=["now"],
+            backlog=[NewTask("later", Details("n", "2026-10-03", ("x",)))],
+        ))
+
+        sid = flow.run(self.conn)
+
+        self.assertEqual(self.titles(sid), ["a", "now"])
+        (later,) = store.get_backlog(self.conn)
+        self.assertEqual((later["title"], later["notes"], later["due_date"]), ("later", "n", "2026-10-03"))
+        self.assertEqual(store.labels_by_task(self.conn)[later["id"]], ["x"])
+
+    def test_nothing_ticked_is_asked_again_and_writes_nothing(self):
+        self.carry("a")
+        ui.backend = screen = Screen(
+            lambda t: plan(backlog=["typed but left for later"]),
+            lambda t: plan(today=[t["a"].id]),
+        )
+
+        sid = flow.run(self.conn)
+
+        self.assertEqual(screen.calls[1][2], flow.EMPTY)
+        # The refused answer wrote nothing, typed row included.
+        self.assertEqual([t.title for t in screen.calls[1][0]], ["a"])
+        self.assertEqual(self.titles(sid), ["a"])
+        self.assertEqual(store.get_backlog(self.conn), [])
+
+    def test_ticked_tasks_go_on_the_board_first(self):
         self.carry("a", "b")
-        ui.backend = Screen(lambda t: plan(keep=[t["a"].id, t["b"].id], new=["c"], minutes=25))
+        ui.backend = Screen(lambda t: plan(today=[t["a"].id, t["b"].id], new=["c"], minutes=25))
 
         sid = flow.run(self.conn)
 
@@ -101,7 +143,7 @@ class TestRun(unittest.TestCase):
     def test_done_and_delete_land(self):
         old = self.carry("finished", "abandoned", "still on")
         ui.backend = Screen(lambda t: plan(
-            keep=[t["still on"].id], done=[t["finished"].id], delete=[t["abandoned"].id]
+            today=[t["still on"].id], done=[t["finished"].id], delete=[t["abandoned"].id]
         ))
 
         sid = flow.run(self.conn)
@@ -120,7 +162,7 @@ class TestRun(unittest.TestCase):
                     " VALUES (NULL, ?, 1, ?, ?)",
                     (title, status, store.now()),
                 )
-        ui.backend = screen = Screen(lambda t: plan(keep=[t["live"].id]))
+        ui.backend = screen = Screen(lambda t: plan(today=[t["live"].id]))
         flow.run(self.conn)
         self.assertEqual([t.title for t in screen.calls[0][0]], ["live"])
 
@@ -145,7 +187,7 @@ class TestRun(unittest.TestCase):
         def answer_after_the_app_moved(t):
             # The desktop app pulls the task while the screen is up.
             store.pull_from_backlog(self.conn, old, [t["pulled elsewhere"].id])
-            return plan(keep=[t["pulled elsewhere"].id], done=[t["marked done"].id])
+            return plan(today=[t["pulled elsewhere"].id], done=[t["marked done"].id])
 
         ui.backend = screen = Screen(answer_after_the_app_moved, lambda t: plan(new=["fresh"]))
 
@@ -180,7 +222,7 @@ class TestDetails(TestRun):
             # A preset nobody wears yet is offered all the same.
             self.conn.execute("INSERT INTO label (name, color) VALUES ('preset', '#123456')")
         self.set_details(task["id"], Details("n", "2026-10-01", ("Zeta", "alpha")))
-        ui.backend = screen = Screen(lambda t: plan(keep=[t["tagged"].id]))
+        ui.backend = screen = Screen(lambda t: plan(today=[t["tagged"].id]))
 
         flow.run(self.conn)
 
@@ -189,12 +231,25 @@ class TestDetails(TestRun):
         self.assertEqual([label.name for label in labels], ["alpha", "preset", "Zeta"])
         self.assertEqual(labels[1], ui.Label("preset", "#123456"))
 
+    def test_an_edit_to_a_task_left_in_the_backlog_lands(self):
+        self.carry("stays", "goes")
+        ui.backend = Screen(lambda t: plan(
+            today=[t["goes"].id],
+            edits={t["stays"].id: Details("new notes", "2026-10-05", ("later",))},
+        ))
+
+        sid = flow.run(self.conn)
+
+        self.assertEqual(self.titles(sid), ["goes"])
+        (stays,) = store.get_backlog(self.conn)
+        self.assertEqual(self.details(stays["id"]), Details("new notes", "2026-10-05", ("later",)))
+
     def test_edits_and_new_details_land(self):
         self.carry("edited", "untouched")
         with self.conn:
             self.conn.execute("INSERT INTO label (name, color) VALUES ('school', '#123456')")
         ui.backend = Screen(lambda t: plan(
-            keep=[t["edited"].id, t["untouched"].id],
+            today=[t["edited"].id, t["untouched"].id],
             new=[NewTask("typed", Details("typed notes", "2026-10-02", ("School", "brand new")))],
             edits={t["edited"].id: Details("edited notes", "2026-10-01", ("school",))},
         ))
@@ -220,7 +275,7 @@ class TestDetails(TestRun):
                 self.conn.execute(
                     "UPDATE task SET notes = 'from the app' WHERE id = ?", (t["shared"].id,)
                 )
-            return plan(keep=[t["shared"].id])
+            return plan(today=[t["shared"].id])
 
         ui.backend = Screen(answer_after_the_app_edited)
         sid = flow.run(self.conn)
@@ -235,7 +290,7 @@ class TestDetails(TestRun):
             taken.append(t["taken"].id)
             store.pull_from_backlog(self.conn, old, taken)
             return plan(
-                keep=[t["taken"].id, t["stays"].id],
+                today=[t["taken"].id, t["stays"].id],
                 edits={t["taken"].id: Details("gate notes", labels=("gate",))},
             )
 

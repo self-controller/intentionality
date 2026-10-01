@@ -2,7 +2,7 @@ import os
 import sys
 from datetime import datetime
 
-from . import config, debrief, flow, handoff, resume, store
+from . import config, debrief, flow, handoff, lock, resume, store
 from .ui import GateAborted
 
 
@@ -61,7 +61,11 @@ def local_time(stamp: str) -> str:
 
 def gate(conn) -> int:
     try:
-        session_id = flow.run(conn, recover_open_sessions(conn))
+        # The lock covers the screen and nothing after it: past this point
+        # the desktop may run as our child for hours, and a lock held across
+        # that would keep every wake gate from firing.
+        with lock.hold():
+            session_id = flow.run(conn, recover_open_sessions(conn))
     except GateAborted:
         print("\nNothing saved.")
         return 0
@@ -88,7 +92,8 @@ def resume_cmd(conn) -> int:
     console exists for the length of the conversation and no longer.
     """
     try:
-        flow.run(conn, recover_open_sessions(conn))
+        with lock.hold():
+            flow.run(conn, recover_open_sessions(conn))
     except GateAborted:
         print("\nNothing saved — no session is open.")
         return 0

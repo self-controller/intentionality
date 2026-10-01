@@ -84,6 +84,10 @@ export default function CardEditor3D({
         }
         // Clicks on the card are the form's, not the scrim's.
         onMouseDown={(e) => e.stopPropagation()}
+        // The card's face is the surface here, not the page: outline controls
+        // fill with `--background`, which would sit on the lit card as solid
+        // black chips. Transparent lets them take the card's own colour.
+        style={{ ["--background" as string]: "transparent" }}
       >
         <div ref={content} className="px-6 py-5">
           {children}

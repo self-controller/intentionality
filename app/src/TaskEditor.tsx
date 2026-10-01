@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import { CalendarDays, Check, Trash2, X } from "lucide-react";
+import ColorPicker from "@/components/ColorPicker";
+import MonthCalendar from "@/components/MonthCalendar";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import * as api from "./api";
 import { addDays, ISO_DAY, localDate } from "./format";
-import Calendar from "./ui/Calendar";
-import ColorPicker from "./ui/ColorPicker";
 import type { Label, LabelSummary, Priority } from "./types";
 
 // What the editor starts from: a Task has all of these, and a card that does
@@ -23,12 +26,17 @@ export const blankTask = (title: string): TaskFields => ({
   labels: [],
 });
 
-// High first, as the board orders them. The colour matches the card's footer.
-const PRIORITIES: { value: Priority; label: string; on: string }[] = [
-  { value: "high", label: "High", on: "border-bad text-bad" },
-  { value: "medium", label: "Medium", on: "border-warn text-warn" },
-  { value: "low", label: "Low", on: "border-muted text-text" },
+// High first, as the board orders them. The colour matches the card's footer;
+// `on` is the chosen segment's text and the bar along its bottom, as the
+// active tab has.
+const PRIORITIES: { value: Priority; label: string; dot: string; on: string }[] = [
+  { value: "high", label: "High", dot: "bg-destructive", on: "text-destructive after:bg-destructive" },
+  { value: "medium", label: "Medium", dot: "bg-warn", on: "text-warn after:bg-warn" },
+  { value: "low", label: "Low", dot: "bg-muted-foreground", on: "text-foreground after:bg-muted-foreground" },
 ];
+
+// A field's caption: the app's mono eyebrow.
+const FIELD = "eyebrow mb-2 mt-5 block";
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
@@ -64,9 +72,9 @@ export function TaskForm({
     labels: string[],
   ) => Promise<unknown>;
   onClose: () => void;
-  // Only offered for a backlog row: a session card is history, and the way
-  // off the board is a drag back to the Backlog column.
-  onDelete: (() => void) | null;
+  // Removes the task for good, after an inline confirm. Null for a card that
+  // doesn't exist yet.
+  onDelete: (() => Promise<unknown>) | null;
   // A label was deleted or recoloured outright, so other cards on screen
   // changed too.
   onLabelsChanged?: () => void;
@@ -91,6 +99,8 @@ export function TaskForm({
   // is not part of Save: the colour is the label's, on every card at once.
   const [picking, setPicking] = useState<LabelSummary | null>(null);
   const [busy, setBusy] = useState(false);
+  // The Delete button was pressed and is waiting on its inline confirm.
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const titleRef = useRef<HTMLInputElement>(null);
 
@@ -193,10 +203,10 @@ export function TaskForm({
 
   return (
     <section role="dialog" aria-modal="true" aria-label={heading ?? "Edit task"}>
-      {heading && <p className="mb-2.5 text-[13px] text-muted">{heading}</p>}
+      {heading && <p className="eyebrow mb-3">{heading}</p>}
       <input
         ref={titleRef}
-        className="w-full rounded-md border border-line bg-bg px-2.5 py-2 text-base text-text outline-none transition-colors focus:border-accent"
+        className="h-10 text-base font-medium tracking-[-0.01em]"
         value={title}
         placeholder="Title"
         disabled={busy}
@@ -204,26 +214,37 @@ export function TaskForm({
         onKeyDown={(e) => e.key === "Enter" && submit()}
       />
 
-      <p className="mb-1.5 mt-4 block text-[13px] uppercase tracking-[0.06em] text-muted" id="task-priority">
+      <p className={FIELD} id="task-priority">
         Priority
       </p>
-      {/* The board orders every column by this, high first. */}
-      <div className="flex flex-wrap items-center gap-2" role="radiogroup" aria-labelledby="task-priority">
-        {PRIORITIES.map((p) => (
-          <button
-            key={p.value}
-            role="radio"
-            aria-checked={priority === p.value}
-            disabled={busy}
-            className={priority === p.value ? p.on : ""}
-            onClick={() => setPriority(p.value)}
-          >
-            {p.label}
-          </button>
-        ))}
+      {/* The board orders every column by this, high first. Joined segments
+          in the tab style; the chosen one carries its colour. */}
+      <div className="flex" role="radiogroup" aria-labelledby="task-priority">
+        {PRIORITIES.map((p) => {
+          const on = priority === p.value;
+          return (
+            <button
+              key={p.value}
+              role="radio"
+              aria-checked={on}
+              disabled={busy}
+              className={cn(
+                "relative -ms-px inline-flex items-center gap-1.5 overflow-hidden border border-border px-3 py-1.5 " +
+                  "text-[13px] font-medium text-muted-foreground transition-colors first:ms-0 first:rounded-s-md " +
+                  "last:rounded-e-md hover:text-foreground disabled:cursor-default " +
+                  "after:pointer-events-none after:absolute after:inset-x-0 after:bottom-0 after:h-0.5",
+                on && "bg-muted " + p.on,
+              )}
+              onClick={() => setPriority(p.value)}
+            >
+              <span className={cn("size-1.5 rounded-full", p.dot)} />
+              {p.label}
+            </button>
+          );
+        })}
       </div>
 
-      <label className="mb-1.5 mt-4 block text-[13px] uppercase tracking-[0.06em] text-muted" htmlFor="task-due">
+      <label className={FIELD} htmlFor="task-due">
         Due
       </label>
       {/* Typed, not <input type="date">. WebKitGTK answers that one with a
@@ -237,34 +258,42 @@ export function TaskForm({
       <div className="flex flex-wrap items-center gap-2">
         <input
           id="task-due"
-          className="w-[9rem]"
+          className="w-[9rem] font-mono"
           value={due}
           placeholder="YYYY-MM-DD"
           disabled={busy}
           onChange={(e) => setDue(e.target.value)}
         />
-        <button disabled={busy} onClick={() => setDue(localDate(new Date()))}>
+        <Button variant="outline" size="sm" disabled={busy} onClick={() => setDue(localDate(new Date()))}>
           Today
-        </button>
-        <button disabled={busy} onClick={() => setDue(localDate(addDays(new Date(), 1)))}>
-          Tomorrow
-        </button>
-        {due && (
-          <button disabled={busy} onClick={() => setDue("")}>
-            Clear
-          </button>
-        )}
-        <button
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
           disabled={busy}
+          onClick={() => setDue(localDate(addDays(new Date(), 1)))}
+        >
+          Tomorrow
+        </Button>
+        {due && (
+          <Button variant="ghost" size="sm" disabled={busy} onClick={() => setDue("")}>
+            Clear
+          </Button>
+        )}
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={busy}
+          selected={cal}
           aria-pressed={cal}
-          className={cal ? "border-accent text-accent" : ""}
           onClick={() => setCal(!cal)}
         >
+          <CalendarDays />
           Calendar
-        </button>
+        </Button>
       </div>
       {cal && (
-        <Calendar
+        <MonthCalendar
           value={due}
           onPick={(d) => {
             setDue(d);
@@ -273,12 +302,12 @@ export function TaskForm({
         />
       )}
 
-      <label className="mb-1.5 mt-4 block text-[13px] uppercase tracking-[0.06em] text-muted" htmlFor="task-notes">
+      <label className={FIELD} htmlFor="task-notes">
         Notes
       </label>
       <textarea
         id="task-notes"
-        className="min-h-[84px] w-full resize-y rounded-md border border-line bg-bg px-2.5 py-2 text-sm leading-relaxed text-text outline-none transition-colors focus:border-accent"
+        className="min-h-[84px] resize-y leading-relaxed"
         rows={3}
         value={notes}
         placeholder="Anything you want to remember about this one…"
@@ -286,7 +315,7 @@ export function TaskForm({
         onChange={(e) => setNotes(e.target.value)}
       />
 
-      <label className="mb-1.5 mt-4 block text-[13px] uppercase tracking-[0.06em] text-muted" htmlFor="task-label-input">
+      <label className={FIELD} htmlFor="task-label-input">
         Labels
       </label>
       {/* Every label is a chip to click; the tick, not the shading, is what
@@ -303,11 +332,11 @@ export function TaskForm({
                     the picker. A name typed here has no colour until saved. */}
                 {stored && (
                   <button
-                    className={
-                      "flex flex-none items-center rounded-l-sm border border-r-0 border-line px-1.5 " +
-                      "transition-colors hover:border-muted disabled:cursor-default " +
-                      (picking && same(picking.name, name) ? "bg-raised" : "")
-                    }
+                    className={cn(
+                      "flex flex-none items-center rounded-s-md border border-e-0 border-border px-2 " +
+                        "transition-colors hover:bg-accent disabled:cursor-default",
+                      picking && same(picking.name, name) && "bg-accent",
+                    )}
                     title={`Change the colour of ${stored.name}`}
                     aria-label={`Change the colour of ${stored.name}`}
                     disabled={busy}
@@ -316,31 +345,30 @@ export function TaskForm({
                       setPicking(picking && same(picking.name, name) ? null : stored);
                     }}
                   >
-                    <span className="h-2.5 w-2.5 rounded-[2px]" style={{ background: stored.color }} />
+                    <span className="size-2.5 rounded-full" style={{ background: stored.color }} />
                   </button>
                 )}
                 <button
-                  className={
-                    "flex min-w-0 items-center gap-1.5 border border-line py-1 pl-1.5 text-xs " +
-                    "transition-colors duration-150 " +
-                    (stored ? "border-r-0 pr-1.5 " : "rounded-sm pr-2.5 ") +
-                    "disabled:cursor-default " +
+                  className={cn(
+                    "flex min-w-0 items-center gap-1.5 border border-border py-1 ps-2 text-xs " +
+                      "transition-colors duration-150 disabled:cursor-default",
+                    stored ? "border-e-0 pe-2" : "rounded-md pe-2.5",
                     // The tick is what says it is on; the fill only reinforces it.
-                    (on ? "bg-raised text-text" : "bg-transparent text-muted hover:text-text")
-                  }
+                    on ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground",
+                  )}
                   aria-pressed={on}
                   title={on ? `Take ${name} off` : `Tag with ${name}`}
                   disabled={busy}
                   onClick={() => toggle(name)}
                 >
-                  <span className="w-[1em] flex-none text-center text-accent">{on ? "✓" : ""}</span>
+                  <span className="flex w-3 flex-none justify-center">{on && <Check className="size-3" />}</span>
                   {!stored && (
                     <span
-                      className={
-                        "h-2 w-2 flex-none rounded-[2px]" +
+                      className={cn(
+                        "size-2 flex-none rounded-full",
                         // A name typed here that no label wears yet: no colour until saved.
-                        (color ? "" : " border border-muted")
-                      }
+                        !color && "border border-muted-foreground",
+                      )}
                       style={color ? { background: color } : undefined}
                     />
                   )}
@@ -350,8 +378,9 @@ export function TaskForm({
                     not saved yet just gets unticked. */}
                 {stored && (
                   <button
-                    className="rounded-r-sm border border-l-0 border-line px-1.5 text-xs text-muted transition-colors hover:text-bad disabled:cursor-default"
+                    className="flex items-center rounded-e-md border border-s-0 border-border px-1.5 text-muted-foreground transition-colors hover:text-destructive disabled:cursor-default"
                     title={`Delete ${stored.name} from every task`}
+                    aria-label={`Delete ${stored.name} from every task`}
                     disabled={busy}
                     onClick={() => {
                       setPicking(null);
@@ -359,7 +388,7 @@ export function TaskForm({
                       else removeLabel(stored.name);
                     }}
                   >
-                    ×
+                    <X className="size-3" />
                   </button>
                 )}
               </li>
@@ -367,7 +396,7 @@ export function TaskForm({
           })}
         </ul>
       ) : (
-        <p className="text-xs text-muted">No labels yet. Type one below to make it.</p>
+        <p className="text-xs text-muted-foreground">No labels yet. Type one below to make it.</p>
       )}
       {picking && (
         <ColorPicker
@@ -386,16 +415,17 @@ export function TaskForm({
             “{confirming.name}” is on {confirming.uses} task{confirming.uses === 1 ? "" : "s"}.
             Deleting it takes it off {confirming.uses === 1 ? "that one" : "all of them"} now, even if you cancel here.
           </span>
-          <button disabled={busy} onClick={() => removeLabel(confirming.name)}>
+          <Button variant="destructive" size="sm" disabled={busy} onClick={() => removeLabel(confirming.name)}>
             Delete label
-          </button>
-          <button disabled={busy} onClick={() => setConfirming(null)}>
+          </Button>
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => setConfirming(null)}>
             Keep it
-          </button>
+          </Button>
         </div>
       )}
       <input
         id="task-label-input"
+        className="mt-2"
         value={draft}
         placeholder="New label…"
         disabled={busy}
@@ -414,26 +444,49 @@ export function TaskForm({
         }}
       />
 
-      {error && <p className="mt-3 text-xs text-bad">{error}</p>}
+      {error && <p className="mt-3 text-xs text-destructive">{error}</p>}
 
-      <div className="mt-5 flex items-center gap-2">
-        <button disabled={busy || !title.trim()} onClick={submit}>
+      <div className="mt-6 flex items-center gap-2">
+        <Button disabled={busy || !title.trim()} onClick={submit}>
           {saveText}
-        </button>
-        <button disabled={busy} onClick={onClose}>
+        </Button>
+        <Button variant="outline" disabled={busy} onClick={onClose}>
           Cancel
-        </button>
+        </Button>
         <span className="flex-1" />
-        {onDelete && (
-          <button
-            className="rounded-md border border-line px-2.5 py-1 text-muted transition-colors hover:border-bad hover:text-bad"
-            disabled={busy}
-            onClick={onDelete}
-          >
+        {onDelete && !deleting && (
+          <Button variant="destructive" appearance="ghost" disabled={busy} onClick={() => setDeleting(true)}>
+            <Trash2 />
             Delete
-          </button>
+          </Button>
         )}
       </div>
+      {onDelete && deleting && (
+        <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5">
+          <span className="basis-full text-right text-xs text-warn">
+            Delete this task for good? It can't be brought back.
+          </span>
+          <Button
+            variant="destructive"
+            size="sm"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              setError(null);
+              onDelete().catch((e) => {
+                setError(String(e));
+                setBusy(false);
+                setDeleting(false);
+              });
+            }}
+          >
+            Delete for good
+          </Button>
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => setDeleting(false)}>
+            Keep it
+          </Button>
+        </div>
+      )}
     </section>
   );
 }

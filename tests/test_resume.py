@@ -9,7 +9,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from gate import config, resume, store
+from gate import config, lock, resume, store
 
 
 def ago(minutes: float) -> str:
@@ -99,6 +99,15 @@ class TestShouldGate(ResumeCase):
         self.open_session(ago(600))
         config.SKIP_PATH.touch()
         self.assertFalse(resume.should_gate(self.conn))
+
+    def test_a_gate_on_screen_skips(self):
+        # 2026-09-30: the lid closed on the login gate after its recovery
+        # had closed the old session, so there was nothing open — which
+        # alone fires. A second gate on VT9 split the tasks over two
+        # sessions. The gate already up is the one to answer.
+        with lock.hold():
+            self.assertFalse(resume.should_gate(self.conn))
+        self.assertTrue(resume.should_gate(self.conn))
 
 
 if __name__ == "__main__":

@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { Loader, ScanEye, Timer } from "lucide-react";
+import { BarGroup, BarMore, BarRow, Bars } from "@/components/Bars";
+import ListRow from "@/components/ListRow";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import * as api from "./api";
 import { ALIGN_TEXT, band, dayKey, dayLabel, fmt, hhmm, OTHER, rankTitles } from "./format";
-import { BarGroup, BarMore, BarRow, Bars } from "./ui/Bars";
 import type { Analysis, Observed } from "./types";
 
 const TOP_APPS = 8;
@@ -138,149 +142,160 @@ export default function Analyses({
   }
 
   return (
-    <div className="flex items-start gap-4 p-4">
-      <aside className="max-h-[calc(100vh-90px)] w-[260px] flex-none overflow-y-auto">
+    <div className="flex items-start gap-8 px-6 py-6">
+      <aside className="max-h-[calc(100vh-104px)] w-[280px] flex-none overflow-y-auto">
         {groups.map((g) => (
-          <div key={g.key} className="mb-3.5 flex flex-col gap-1.5">
-            <h3>{g.label}</h3>
+          <div key={g.key} className="mb-4 flex flex-col gap-0.5">
+            <h3 className="mb-1.5 px-3">{g.label}</h3>
             {g.items.map((a) => {
               const b = band(a.alignment);
-              // On the accent fill every child has to inherit the dark text;
-              // a muted grey or a band colour on cyan is unreadable.
-              const on = a.id === selected;
               return (
-                <button
+                <ListRow
                   key={a.id}
-                  className={
-                    "block w-full overflow-hidden text-ellipsis whitespace-nowrap rounded-md " +
-                    "border px-2.5 py-1.5 text-left transition-colors duration-150 " +
-                    (a.id === selected
-                      ? "border-accent bg-accent text-bg "
-                      : "border-line text-text hover:border-muted ") +
+                  selected={a.id === selected}
+                  className={cn(
+                    "flex items-center gap-2",
                     // Unread checks are the ones worth returning to.
-                    (a.seen_at ? "" : "font-semibold")
-                  }
+                    !a.seen_at && "font-semibold text-foreground",
+                  )}
                   onClick={() => select(a)}
                 >
-                  <span className={on ? "opacity-70" : "text-muted"}>{hhmm(a.created_at)}</span>{" "}
-                  {a.kind === "checkpoint" && <span className={"rounded px-1 text-[11px] " + (on ? "bg-black/20" : "bg-raised text-muted")}>time&rsquo;s up</span>}{" "}
-                  {a.headline}
-                  <span className={"float-right ml-2 font-normal " + (on ? "" : ALIGN_TEXT[b.cls])} title={b.label}>
+                  <span className="flex-none font-mono text-[11px] font-normal text-muted-foreground">
+                    {hhmm(a.created_at)}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">
+                    {a.kind === "checkpoint" && (
+                      <span className="me-1.5 rounded border border-border bg-secondary px-1 font-mono text-[10px] font-normal text-muted-foreground">
+                        time&rsquo;s up
+                      </span>
+                    )}
+                    {a.headline}
+                  </span>
+                  <span
+                    className={"flex-none font-mono text-xs font-normal tabular-nums " + ALIGN_TEXT[b.cls]}
+                    title={b.label}
+                  >
                     {b.glyph} {a.alignment ?? "—"}
                   </span>
-                </button>
+                </ListRow>
               );
             })}
           </div>
         ))}
-        {items.length === 0 && <p className="text-muted">No checks yet.</p>}
+        {items.length === 0 && <p className="px-3 text-muted-foreground">No checks yet.</p>}
       </aside>
 
-      <section className="min-w-0 max-w-[720px] flex-1">
+      <section className="min-w-0 max-w-[760px] flex-1">
         {current ? (
           <>
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h2>{current.headline}</h2>
-                <p className="text-muted">
+            <div className="flex items-start justify-between gap-6">
+              <div className="min-w-0">
+                <p className="eyebrow">
+                  {current.kind === "checkpoint" ? "Checkpoint" : "Check"} · session #{current.session_id}
+                  {current.session_statement ? ` · ${current.session_statement}` : ""}
+                </p>
+                <h2 className="mt-2">{current.headline}</h2>
+                <p className="mt-1.5 font-mono text-xs text-muted-foreground">
                   {dayLabel(current.created_at)} {hhmm(current.created_at)} · covers{" "}
                   {hhmm(current.window_start)}–{hhmm(current.window_end)} ({fmt(windowSeconds)})
                 </p>
               </div>
               <div className={"flex flex-none flex-col items-end " + ALIGN_TEXT[band(current.alignment).cls]}>
-                <span className="text-2xl leading-tight">
+                <span className="font-mono text-4xl font-medium leading-none tracking-[-0.04em] tabular-nums">
                   {band(current.alignment).glyph} {current.alignment ?? "—"}
                 </span>
-                <span className="text-xs">{band(current.alignment).label}</span>
+                <span className="eyebrow mt-2 text-current">{band(current.alignment).label}</span>
               </div>
             </div>
-            <p className="max-w-[60ch]">{current.body}</p>
+            <p className="mt-5 max-w-[60ch] leading-relaxed">{current.body}</p>
             {current.recommendation && (
-              <div className="mt-5 max-w-[60ch] rounded-lg border border-line bg-surface px-4 py-3.5">
+              <div className="surface mt-6 max-w-[60ch] px-5 py-4">
                 <h3>Recommended</h3>
-                <p className="mb-1.5 text-[15px]">
+                <p className="mb-1.5 mt-2 text-[15px] font-medium tracking-[-0.01em]">
                   {current.recommendation.advice}
                   {current.recommendation.minutes > 0 && (
-                    <span className="text-muted"> · about {current.recommendation.minutes} min</span>
+                    <span className="font-normal text-muted-foreground"> · about {current.recommendation.minutes} min</span>
                   )}
                 </p>
                 {current.recommendation_note && (
-                  <p className="mb-2 text-[13px] text-muted">{current.recommendation_note}</p>
+                  <p className="mb-2 text-[13px] text-muted-foreground">{current.recommendation_note}</p>
                 )}
-                <p className="mb-1.5 text-text">{current.recommendation.why}</p>
-                <p className="text-xs italic text-muted">
+                <p className="mb-2 text-foreground/90">{current.recommendation.why}</p>
+                <p className="font-mono text-[11px] text-muted-foreground">
                   {current.recommendation.source ?? "Not yet backed by a cited study."}
                 </p>
               </div>
             )}
-            <p className="text-muted">
-              #{current.session_id}
-              {current.session_statement ? ` · ${current.session_statement}` : ""}
-            </p>
 
-            <h3>What the model saw</h3>
-            {observed && (
-              <p className="text-muted">
-                {fmt(observed.active_seconds)} active, {fmt(observed.afk_seconds)} away
-              </p>
-            )}
-            <Bars>
-              {apps.map(([app, secs]) => {
-                const titles = rankTitles(observed, app);
-                // "(other)" reaches the model too — as the prompt's remainder
-                // line — so it counts as seen however many titles it stands
-                // for, and it stays pinned last. Only real titles past the
-                // prompt's cut are the ones the model never got.
-                const real = titles.filter(([t]) => t !== OTHER);
-                const other = titles.filter(([t]) => t === OTHER);
-                const hidden = real.slice(MODEL_TITLES);
-                const open = expanded.has(app);
-                const rows = [
-                  ...real.slice(0, MODEL_TITLES).map(([t, s]) => ({ t, s, unsent: false })),
-                  ...(open ? hidden.map(([t, s]) => ({ t, s, unsent: true })) : []),
-                  ...other.map(([t, s]) => ({ t, s, unsent: false })),
-                ];
-                return (
-                  <BarGroup key={app}>
-                    <BarRow label={app} value={fmt(secs)} pct={(secs / max) * 100} />
-                    {rows.map((r) => (
-                      <BarRow
-                        key={r.t}
-                        label={r.t}
-                        value={fmt(r.s)}
-                        pct={(r.s / max) * 100}
-                        sub
-                        unsent={r.unsent}
-                      />
-                    ))}
-                    {hidden.length > 0 && (
-                      <BarMore onClick={() => toggle(app)}>
-                        {open
-                          ? "▾ hide the rest"
-                          : `▸ +${hidden.length} more — recorded, not sent to the model`}
-                      </BarMore>
-                    )}
-                  </BarGroup>
-                );
-              })}
-              {observed && apps.length === 0 && <p className="text-muted">nothing recorded</p>}
-            </Bars>
+            <div className="surface mt-6 px-5 py-4">
+              <div className="mb-4 flex items-baseline justify-between gap-4">
+                <h3>What the model saw</h3>
+                {observed && (
+                  <p className="font-mono text-xs text-muted-foreground">
+                    {fmt(observed.active_seconds)} active · {fmt(observed.afk_seconds)} away
+                  </p>
+                )}
+              </div>
+              <Bars>
+                {apps.map(([app, secs]) => {
+                  const titles = rankTitles(observed, app);
+                  // "(other)" reaches the model too — as the prompt's remainder
+                  // line — so it counts as seen however many titles it stands
+                  // for, and it stays pinned last. Only real titles past the
+                  // prompt's cut are the ones the model never got.
+                  const real = titles.filter(([t]) => t !== OTHER);
+                  const other = titles.filter(([t]) => t === OTHER);
+                  const hidden = real.slice(MODEL_TITLES);
+                  const open = expanded.has(app);
+                  const rows = [
+                    ...real.slice(0, MODEL_TITLES).map(([t, s]) => ({ t, s, unsent: false })),
+                    ...(open ? hidden.map(([t, s]) => ({ t, s, unsent: true })) : []),
+                    ...other.map(([t, s]) => ({ t, s, unsent: false })),
+                  ];
+                  return (
+                    <BarGroup key={app}>
+                      <BarRow label={app} value={fmt(secs)} pct={(secs / max) * 100} />
+                      {rows.map((r) => (
+                        <BarRow
+                          key={r.t}
+                          label={r.t}
+                          value={fmt(r.s)}
+                          pct={(r.s / max) * 100}
+                          sub
+                          unsent={r.unsent}
+                        />
+                      ))}
+                      {hidden.length > 0 && (
+                        <BarMore onClick={() => toggle(app)}>
+                          {open
+                            ? "▾ hide the rest"
+                            : `▸ +${hidden.length} more — recorded, not sent to the model`}
+                        </BarMore>
+                      )}
+                    </BarGroup>
+                  );
+                })}
+                {observed && apps.length === 0 && <p className="text-muted-foreground">nothing recorded</p>}
+              </Bars>
+            </div>
           </>
         ) : (
-          <p className="text-muted">
+          <p className="text-muted-foreground">
             No checks yet — they land at random intervals, and quiet windows are skipped.
           </p>
         )}
 
-        <div className="mt-5 flex items-center gap-2.5">
-          <button onClick={runNow} disabled={running != null || !hasSession}>
-            {running === "check" ? "checking…" : "Run a check now"}
-          </button>
-          <button onClick={runCheckpoint} disabled={running != null || !hasSession}>
-            {running === "checkpoint" ? "checking…" : "Run a checkpoint now"}
-          </button>
-          {!hasSession && <span className="text-muted">no open session</span>}
-          {runNote && <span className="text-muted">{runNote}</span>}
+        <div className="mt-6 flex flex-wrap items-center gap-2.5">
+          <Button variant="outline" onClick={runNow} disabled={running != null || !hasSession}>
+            {running === "check" ? <Loader className="animate-spin" /> : <ScanEye />}
+            {running === "check" ? "Checking…" : "Run a check now"}
+          </Button>
+          <Button variant="outline" onClick={runCheckpoint} disabled={running != null || !hasSession}>
+            {running === "checkpoint" ? <Loader className="animate-spin" /> : <Timer />}
+            {running === "checkpoint" ? "Checking…" : "Run a checkpoint now"}
+          </Button>
+          {!hasSession && <span className="text-muted-foreground">no open session</span>}
+          {runNote && <span className="text-muted-foreground">{runNote}</span>}
         </div>
       </section>
     </div>

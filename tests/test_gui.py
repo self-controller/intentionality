@@ -48,7 +48,7 @@ class BackendCase(unittest.TestCase):
 
 class TestUiDispatch(BackendCase):
     def test_confirm_and_welcome_go_straight_through(self):
-        plan = ui.Plan(keep=[], done=[], delete=[], new=[ui.NewTask("x")], intended_minutes=None)
+        plan = ui.Plan(today=[], done=[], delete=[], new=[ui.NewTask("x")], intended_minutes=None)
         ui.backend = back = FakeBackend(choices=["n"], plans=[plan])
         task = ui.ActiveTask(7, "carried", 1, True)
         label = ui.Label("school", "#7aa2f7")

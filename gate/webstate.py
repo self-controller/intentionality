@@ -68,6 +68,7 @@ class WelcomeScreen:
             "index": index,
             "title": row.title,
             "mark": row.mark,
+            "today": row.today,
             "detail": detail,
             "can_finish": bool(row.task and row.task.can_finish),
             "typed": row.task is None,
@@ -96,13 +97,13 @@ class WelcomeScreen:
 
     def counted(self) -> int:
         """Tasks the session would start with, counting the add box."""
-        return self.rows.remaining() + (1 if self.add_text.strip() else 0)
+        return self.rows.today_count() + (1 if self.add_text.strip() else 0)
 
     def status(self) -> str:
         count = self.counted()
         if not count:
             return EMPTY_HINT
-        return f"{count} task{'' if count == 1 else 's'} this session."
+        return f"{count} task{'' if count == 1 else 's'} for today."
 
     def state(self) -> dict:
         greeting, date_line = ui.greeting(self._now)
@@ -145,6 +146,12 @@ class WelcomeScreen:
     def _op_add(self, msg: dict) -> None:
         self.rows.add(str(msg.get("title", "")))
         self.add_text = ""
+
+    def _op_today(self, msg: dict) -> None:
+        index = self._index(msg)
+        if index is None:
+            return
+        self.rows.toggle_today(index)
 
     def _op_mark(self, msg: dict) -> None:
         index = self._index(msg)
@@ -215,7 +222,7 @@ class WelcomeScreen:
         self.minutes = str(msg.get("minutes", ""))
         self.rows.add(str(msg.get("add_text", "")))
         self.add_text = ""
-        if not self.rows.remaining():
+        if not self.rows.today_count():
             self.error = EMPTY_HINT
             return
         try:

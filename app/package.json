@@ -11,8 +11,16 @@
     "build:all": "npm run build && npm run build:gate"
   },
   "dependencies": {
+    "@fontsource-variable/geist": "^5.3.0",
+    "@fontsource-variable/geist-mono": "^5.3.0",
+    "@radix-ui/react-scroll-area": "^1.2.18",
+    "@radix-ui/react-slot": "^1.3.3",
+    "@radix-ui/react-tabs": "^1.1.21",
     "@tauri-apps/api": "^2",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
     "katex": "^0.16.47",
+    "lucide-react": "^1.49.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
@@ -20,6 +28,7 @@
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
+    "tailwind-merge": "^3.7.0",
     "three": "^0.186.1",
     "threejs-elements": "file:../../threejs_test/threejs-elements-0.2.0.tgz"
   },

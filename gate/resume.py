@@ -7,7 +7,7 @@ sqlite3 and nothing network-facing, like flow.py.
 
 from datetime import datetime, timezone
 
-from . import config, store
+from . import config, lock, store
 
 # Under this many minutes away, waking is just coming back to your desk.
 DEFAULT_MIN_AWAY_MINUTES = 30.0
@@ -44,6 +44,11 @@ def threshold_minutes(conn) -> float:
 
 def should_gate(conn) -> bool:
     if config.SKIP_PATH.exists():
+        return False
+    # A gate already on screen is the gate: typically the login gate you
+    # closed the lid on. Firing a second one on VT9 made you answer twice
+    # and split the tasks over two sessions (see lock.py).
+    if lock.held():
         return False
     away = away_minutes(conn)
     # Nothing to measure means nothing to protect: waking a machine that has

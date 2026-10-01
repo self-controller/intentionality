@@ -33,22 +33,24 @@ export function BarRow({
       <span
         className={
           "flex-none overflow-hidden text-ellipsis whitespace-nowrap text-right " +
-          (sub ? `w-36 text-muted ${dim}` : "w-40")
+          (sub ? `w-36 text-muted-foreground ${dim}` : "w-40 text-foreground")
         }
         title={label}
       >
         {label}
       </span>
-      <span className={"flex-1 rounded bg-surface " + (sub ? "h-2" : "h-3.5")}>
+      <span className={"flex-1 overflow-hidden rounded-full bg-secondary " + (sub ? "h-1.5" : "h-2.5")}>
         <span
           className={
-            "block h-full rounded bg-accent " +
-            (unsent ? "opacity-25" : sub ? "opacity-50" : "")
+            "block h-full rounded-full bg-primary " +
+            (unsent ? "opacity-20" : sub ? "opacity-45" : "opacity-90")
           }
           style={{ width: `${pct}%` }}
         />
       </span>
-      <span className={`w-16 flex-none text-muted ${sub ? dim : ""}`}>{value}</span>
+      <span className={`w-16 flex-none font-mono text-xs tabular-nums text-muted-foreground ${sub ? dim : ""}`}>
+        {value}
+      </span>
     </div>
   );
 }
@@ -62,7 +64,7 @@ export function BarMore({
 }) {
   return (
     <button
-      className="self-start border-none p-0 pl-4 text-xs text-muted transition-colors hover:text-text"
+      className="self-start pl-4 text-xs text-muted-foreground transition-colors hover:text-foreground"
       onClick={onClick}
     >
       {children}

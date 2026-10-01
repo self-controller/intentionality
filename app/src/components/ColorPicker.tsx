@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Button } from "@/components/ui/button";
 
 type Rgb = [number, number, number];
 
@@ -14,9 +15,9 @@ export function toHex([r, g, b]: Rgb): string {
 }
 
 const CHANNELS = [
-  { name: "R", tint: "#f7768e" },
-  { name: "G", tint: "#9ece6a" },
-  { name: "B", tint: "#7aa2f7" },
+  { name: "R", tint: "#ff6568" },
+  { name: "G", tint: "#00d294" },
+  { name: "B", tint: "#54a2ff" },
 ] as const;
 
 const clamp = (n: number) => Math.max(0, Math.min(255, Math.round(n)));
@@ -54,17 +55,17 @@ export default function ColorPicker({
   };
 
   return (
-    <div className="mt-2 rounded-md border border-line p-3">
-      {title && <p className="mb-2 text-xs text-muted">{title}</p>}
+    <div className="mt-2 rounded-lg border border-border bg-background/40 p-3">
+      {title && <p className="mb-2 text-xs text-muted-foreground">{title}</p>}
       <div className="flex items-start gap-3">
         <span
-          className="h-[4.5rem] w-[4.5rem] flex-none rounded-md border border-line"
+          className="h-[4.5rem] w-[4.5rem] flex-none rounded-md border border-border"
           style={{ background: hex }}
           aria-label={`New colour ${hex}`}
         />
         <div className="flex min-w-0 flex-1 flex-col gap-1.5">
           {CHANNELS.map(({ name, tint }, i) => (
-            <label key={name} className="flex items-center gap-2 text-xs text-muted">
+            <label key={name} className="flex items-center gap-2 font-mono text-xs text-muted-foreground">
               <span className="w-3 flex-none">{name}</span>
               <input
                 type="range"
@@ -110,12 +111,12 @@ export default function ColorPicker({
           }}
         />
         <span className="flex-1" />
-        <button disabled={busy} onClick={() => onApply(hex)}>
+        <Button size="sm" disabled={busy} onClick={() => onApply(hex)}>
           Apply
-        </button>
-        <button disabled={busy} onClick={onCancel}>
+        </Button>
+        <Button size="sm" variant="outline" disabled={busy} onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
     </div>
   );

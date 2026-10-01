@@ -108,17 +108,20 @@ class NewTask:
 
 @dataclass
 class Plan:
-    """What the welcome screen decided. Every task shown lands in exactly one
-    of keep / done / delete; nothing is written until flow commits this."""
+    """What the welcome screen decided. Every backlog task shown lands in
+    exactly one of today / done / delete, or is left alone (it stays in the
+    backlog); nothing is written until flow commits this."""
 
-    keep: list[int]
+    today: list[int]  # backlog tasks ticked for this session's To Do
     done: list[int]
     delete: list[int]
-    new: list[NewTask]
+    new: list[NewTask]  # typed here, ticked: this session's To Do
     intended_minutes: int | None
-    # Kept tasks whose details were changed here, and only those: the desktop
-    # app may be editing the same backlog, and writing back what was merely
-    # loaded would undo its edit.
+    # Typed here and unticked: they go straight to the backlog.
+    new_backlog: list[NewTask] = field(default_factory=list)
+    # Backlog tasks whose details were changed here, and only those (ticked
+    # or not): the desktop app may be editing the same backlog, and writing
+    # back what was merely loaded would undo its edit.
     edits: dict[int, Details] = field(default_factory=dict)
 
 
@@ -130,12 +133,18 @@ MARKED = "Undo the mark before changing its details."
 class Row:
     title: str
     task: ActiveTask | None = None  # None = typed on this screen
-    mark: str | None = None  # None = kept; DONE or DELETE
+    mark: str | None = None  # None = not marked; DONE or DELETE
     details: Details | None = None
+    # Ticked = goes to this session's To Do; unticked = stays in (or goes to)
+    # the backlog. A typed row starts ticked -- it was typed for today -- and
+    # a backlog task starts unticked.
+    today: bool | None = None
 
     def __post_init__(self):
         if self.details is None:
             self.details = self.task.details if self.task else Details()
+        if self.today is None:
+            self.today = self.task is None
 
 
 class WelcomeList:
@@ -163,7 +172,17 @@ class WelcomeList:
         if mark == DONE and not row.task.can_finish:
             return "Only a task carried from an earlier session can be marked done."
         row.mark = None if row.mark == mark else mark
+        if row.mark:
+            row.today = False
         return None
+
+    def toggle_today(self, index: int) -> None:
+        """Tick or untick a row for today. Ticking a marked row takes the
+        mark off it: you can't both delete a task and do it today."""
+        row = self.rows[index]
+        row.today = not row.today
+        if row.today:
+            row.mark = None
 
     def set_details(self, index: int, details: Details) -> str | None:
         """Replace a row's details. Returns why not, when it can't be done."""
@@ -175,22 +194,24 @@ class WelcomeList:
         row.details = Details(details.notes.strip(), details.due_date, clean_labels(details.labels))
         return None
 
-    def remaining(self) -> int:
+    def today_count(self) -> int:
         """How many tasks the session would start with."""
-        return sum(row.mark is None for row in self.rows)
+        return sum(row.today and row.mark is None for row in self.rows)
 
     def plan(self, intended_minutes: int | None) -> Plan:
         carried = [row for row in self.rows if row.task is not None]
-        kept = [row for row in carried if row.mark is None]
+        typed = [row for row in self.rows if row.task is None]
+        live = [row for row in carried if row.mark is None]
         return Plan(
-            keep=[row.task.id for row in kept],
+            today=[row.task.id for row in live if row.today],
             done=[row.task.id for row in carried if row.mark == DONE],
             delete=[row.task.id for row in carried if row.mark == DELETE],
-            new=[NewTask(row.title, row.details) for row in self.rows if row.task is None],
+            new=[NewTask(row.title, row.details) for row in typed if row.today],
+            new_backlog=[NewTask(row.title, row.details) for row in typed if not row.today],
             intended_minutes=intended_minutes,
             edits={
                 row.task.id: row.details
-                for row in kept
+                for row in live
                 if not row.details.same_as(row.task.details)
             },
         )
@@ -244,7 +265,7 @@ def parse_minutes(raw: str) -> int | None:
     return minutes
 
 
-EMPTY_HINT = "Add at least one task to start."
+EMPTY_HINT = "Tick at least one task for today to start."
 BAD_DUE = "A due date is a day like 2026-09-18, or today or tomorrow."
 
 
@@ -320,10 +341,11 @@ def ask_minutes() -> int | None:
 
 
 _HELP = (
-    "Type a task to add it · d N = done · x N = delete (again to undo)"
-    " · e N = due date, notes, labels · blank line to start"
+    "Type a task to add it (it is for today) · t N = today / backlog · d N = done"
+    " · x N = delete (again to undo) · e N = due date, notes, labels"
+    " · blank line to start"
 )
-_COMMAND = re.compile(r"([dxe])\s*(\d+)", re.IGNORECASE)
+_COMMAND = re.compile(r"([tdxe])\s*(\d+)", re.IGNORECASE)
 
 
 def _terminal_welcome(tasks: list[ActiveTask], error: str, labels: list[Label]) -> Plan:
@@ -343,9 +365,9 @@ def _terminal_welcome(tasks: list[ActiveTask], error: str, labels: list[Label]) 
             message = ""
         raw = ask("> ")
         if not raw:
-            if rows.remaining():
+            if rows.today_count():
                 break
-            message = "Add at least one task first."
+            message = EMPTY_HINT
             continue
         command = _COMMAND.fullmatch(raw)
         if command is None:
@@ -358,6 +380,8 @@ def _terminal_welcome(tasks: list[ActiveTask], error: str, labels: list[Label]) 
         letter = command[1].lower()
         if letter == "e":
             message = _terminal_details(rows, number - 1, labels)
+        elif letter == "t":
+            rows.toggle_today(number - 1)
         else:
             mark = DONE if letter == "d" else DELETE
             message = rows.toggle(number - 1, mark) or ""
@@ -407,4 +431,5 @@ def _print_rows(rows: WelcomeList) -> None:
         detail = row_detail(row, today)
         detail = f"  ({detail})" if detail else ""
         mark = f"  [{row.mark}]" if row.mark else ""
-        print(f"  {number}. {row.title}{detail}{mark}")
+        box = "[x]" if row.today else "[ ]"
+        print(f"  {number}. {box} {row.title}{detail}{mark}")

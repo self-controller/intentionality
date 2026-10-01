@@ -23,23 +23,49 @@ TODAY = date(2026, 9, 11)  # a Friday
 
 
 class TestWelcomeList(unittest.TestCase):
-    def test_everything_unmarked_is_kept(self):
+    def test_backlog_tasks_default_to_the_backlog_and_typed_ones_to_today(self):
         rows = WelcomeList([CARRIED, LOOSE])
         self.assertTrue(rows.add("  typed  "))
         self.assertFalse(rows.add("   "))
-        self.assertEqual(rows.remaining(), 3)
-        self.assertEqual(rows.plan(20), ui.Plan([1, 2], [], [], [NewTask("typed")], 20))
+        self.assertEqual([row.today for row in rows.rows], [False, False, True])
+        self.assertEqual(rows.today_count(), 1)
+        self.assertEqual(rows.plan(20), ui.Plan([], [], [], [NewTask("typed")], 20))
+
+    def test_ticking_moves_a_task_to_today_and_unticking_puts_it_back(self):
+        rows = WelcomeList([CARRIED, LOOSE])
+        rows.toggle_today(1)
+        self.assertEqual(rows.today_count(), 1)
+        self.assertEqual(rows.plan(None).today, [2])
+        rows.toggle_today(1)
+        self.assertEqual(rows.today_count(), 0)
+        self.assertEqual(rows.plan(None).today, [])
+
+    def test_an_unticked_typed_row_goes_to_the_backlog(self):
+        rows = WelcomeList([])
+        rows.add("later")
+        rows.add("now")
+        rows.toggle_today(0)
+        p = rows.plan(None)
+        self.assertEqual((p.new, p.new_backlog), ([NewTask("now")], [NewTask("later")]))
 
     def test_marks_toggle_and_undo(self):
         rows = WelcomeList([CARRIED, LOOSE])
+        rows.toggle_today(1)
         self.assertIsNone(rows.toggle(0, DONE))
-        self.assertIsNone(rows.toggle(1, DELETE))
-        self.assertEqual(rows.remaining(), 0)
+        self.assertIsNone(rows.toggle(1, DELETE))  # a mark takes the tick off
+        self.assertEqual(rows.today_count(), 0)
         self.assertEqual(rows.plan(None), ui.Plan([], [1], [2], [], None))
-        rows.toggle(1, DELETE)  # the same mark again is the undo
-        self.assertEqual(rows.plan(None).keep, [2])
+        rows.toggle(1, DELETE)  # the same mark again is the undo: back to the backlog
+        self.assertEqual(rows.plan(None), ui.Plan([], [1], [], [], None))
+        rows.toggle_today(1)
         rows.toggle(0, DELETE)  # a different mark replaces it
         self.assertEqual(rows.plan(None), ui.Plan([2], [], [1], [], None))
+
+    def test_ticking_a_marked_row_takes_the_mark_off(self):
+        rows = WelcomeList([CARRIED])
+        rows.toggle(0, DELETE)
+        rows.toggle_today(0)
+        self.assertEqual(rows.plan(None), ui.Plan([1], [], [], [], None))
 
     def test_done_needs_a_session_to_be_recorded_in(self):
         rows = WelcomeList([LOOSE])
@@ -47,7 +73,7 @@ class TestWelcomeList(unittest.TestCase):
         for index in (0, 1):
             with self.subTest(index=index):
                 self.assertIn("carried from an earlier session", rows.toggle(index, DONE))
-        self.assertEqual(rows.remaining(), 2)
+        self.assertEqual(rows.today_count(), 1)
 
     def test_deleting_a_typed_row_removes_it(self):
         rows = WelcomeList([CARRIED])
@@ -60,12 +86,16 @@ class TestWelcomeList(unittest.TestCase):
     def test_every_shown_task_lands_exactly_once(self):
         tasks = [ActiveTask(i, f"t{i}", 0, True) for i in range(1, 7)]
         rows = WelcomeList(tasks)
+        rows.toggle_today(0)
         rows.toggle(1, DONE)
         rows.toggle(2, DELETE)
         rows.toggle(4, DONE)
         rows.toggle(4, DONE)
         p = rows.plan(None)
-        self.assertEqual(sorted(p.keep + p.done + p.delete), [t.id for t in tasks])
+        # Ticked, done and deleted are disjoint; the rest simply stay.
+        marked = p.today + p.done + p.delete
+        self.assertEqual(len(marked), len(set(marked)))
+        self.assertEqual((p.today, p.done, p.delete), ([1], [2], [3]))
 
 
 class TestDetails(unittest.TestCase):
@@ -191,28 +221,31 @@ class TestTerminalWelcome(TerminalCase):
         self.addCleanup(FAKE_TODAY.stop)
 
     def test_blank_line_needs_a_task(self):
-        self.script("x 1", "", "x 1", "", "")
+        # Nothing is ticked, then a deleted row is ticked back in: only then
+        # does a blank line start.
+        self.script("x 1", "", "t 1", "", "")
         p = ui.welcome([CARRIED], ["already printed"])
         self.assertEqual(p, ui.Plan([1], [], [], [], None))
         out = self.out.getvalue()
         self.assertIn("e N = due date, notes, labels", out)
-        self.assertEqual(out.count("Add at least one task first."), 1)
-        self.assertIn("  1. carried  [delete]", out)
+        self.assertEqual(out.count(ui.EMPTY_HINT), 1)
+        self.assertIn("  1. [ ] carried  [delete]", out)
         # The recovery sweep printed the notes; the terminal doesn't repeat them.
         self.assertNotIn("already printed", out)
 
     def test_add_mark_and_minutes(self):
-        self.script("write report", "d 1", "D1", "d1", "x 3", "", "abc", "0", "45")
+        self.script("write report", "d 1", "D1", "d1", "t 2", "", "abc", "0", "45")
         p = ui.welcome([CARRIED, LOOSE])
-        self.assertEqual(p, ui.Plan([2], [1], [], [], 45))
+        self.assertEqual(p, ui.Plan([2], [1], [], [NewTask("write report")], 45))
         out = self.out.getvalue()
         self.assertEqual(out.count("whole number above zero"), 2)
-        self.assertIn("  1. carried  [done]", out)
+        self.assertIn("  1. [ ] carried  [done]", out)
+        self.assertIn("  3. [x] write report", out)
 
     def test_bad_numbers_and_refusals_are_said(self):
-        self.script("x 9", "d 1", "", "")
+        self.script("x 9", "d 1", "t 1", "", "")
         p = ui.welcome([LOOSE], error="Those tasks changed while you were here.")
-        self.assertEqual(p.keep, [2])
+        self.assertEqual(p.today, [2])
         out = self.out.getvalue()
         self.assertIn("Those tasks changed while you were here.", out)
         self.assertIn("There is no task 9.", out)
@@ -229,9 +262,10 @@ class TestTerminalWelcome(TerminalCase):
             "", "",
         )
         p = ui.welcome([CARRIED, LOOSE, DETAILED], labels=labels)
-        self.assertEqual(p.keep, [2, 3])
+        self.assertEqual(p.today, [])
         self.assertEqual(p.delete, [1])
         # Row 1 was edited and then deleted: nothing to write. Row 2 kept all.
+        # Row 3 is edited although it stays in the backlog.
         self.assertEqual(p.edits, {3: Details()})
         self.assertEqual(p.new, [NewTask("new one", Details("", "2026-10-01", ("school",)))])
         out = self.out.getvalue()
@@ -245,7 +279,8 @@ class TestTerminalWelcome(TerminalCase):
         self.assertIn("[school, urgent]", prompts)
 
     def test_details_without_labels_yet(self):
-        self.script("e 1", "", "a note that runs on well past forty characters", "", "", "")
+        self.script("e 1", "", "a note that runs on well past forty characters", "", "",
+                    "t 1", "", "")
         p = ui.welcome([CARRIED])
         self.assertEqual(p.edits[1].notes, "a note that runs on well past forty characters")
         self.assertIn("Labels there are: none yet.", self.out.getvalue())
@@ -253,7 +288,7 @@ class TestTerminalWelcome(TerminalCase):
 
     def test_long_notes_are_shortened_in_the_prompt(self):
         many = ActiveTask(1, "t", 0, False, Details("line one\nline two"))
-        self.script("e 1", "", "", "", "", "")
+        self.script("e 1", "", "", "", "t 1", "", "")
         p = ui.welcome([many])
         self.assertEqual(p.edits, {})
         self.assertIn("[line one…]", self.prompts[2])

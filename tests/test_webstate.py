@@ -54,11 +54,40 @@ class TestState(unittest.TestCase):
         s.handle({"op": "add", "title": "   "})
         self.assertEqual(s.state()["rows"], [])
 
-    def test_status_counts_the_add_box(self):
+    def test_backlog_rows_start_unticked_and_typed_rows_ticked(self):
         s = screen([task(1, "a")])
-        self.assertEqual(s.state()["status"], "1 task this session.")
+        s.handle({"op": "add", "title": "typed"})
+        self.assertEqual([r["today"] for r in s.state()["rows"]], [False, True])
+
+    def test_status_counts_the_ticked_rows_and_the_add_box(self):
+        s = screen([task(1, "a")])
+        self.assertEqual(s.state()["status"], webstate.EMPTY_HINT)
+        s.handle({"op": "today", "index": 0})
+        self.assertEqual(s.state()["status"], "1 task for today.")
         s.handle({"op": "add_text", "text": "half typed"})
-        self.assertEqual(s.state()["status"], "2 tasks this session.")
+        self.assertEqual(s.state()["status"], "2 tasks for today.")
+
+    def test_ticking_twice_puts_a_row_back_in_the_backlog(self):
+        s = screen([task(1, "a")])
+        s.handle({"op": "today", "index": 0})
+        s.handle({"op": "today", "index": 0})
+        self.assertFalse(s.state()["rows"][0]["today"])
+        self.assertFalse(s.state()["start_enabled"])
+
+    def test_marking_unticks_and_ticking_unmarks(self):
+        s = screen([task(1, "a")])
+        s.handle({"op": "today", "index": 0})
+        s.handle({"op": "mark", "index": 0, "mark": "delete"})
+        row = s.state()["rows"][0]
+        self.assertEqual((row["mark"], row["today"], row["detail"]), ("delete", False, "will be deleted"))
+        s.handle({"op": "today", "index": 0})
+        row = s.state()["rows"][0]
+        self.assertEqual((row["mark"], row["today"]), (None, True))
+
+    def test_a_bad_row_number_is_ignored(self):
+        s = screen([task(1, "a")])
+        s.handle({"op": "today", "index": 5})
+        self.assertFalse(s.state()["rows"][0]["today"])
 
     def test_start_needs_a_task_but_the_box_counts(self):
         s = screen()
@@ -183,12 +212,13 @@ class TestSubmit(unittest.TestCase):
         return msg
 
     def test_a_plan_lands(self):
-        s = screen([task(1, "keep"), task(2, "drop"), task(3, "fin")])
+        s = screen([task(1, "today"), task(2, "drop"), task(3, "fin"), task(4, "later")])
+        s.handle({"op": "today", "index": 0})
         s.handle({"op": "mark", "index": 1, "mark": "delete"})
         s.handle({"op": "mark", "index": 2, "mark": "done"})
         s.handle(self.base(minutes="90"))
         self.assertIsNotNone(s.plan)
-        self.assertEqual(s.plan.keep, [1])
+        self.assertEqual(s.plan.today, [1])
         self.assertEqual(s.plan.delete, [2])
         self.assertEqual(s.plan.done, [3])
         self.assertEqual(s.plan.intended_minutes, 90)
@@ -207,17 +237,35 @@ class TestSubmit(unittest.TestCase):
 
     def test_bad_minutes_refuse_to_start(self):
         s = screen([task(1, "a")])
+        s.handle({"op": "today", "index": 0})
         s.handle(self.base(minutes="nope"))
         self.assertIsNone(s.plan)
         self.assertIn("whole number above zero", s.state()["error"])
 
     def test_blank_minutes_are_open_ended(self):
         s = screen([task(1, "a")])
+        s.handle({"op": "today", "index": 0})
         s.handle(self.base(minutes="  "))
         self.assertIsNone(s.plan.intended_minutes)
 
+    def test_unticked_rows_alone_refuse_to_start(self):
+        s = screen([task(1, "a")])
+        s.handle(self.base())
+        self.assertIsNone(s.plan)
+        self.assertEqual(s.state()["error"], webstate.EMPTY_HINT)
+
+    def test_a_typed_row_left_unticked_goes_to_the_backlog(self):
+        s = screen([task(1, "a")])
+        s.handle({"op": "today", "index": 0})
+        s.handle({"op": "add", "title": "later"})
+        s.handle({"op": "today", "index": 1})
+        s.handle(self.base())
+        self.assertEqual([t.title for t in s.plan.new_backlog], ["later"])
+        self.assertEqual(s.plan.new, [])
+
     def test_start_saves_an_open_panel_first(self):
         s = screen([task(1, "a")])
+        s.handle({"op": "today", "index": 0})
         s.handle({"op": "details_open", "index": 0})
         s.handle(self.base(details={"index": 0, "due": "today", "notes": "n",
                                     "labels": [], "pending": ""}))
@@ -238,6 +286,7 @@ class TestSubmit(unittest.TestCase):
         # values would undo its edit.
         t = task(1, "a", details=ui.Details("keep", "2026-09-20", ("x",)))
         s = screen([t])
+        s.handle({"op": "today", "index": 0})
         s.handle({"op": "details_open", "index": 0})
         s.handle({"op": "details_save", "index": 0, "due": "2026-09-20",
                   "notes": "keep", "labels": ["x"], "pending": ""})

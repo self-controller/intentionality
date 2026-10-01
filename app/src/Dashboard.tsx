@@ -1,18 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { Circle, CircleCheck, CircleDot, CircleX, type LucideIcon } from "lucide-react";
+import { BarGroup, BarMore, BarRow, Bars } from "@/components/Bars";
+import ListRow from "@/components/ListRow";
 import * as api from "./api";
-import { fmt, rankTitles, sessionLabel } from "./format";
-import { BarGroup, BarMore, BarRow, Bars } from "./ui/Bars";
+import { fmt, hhmm, rankTitles, sessionLabel } from "./format";
 import type { Observed, Session, Task } from "./types";
 
-const MARK: Record<string, string> = { done: "✓", dropped: "✗", planned: "·", doing: "▸" };
-// Literal utility strings, so Tailwind's scanner sees them: the status is
-// chosen at runtime. The glyph carries the meaning; colour reinforces it.
-const MARK_TEXT: Record<string, string> = {
-  done: "text-good",
-  dropped: "text-bad",
-  planned: "text-muted",
-  doing: "text-accent",
+// The icon carries the meaning; colour reinforces it. Literal utility
+// strings, so Tailwind's scanner sees them: the status is chosen at runtime.
+const MARK: Record<string, { icon: LucideIcon; cls: string; label: string }> = {
+  done: { icon: CircleCheck, cls: "text-good", label: "done" },
+  dropped: { icon: CircleX, cls: "text-destructive", label: "dropped" },
+  planned: { icon: Circle, cls: "text-muted-foreground", label: "not started" },
+  doing: { icon: CircleDot, cls: "text-warn", label: "in progress" },
 };
 
 const TOP_TITLES = 3;
@@ -85,70 +86,90 @@ export default function Dashboard() {
     });
 
   return (
-    <div className="flex items-start gap-4 p-4">
-      <aside className="flex w-[280px] flex-none flex-col gap-1.5">
+    <div className="flex items-start gap-8 px-6 py-6">
+      <aside className="flex max-h-[calc(100vh-104px)] w-[280px] flex-none flex-col gap-0.5 overflow-y-auto">
+        <h3 className="mb-1.5 px-3">Recent sessions</h3>
         {sessions.map((s) => (
-          <button
+          <ListRow
             key={s.id}
-            className={
-              "block w-full overflow-hidden text-ellipsis whitespace-nowrap rounded-md " +
-              "border px-2.5 py-1.5 text-left transition-colors duration-150 " +
-              (s.id === selected
-                ? "border-accent bg-accent text-bg"
-                : "border-line text-text hover:border-muted")
-            }
+            selected={s.id === selected}
+            className="flex items-center gap-2"
             onClick={() => setSelected(s.id)}
           >
-            <span className="opacity-60">#{s.id}</span> {sessionLabel(s)}
-            <span className="float-right text-xs opacity-60">{s.close_reason ?? "open"}</span>
-          </button>
+            <span className="flex-none font-mono text-[11px] text-muted-foreground">#{s.id}</span>
+            <span className="min-w-0 flex-1 truncate">{sessionLabel(s)}</span>
+            <span
+              className={
+                "flex-none font-mono text-[11px] " + (s.close_reason ? "text-muted-foreground" : "text-good")
+              }
+            >
+              {s.close_reason ?? "open"}
+            </span>
+          </ListRow>
         ))}
       </aside>
-      <section className="min-w-0 flex-1">
+      <section className="min-w-0 max-w-[760px] flex-1">
         {session && (
           <>
-            <h2>{sessionLabel(session)}</h2>
-            <p className="text-muted">
-              {new Date(session.started_at).toLocaleString()} ·{" "}
-              {session.intended_minutes != null ? `intended ${session.intended_minutes} min` : "open-ended"}
-              {session.ended_at == null && " · not closed"}
+            <p className="eyebrow">
+              Session #{session.id} · {session.ended_at == null ? "not closed" : session.close_reason ?? "closed"}
             </p>
-            <ul className="list-none p-0">
-              {tasks.map((t) => (
-                <li key={t.id} className="py-0.5">
-                  <span className={MARK_TEXT[t.status]}>{MARK[t.status]}</span> {t.title}
-                </li>
-              ))}
+            <h2 className="mt-2">{sessionLabel(session)}</h2>
+            <p className="mt-1.5 font-mono text-xs text-muted-foreground">
+              {new Date(session.started_at).toLocaleDateString()} {hhmm(session.started_at)}
+              {session.ended_at && `–${hhmm(session.ended_at)}`} ·{" "}
+              {session.intended_minutes != null ? `intended ${session.intended_minutes} min` : "open-ended"}
+            </p>
+            <ul className="surface mt-6 list-none divide-y divide-border p-0">
+              {tasks.map((t) => {
+                const mark = MARK[t.status];
+                const Icon = mark.icon;
+                return (
+                  <li key={t.id} className="flex items-center gap-3 px-4 py-2.5">
+                    <Icon className={"size-4 flex-none " + mark.cls} aria-label={mark.label} />
+                    <span className={t.status === "dropped" ? "text-muted-foreground line-through" : ""}>
+                      {t.title}
+                    </span>
+                  </li>
+                );
+              })}
+              {tasks.length === 0 && <li className="px-4 py-2.5 text-muted-foreground">No tasks.</li>}
             </ul>
-            <h3>Observed</h3>
-            {awError && <p className="text-muted">unavailable — {awError}</p>}
-            {observed && (
-              <>
-                <p className="text-muted">
-                  {fmt(observed.active_seconds)} active, {fmt(observed.afk_seconds)} away
-                </p>
-                <Bars>
-                  {apps.map(([app, secs]) => {
-                    const titles = titlesFor(app);
-                    const open = expanded.has(app);
-                    const shown = open ? titles : titles.slice(0, TOP_TITLES);
-                    return (
-                      <BarGroup key={app}>
-                        <BarRow label={app} value={fmt(secs)} pct={(secs / max) * 100} />
-                        {shown.map(([t, tsecs]) => (
-                          <BarRow key={t} label={t} value={fmt(tsecs)} pct={(tsecs / max) * 100} sub />
-                        ))}
-                        {titles.length > TOP_TITLES && (
-                          <BarMore onClick={() => toggle(app)}>
-                            {open ? "▾ show less" : `▸ +${titles.length - TOP_TITLES} more`}
-                          </BarMore>
-                        )}
-                      </BarGroup>
-                    );
-                  })}
-                </Bars>
-              </>
-            )}
+            <div className="surface mt-6 px-5 py-4">
+              <div className="mb-4 flex items-baseline justify-between gap-4">
+                <h3>Observed</h3>
+                {observed && (
+                  <p className="font-mono text-xs text-muted-foreground">
+                    {fmt(observed.active_seconds)} active · {fmt(observed.afk_seconds)} away
+                  </p>
+                )}
+              </div>
+              {awError && <p className="text-muted-foreground">unavailable — {awError}</p>}
+              {observed && (
+                <>
+                  <Bars>
+                    {apps.map(([app, secs]) => {
+                      const titles = titlesFor(app);
+                      const open = expanded.has(app);
+                      const shown = open ? titles : titles.slice(0, TOP_TITLES);
+                      return (
+                        <BarGroup key={app}>
+                          <BarRow label={app} value={fmt(secs)} pct={(secs / max) * 100} />
+                          {shown.map(([t, tsecs]) => (
+                            <BarRow key={t} label={t} value={fmt(tsecs)} pct={(tsecs / max) * 100} sub />
+                          ))}
+                          {titles.length > TOP_TITLES && (
+                            <BarMore onClick={() => toggle(app)}>
+                              {open ? "▾ show less" : `▸ +${titles.length - TOP_TITLES} more`}
+                            </BarMore>
+                          )}
+                        </BarGroup>
+                      );
+                    })}
+                  </Bars>
+                </>
+              )}
+            </div>
           </>
         )}
       </section>

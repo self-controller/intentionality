@@ -705,25 +705,29 @@ class EmptyPlan(ValueError):
 def commit_plan(
     conn: sqlite3.Connection,
     intended_minutes: int | None,
-    keep_ids: list[int],
+    today_ids: list[int],
     titles: list[str],
     done_ids: list[int] = (),
     delete_ids: list[int] = (),
     new_details: list = (),
     edits: dict | None = None,
+    backlog_titles: list[str] = (),
+    backlog_details: list = (),
 ) -> int:
     """Start a session from the welcome screen: finish, delete, pull, add.
 
     One transaction, so the screen's answer lands whole or not at all. The
-    session starts with the kept backlog tasks, in order, then the typed
-    ones. If that comes to nothing -- the desktop app pulled or deleted every
-    kept task while the gate was up, and nothing was typed -- EmptyPlan
-    rolls the lot back, done and deletes included.
+    session starts with the backlog tasks ticked for today, in order, then
+    the typed ones; every other backlog task stays where it is. If that
+    comes to nothing -- the desktop app pulled or deleted every ticked task
+    while the gate was up, and nothing typed was ticked -- EmptyPlan rolls
+    the lot back, done and deletes included.
 
-    `new_details` runs alongside `titles`; `edits` maps a kept task's id to
-    its changed details. A details value is anything with notes, due_date
-    and labels (ui.Details). An edit to a task that did not end up in this
-    session -- the app took it meanwhile -- is dropped with it.
+    `new_details` runs alongside `titles`; `edits` maps a backlog task's id
+    to its changed details, ticked or not. A details value is anything with
+    notes, due_date and labels (ui.Details). An edit to a task the app took
+    meanwhile is dropped with it. `backlog_titles`/`backlog_details` are
+    typed rows left unticked: they are created in the backlog.
     """
     with conn:
         for task_id in done_ids:
@@ -731,12 +735,18 @@ def commit_plan(
         for task_id in delete_ids:
             _delete_backlog_task(conn, task_id)
         session_id = create_session(conn, "", intended_minutes, "manual")
-        _pull_from_backlog(conn, session_id, keep_ids)
+        # Edits first, while every row is still in the backlog: a pulled row
+        # and a staying one take the same guard, and a row the app moved
+        # meanwhile fails it and is left alone.
         for task_id, details in (edits or {}).items():
-            _set_details(conn, task_id, session_id, details)
+            _set_details(conn, task_id, None, details)
+        _pull_from_backlog(conn, session_id, today_ids)
         new_ids = add_tasks(conn, session_id, titles)
         for task_id, details in zip(new_ids, new_details):
             _set_details(conn, task_id, session_id, details)
+        later_ids = add_tasks(conn, None, list(backlog_titles))
+        for task_id, details in zip(later_ids, backlog_details):
+            _set_details(conn, task_id, None, details)
         if conn.execute(
             "SELECT 1 FROM task WHERE session_id = ?", (session_id,)
         ).fetchone() is None:
@@ -855,12 +865,15 @@ def checkpoint_due(started_at: str, intended_minutes: int | None) -> str | None:
     return (start + timedelta(minutes=intended_minutes)).isoformat(timespec="seconds")
 
 
-def add_tasks(conn: sqlite3.Connection, session_id: int, titles: list[str]) -> list[int]:
-    """Insert the titles into the session, returning their ids in order."""
+def add_tasks(
+    conn: sqlite3.Connection, session_id: int | None, titles: list[str]
+) -> list[int]:
+    """Insert the titles into the session (None = the backlog), returning
+    their ids in order."""
     # Numbered after whatever the session already holds, so tasks added
     # after a pull land below the pulled ones.
     start = conn.execute(
-        "SELECT COALESCE(MAX(position), 0) FROM task WHERE session_id = ?",
+        "SELECT COALESCE(MAX(position), 0) FROM task WHERE session_id IS ?",
         (session_id,),
     ).fetchone()[0]
     created = now()

@@ -148,6 +148,7 @@ fn main() {
             commands::health,
             commands::get_board,
             commands::apply_board,
+            commands::order_backlog,
             commands::add_task,
             commands::create_task,
             commands::update_task,

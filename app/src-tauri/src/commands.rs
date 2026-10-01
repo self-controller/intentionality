@@ -58,6 +58,14 @@ pub fn apply_board(state: State<'_, AppState>, arrangement: Arrangement) -> Resu
     db::apply_board(&mut conn, session_id, &arrangement)
 }
 
+/// The backlog's order after a drag. No session needed: the backlog belongs
+/// to none.
+#[tauri::command]
+pub fn order_backlog(state: State<'_, AppState>, ids: Vec<i64>) -> Result<()> {
+    let mut conn = state.conn.lock().unwrap();
+    db::order_backlog(&mut conn, &ids)
+}
+
 #[tauri::command]
 pub fn add_task(state: State<'_, AppState>, title: String, to_backlog: bool) -> Result<i64> {
     let title = title.trim();
@@ -147,7 +155,7 @@ pub fn delete_label(state: State<'_, AppState>, name: String) -> Result<()> {
 #[tauri::command]
 pub fn delete_task(state: State<'_, AppState>, id: i64) -> Result<()> {
     let conn = state.conn.lock().unwrap();
-    db::delete_backlog_task(&conn, id)
+    db::delete_task(&conn, id)
 }
 
 #[tauri::command]

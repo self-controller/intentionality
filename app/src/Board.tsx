@@ -19,7 +19,7 @@ const KanbanBoard3D = lazy(() =>
 type Lane = "planned" | "doing" | "done" | "backlog";
 
 const LANES: { lane: Lane; label: string; token: string }[] = [
-  { lane: "planned", label: "To Do", token: "muted" },
+  { lane: "planned", label: "To Do", token: "muted-foreground" },
   { lane: "doing", label: "Doing", token: "warn" },
   { lane: "done", label: "Done", token: "good" },
   { lane: "backlog", label: "Backlog", token: "violet" },
@@ -48,41 +48,57 @@ const MOTION = {
 
 const NO_SESSION = "No open session — start one at the gate.";
 
-// theme.css is the one source of the palette; these are its values, used only
-// if Tailwind didn't emit a variable (it drops tokens nothing references).
+// app.css's :root is the one source of the palette; these are its values,
+// used only if a variable somehow isn't there (a stylesheet that failed to
+// load should not leave the board black-on-black).
 const FALLBACK: Record<string, string> = {
-  bg: "#343a40",
-  surface: "#212529",
-  raised: "#495057",
-  text: "#f8f9fa",
-  muted: "#adb5bd",
-  warn: "#e0af68",
-  bad: "#f7768e",
-  good: "#9ece6a",
-  violet: "#bb9af7",
+  foreground: "#f5f5f5",
+  "muted-foreground": "#818181",
+  warn: "#fcbb00",
+  destructive: "#fb414a",
+  good: "#00d294",
+  violet: "#c27aff",
+  "board-panel": "#121212",
+  "board-card": "#1c1c1c",
+  "board-edge": "#0a0a0a",
 };
 
 function token(name: string) {
-  const v = getComputedStyle(document.documentElement).getPropertyValue(`--color-${name}`).trim();
+  const v = getComputedStyle(document.documentElement).getPropertyValue(`--${name}`).trim();
   return v || FALLBACK[name];
 }
 
-// The canvas draws its own text, so it is handed the page's font stack (theme.css
-// sets none: this is Tailwind's default sans) and the page's greys.
+// The canvas draws its own text, so it is handed the page's font stack (Geist,
+// from app.css) and the page's greys. The board's three surfaces are opaque
+// tokens of their own: three.js colours take no alpha.
 function boardTheme(): Partial<KanbanTheme> {
   return {
     fontFamily: getComputedStyle(document.body).fontFamily,
-    panel: token("surface"),
-    headerText: token("text"),
-    headerBadge: "rgba(255,255,255,0.1)",
-    headerBadgeText: token("muted"),
-    cardFace: token("raised"),
-    cardText: token("text"),
-    cardMuted: token("muted"),
-    cardEdge: token("bg"),
+    panel: token("board-panel"),
+    headerText: token("foreground"),
+    headerBadge: "rgba(255,255,255,0.06)",
+    headerBadgeText: token("muted-foreground"),
+    cardFace: token("board-card"),
+    cardText: token("foreground"),
+    cardMuted: token("muted-foreground"),
+    cardEdge: token("board-edge"),
     highlight: 0.035,
   };
 }
+
+// The board paints card text onto canvases once, with whatever font is ready
+// at that moment, and never repaints for a font arriving later -- so it waits
+// for Geist. Never for long: a font that fails to load must not blank the
+// board, it just means the fallback face. Started at import, so the wait is
+// usually already over by the time the Board tab mounts.
+const GEIST = '"Geist Variable"';
+const fontsReady: Promise<void> = Promise.race([
+  Promise.all([document.fonts.load(`500 16px ${GEIST}`), document.fonts.load(`700 16px ${GEIST}`)]).then(
+    () => {},
+    () => {},
+  ),
+  new Promise<void>((resolve) => setTimeout(resolve, 1500)),
+]);
 
 // The canvas colours for what a card's footer says, read once from the theme.
 type Palette = { muted: string; warn: string; bad: string };
@@ -150,6 +166,13 @@ function moved(tasks: Task[], task: Task, target: Status, index: number): Task[]
   return [...lanes.planned, ...lanes.doing, ...lanes.done, ...lanes.dropped];
 }
 
+// The same rule for the backlog, which is one list rather than lanes.
+function reordered(backlog: Task[], task: Task, index: number): Task[] {
+  const rest = byPriority(backlog.filter((t) => t.id !== task.id));
+  rest.splice(index, 0, task);
+  return byPriority(rest);
+}
+
 function arrangement(tasks: Task[]) {
   const ids = (s: Status) => tasks.filter((t) => t.status === s).map((t) => t.id);
   return { todo: ids("planned"), doing: ids("doing"), done: ids("done"), dropped: ids("dropped") };
@@ -170,6 +193,15 @@ function place(id: number, status: Status, index = Infinity) {
   });
 }
 
+// The same for a card just sent back to the backlog, which lands at its end.
+function placeInBacklog(id: number, index: number) {
+  return api.getBoard().then((b) => {
+    const task = b.backlog.find((t) => t.id === id);
+    if (!task) return;
+    return api.orderBacklog(reordered(b.backlog, task, index).map((t) => t.id));
+  });
+}
+
 export default function Board() {
   const [board, setBoard] = useState<BoardData | null>(null);
   const [open, setOpen] = useState<Open | null>(null);
@@ -182,7 +214,19 @@ export default function Board() {
   // Read once: the board takes its theme on mount only.
   const theme = useMemo(boardTheme, []);
   const laneColors = useMemo(() => Object.fromEntries(LANES.map((l) => [l.lane, token(l.token)])), []);
-  const palette = useMemo<Palette>(() => ({ muted: token("muted"), warn: token("warn"), bad: token("bad") }), []);
+  const palette = useMemo<Palette>(
+    () => ({ muted: token("muted-foreground"), warn: token("warn"), bad: token("destructive") }),
+    [],
+  );
+  // Checked synchronously too, so coming back to the tab doesn't blink.
+  const [fontReady, setFontReady] = useState(() => document.fonts.check(`500 16px ${GEIST}`));
+  useEffect(() => {
+    let live = true;
+    fontsReady.then(() => live && setFontReady(true));
+    return () => {
+      live = false;
+    };
+  }, []);
 
   // The local day, so a card catches fire at midnight (and one due yesterday
   // goes out) without a reload. Polled rather than timed to midnight: a
@@ -223,7 +267,7 @@ export default function Board() {
     }));
   }, [board, laneColors, palette, today]);
 
-  if (err) return <div className="p-12 text-center text-muted">{err}</div>;
+  if (err) return <div className="p-12 text-center text-muted-foreground">{err}</div>;
   if (!board) return null;
 
   const session = board.session;
@@ -236,7 +280,7 @@ export default function Board() {
   };
   // The board already shows the drop; handing it the unchanged data puts the
   // card back.
-  const refuse = (why: string | null) => {
+  const refuse = (why: string) => {
     setNotice(why);
     setBoard({ ...board });
   };
@@ -254,17 +298,27 @@ export default function Board() {
         setBoard({
           ...board,
           tasks: board.tasks.filter((t) => t.id !== taskId),
-          backlog: [...board.backlog, { ...onBoard, session_id: null, status: "planned" }],
+          backlog: reordered(board.backlog, { ...onBoard, session_id: null, status: "planned" }, e.toIndex),
         });
-        api.unpullTask(taskId).then(refresh).catch(fail);
+        // An unpull lands at the end of the backlog; the second write puts
+        // it where it was dropped.
+        api
+          .unpullTask(taskId)
+          .then(() => placeInBacklog(taskId, e.toIndex))
+          .then(refresh)
+          .catch(fail);
         return;
       }
       const next = moved(board.tasks, onBoard, target, e.toIndex);
       setBoard({ ...board, tasks: next });
       api.applyBoard(arrangement(next)).then(refresh).catch(fail);
     } else if (inBacklog) {
-      // The backlog's order isn't stored, so a reorder inside it can't stick.
-      if (target === "backlog") return refuse(null);
+      if (target === "backlog") {
+        const next = reordered(board.backlog, inBacklog, e.toIndex);
+        setBoard({ ...board, backlog: next });
+        api.orderBacklog(next.map((t) => t.id)).then(refresh).catch(fail);
+        return;
+      }
       if (!session) return refuse(NO_SESSION);
       setBoard({
         ...board,
@@ -313,56 +367,52 @@ export default function Board() {
   };
 
   return (
-    <div className="flex flex-1 flex-col p-4">
-      {notice && <p className="mb-3 text-[13px] text-warn">{notice}</p>}
-      {session && (session.statement || session.intended_minutes != null) && (
-        <div className="mb-3 flex items-center gap-2.5">
-          {/* Sessions committed since the gate stopped asking have no
-              statement; the columns below are the intention. */}
-          {session.statement && <strong>{session.statement}</strong>}
-          {session.intended_minutes != null && (
-            <span className="text-muted">
-              {session.statement ? " · " : ""}
-              intended {session.intended_minutes} min
-            </span>
-          )}
-        </div>
-      )}
-      {/* Says why only the Backlog has a "+". */}
-      {!session && <p className="mb-3 text-xs text-muted">{NO_SESSION}</p>}
-
+    <div className="flex flex-1 flex-col">
       {/* The board fills this box, so it needs a definite size: absolute
-          inset-0 gets one from the flex-grown wrapper. */}
+          inset-0 gets one from the flex-grown wrapper. Nothing sits above it:
+          the board is the whole screen under the nav, and the two things
+          worth saying float over its top-left corner instead of taking a row. */}
       <div className="relative min-h-[360px] flex-1">
+        <div className="pointer-events-none absolute left-4 top-3 z-[5] flex flex-col items-start gap-2">
+          {notice && (
+            <p className="rounded-md border border-warn/20 bg-warn/10 px-3 py-1.5 text-[13px] text-warn backdrop-blur">
+              {notice}
+            </p>
+          )}
+          {/* Says why only the Backlog has a "+". */}
+          {!session && <p className="text-xs text-muted-foreground">{NO_SESSION}</p>}
+        </div>
         <Suspense fallback={null}>
-          <KanbanBoard3D
-            // As a style, not a class: the component's own inline
-            // `position: relative` would override an `absolute` class, and the
-            // box would then size itself from the canvas instead of filling in.
-            style={FILL}
-            columns={columns}
-            theme={theme}
-            // Near overhead, so the board faces the user with just a hint of
-            // depth. A narrow fov (a longer lens, further away) keeps the
-            // columns from fanning out. No framing margin lets the board use
-            // the box.
-            cameraAngle={75}
-            fov={20}
-            framePadding={1.0}
-            // Room above the first card for the column title.
-            layout={LAYOUT}
-            motion={MOTION}
-            overflow="scroll"
-            // Columns lengthen until the board fills the box's height too.
-            fillHeight
-            addButtons
-            onAddClick={(id) => onAddClick(id as Lane)}
-            onCardMove={onCardMove}
-            onCardClick={onCardClick}
-            ref={boardRef}
-            onFocusArrive={() => setOpen((o) => o && { ...o, shown: true })}
-            onFocusClose={() => setOpen(null)}
-          />
+          {fontReady && (
+            <KanbanBoard3D
+              // As a style, not a class: the component's own inline
+              // `position: relative` would override an `absolute` class, and the
+              // box would then size itself from the canvas instead of filling in.
+              style={FILL}
+              columns={columns}
+              theme={theme}
+              // Near overhead, so the board faces the user with just a hint of
+              // depth. A narrow fov (a longer lens, further away) keeps the
+              // columns from fanning out. No framing margin lets the board use
+              // the box.
+              cameraAngle={85}
+              fov={20}
+              framePadding={1.0}
+              // Room above the first card for the column title.
+              layout={LAYOUT}
+              motion={MOTION}
+              overflow="scroll"
+              // Columns lengthen until the board fills the box's height too.
+              fillHeight
+              addButtons
+              onAddClick={(id) => onAddClick(id as Lane)}
+              onCardMove={onCardMove}
+              onCardClick={onCardClick}
+              ref={boardRef}
+              onFocusArrive={() => setOpen((o) => o && { ...o, shown: true })}
+              onFocusClose={() => setOpen(null)}
+            />
+          )}
         </Suspense>
 
         {open && (
@@ -399,21 +449,15 @@ export default function Board() {
                 }
                 onClose={cancel}
                 onLabelsChanged={refresh}
-                // A backlog row can be deleted; a session card is history.
-                onDelete={
-                  open.task.session_id == null
-                    ? () => {
-                        const id = open.task.id;
-                        api
-                          .deleteTask(id)
-                          .then(() => {
-                            leave();
-                            boardRef.current?.closeCard({ remove: true });
-                            refresh();
-                          })
-                          .catch(fail);
-                      }
-                    : null
+                // Any card on this board can be deleted outright, backlog or
+                // session (the editor asks first).
+                // A refusal (its session closed meanwhile) stays in the editor.
+                onDelete={() =>
+                  api.deleteTask(open.task.id).then(() => {
+                    leave();
+                    boardRef.current?.closeCard({ remove: true });
+                    refresh();
+                  })
                 }
               />
             )}

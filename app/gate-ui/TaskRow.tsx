@@ -5,32 +5,27 @@ import type { Row } from "./types";
 
 /** One task on the welcome screen.
  *
- *  The checkbox is the keep/drop control: ticked means this task comes with
- *  you into the session, unticked means it is struck through and deleted when
- *  you start. That replaces the old Delete/Remove/Undo buttons entirely --
- *  unticking is the delete and reticking is the undo. "Done" stays a separate
- *  button because it means something else: the carried original is resolved. */
+ *  The checkbox says where the task goes: ticked means it is on today's
+ *  board (To Do) when you start, unticked means it stays in the backlog.
+ *  Delete is its own button and means what it says -- the task is struck
+ *  through and removed for good when you start; pressing it again is the
+ *  undo. "Done" is separate again: it resolves the carried original. */
 export default function TaskRow({ row, open }: { row: Row; open: boolean }) {
   const marked = row.mark !== null;
-
-  const setChecked = (next: boolean) => {
-    // toggle() undoes a mark when it is sent the mark the row already has.
-    post("mark", { index: row.index, mark: next ? row.mark : "delete" });
-  };
 
   return (
     <li className="flex items-start gap-[0.75em] py-[0.45em]">
       <Checkbox
         size="2.1em"
-        checked={!marked}
-        onChange={setChecked}
-        label={marked ? `Keep ${row.title}` : `Drop ${row.title}`}
+        checked={row.today}
+        onChange={() => post("today", { index: row.index })}
+        label={row.today ? `Move ${row.title} back to the backlog` : `Do ${row.title} today`}
       />
       <div className="min-w-0 flex-1 pt-[0.25em]">
         <p
           className={
             "truncate text-[1.05em] leading-snug transition-colors duration-200 " +
-            (marked ? "text-muted line-through" : "text-text")
+            (marked ? "text-muted line-through" : row.today ? "text-text" : "text-muted")
           }
           title={row.title}
         >
@@ -53,6 +48,12 @@ export default function TaskRow({ row, open }: { row: Row; open: boolean }) {
           className={open ? "!border-accent !text-accent" : ""}
         >
           Details
+        </Button>
+        <Button
+          onClick={() => post("mark", { index: row.index, mark: "delete" })}
+          className={row.mark === "delete" ? "!border-bad !text-bad" : "hover:!text-bad"}
+        >
+          {row.mark === "delete" ? "Undo" : "Delete"}
         </Button>
       </div>
     </li>

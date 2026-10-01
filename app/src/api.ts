@@ -20,6 +20,8 @@ import type {
 export const health = () => invoke<Health>("health");
 export const getBoard = () => invoke<Board>("get_board");
 export const applyBoard = (arrangement: Arrangement) => invoke<void>("apply_board", { arrangement });
+// The backlog's ids, top to bottom.
+export const orderBacklog = (ids: number[]) => invoke<void>("order_backlog", { ids });
 export const addTask = (title: string, toBacklog: boolean) =>
   invoke<number>("add_task", { title, toBacklog });
 // A new card with the editor's details, written in one go.

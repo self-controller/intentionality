@@ -1,8 +1,12 @@
 import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { FileText, Loader, Mic, NotebookPen, Paperclip, Plus, RotateCw, ScrollText, Sparkles, Square, Trash2, X } from "lucide-react";
+import ListRow from "@/components/ListRow";
+import { SegmentList, SegmentTrigger } from "@/components/SegmentTabs";
+import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { LevelBars, type LevelBarsHandle } from "./LevelBars";
 import Checkbox from "./ui/Checkbox";
-import { Button, SectionHeading, Tab as TabButton } from "./ui/primitives";
 import * as api from "./api";
 import { dayKey, dayLabel, fmt, hhmm, size } from "./format";
 import type {
@@ -20,7 +24,7 @@ const LazyMarkdown = lazy(() => import("./Markdown"));
 
 function Markdown({ source }: { source: string }) {
   return (
-    <Suspense fallback={<p className="text-muted">Loading…</p>}>
+    <Suspense fallback={<p className="text-muted-foreground">Loading…</p>}>
       <LazyMarkdown source={source} />
     </Suspense>
   );
@@ -45,10 +49,10 @@ function Elapsed({ since }: { since: string }) {
 }
 
 const KIND_DOT: Record<string, string> = {
-  pdf: "bg-bad",
+  pdf: "bg-destructive",
   image: "bg-good",
   office: "bg-warn",
-  text: "bg-accent",
+  text: "bg-info",
 };
 
 /// The chosen microphone, remembered across restarts. The node *name* is what
@@ -573,13 +577,13 @@ export default function Meetings() {
   let lastDay = "";
 
   return (
-    <div className="flex items-start gap-4 p-4">
-      <aside className="flex max-h-[calc(100vh-90px)] w-[280px] flex-none flex-col gap-1.5 overflow-y-auto">
-        <div className="mb-2.5 flex flex-col gap-2">
+    <div className="flex items-start gap-8 px-6 py-6">
+      <aside className="flex max-h-[calc(100vh-104px)] w-[280px] flex-none flex-col gap-0.5 overflow-y-auto">
+        <div className="mb-3 flex flex-col gap-2">
           {/* Disabled while recording: pw-record is given its source when it
               is spawned, so changing this mid-meeting could only mislead. */}
           <select
-            className="w-full rounded-md border border-line bg-surface px-2 py-1.5 text-xs text-text"
+            className="text-xs"
             value={source?.target ?? ""}
             onChange={(e) => chooseSource(e.target.value)}
             disabled={live || busy}
@@ -603,75 +607,64 @@ export default function Meetings() {
               its place) is covered by `stopping`, which is set before the
               round trip and cleared only once the reloaded list has landed. */}
           {live ? (
-            <button className="w-full rounded-md border border-bad p-2.5 text-sm text-bad transition-colors hover:brightness-110 disabled:opacity-40" onClick={stop} disabled={busy || attaching}>
-              ■ Stop transcribing
-            </button>
+            <Button variant="destructive" size="lg" className="w-full" onClick={stop} disabled={busy || attaching}>
+              <Square className="fill-current" />
+              Stop transcribing
+            </Button>
           ) : (
-            <button className="w-full rounded-md border border-line p-2.5 text-sm transition-colors hover:border-muted disabled:opacity-40 disabled:hover:border-line" onClick={start} disabled={busy || !canRecord}>
-              ● Start transcribing
-            </button>
+            <Button size="lg" className="w-full" onClick={start} disabled={busy || !canRecord}>
+              <Mic />
+              Start transcribing
+            </Button>
           )}
           {notesPending && (
             // Which meeting, when it is not the one on screen, and how many
             // when several are queued — the model calls are serialized, so a
             // second wrap-up genuinely waits for the first.
-            <div className="text-xs text-muted">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Loader className="size-3 animate-spin" />
               Writing the notes…
               {wrapUpCount > 1 && ` (${wrapUpCount} meetings)`}
             </div>
           )}
           {live && (
-            <div className="flex items-center gap-2 text-[13px] text-bad">
-              <span className="rec-dot" /> recording {since ? <Elapsed since={since} /> : fmt(0)}
+            <div className="flex items-center gap-2 text-[13px] text-destructive">
+              <span className="rec-dot" /> recording
+              <span className="font-mono tabular-nums">{since ? <Elapsed since={since} /> : fmt(0)}</span>
             </div>
           )}
           {/* The record indicator above stays the source of truth for whether
               the microphone is open. This only ever says what it is hearing. */}
           <LevelBars ref={meter} active={live} />
         </div>
-        {sourceNote && <p className="m-0 text-xs text-muted">{sourceNote}</p>}
-        {error && <p className="m-0 whitespace-pre-line text-xs text-bad">{error}</p>}
-        {items.length === 0 && <p className="text-muted">No meetings yet.</p>}
+        {sourceNote && <p className="m-0 text-xs text-muted-foreground">{sourceNote}</p>}
+        {error && <p className="m-0 whitespace-pre-line text-xs text-destructive">{error}</p>}
+        {items.length === 0 && <p className="text-muted-foreground">No meetings yet.</p>}
         {items.map((m) => {
           const day = dayKey(m.started_at);
           const header = day !== lastDay ? ((lastDay = day), dayLabel(m.started_at)) : null;
           return (
             <div key={m.id}>
-              {header && <div className="mb-1 mt-3.5 text-[13px] uppercase tracking-[0.06em] text-muted">{header}</div>}
-              <button
-                className={
-                  "flex w-full flex-col gap-0.5 rounded-md border px-2.5 py-1.5 " +
-                  "text-left transition-colors duration-150 " +
-                  // On the accent fill every child inherits the dark text: a
-                  // muted grey or a state colour on cyan is unreadable.
-                  (selected === m.id
-                    ? "border-accent bg-accent text-bg"
-                    : "border-line text-text hover:border-muted")
-                }
-                onClick={() => load(m.id)}
-              >
+              {header && <h3 className="mb-1.5 mt-5 px-3">{header}</h3>}
+              <ListRow selected={selected === m.id} className="flex flex-col gap-0.5" onClick={() => load(m.id)}>
                 <span className="overflow-hidden text-ellipsis whitespace-nowrap">
                   {m.title || (m.state === "recording" ? "Recording…" : "Untitled meeting")}
                 </span>
-                <span className={"text-xs " + (selected === m.id ? "opacity-70" : "text-muted")}>
+                <span className="font-mono text-[11px] text-muted-foreground">
                   {hhmm(m.started_at)}
-                  {m.state === "failed" && (
-                    <span className={selected === m.id ? "" : "text-bad"}> · notes failed</span>
-                  )}
+                  {m.state === "failed" && <span className="text-destructive"> · notes failed</span>}
                   {m.state === "summarizing" && <span> · summarizing…</span>}
                   {m.state === "done" && !m.has_summary && <span> · no notes yet</span>}
-                  {live && m.id === recording && (
-                    <span className={selected === m.id ? "" : "text-bad"}> · live</span>
-                  )}
+                  {live && m.id === recording && <span className="text-destructive"> · live</span>}
                 </span>
-              </button>
+              </ListRow>
             </div>
           );
         })}
       </aside>
 
       <div className="min-w-0 max-w-[1040px] flex-1 [&_section]:mt-5 [&_p]:max-w-[60ch]">
-        {!detail && <p className="text-muted">Select a meeting.</p>}
+        {!detail && <p className="text-muted-foreground">Select a meeting.</p>}
         {/* Keyed by meeting, so the tab and the editor reset on a switch but
             survive the two-minute `refresh` replacements of `detail` for the
             same meeting. */}
@@ -818,26 +811,29 @@ function Detail({
   const writeControls = confirm ? (
     <>
       <span className="text-xs text-warn">This replaces the document you edited.</span>
-      <button onClick={rerun} disabled={busy}>
+      <Button variant="destructive" size="sm" onClick={rerun} disabled={busy}>
         Re-run anyway
-      </button>
-      <button onClick={() => setConfirm(false)}>Keep it</button>
+      </Button>
+      <Button variant="outline" size="sm" onClick={() => setConfirm(false)}>
+        Keep it
+      </Button>
     </>
   ) : (
     <Button
-      tone={detail.summary ? "ghost" : "primary"}
+      variant={detail.summary ? "outline" : "primary"}
       onClick={() => (edited ? setConfirm(true) : rerun())}
       disabled={busy}
     >
+      {detail.summary ? <RotateCw /> : <Sparkles />}
       {detail.summary ? "Re-run notes" : "Write notes"}
     </Button>
   );
 
   const notesPane = (
     <section className="max-w-[68ch]">
-      <h3>My notes</h3>
+      <h3 className="mb-2">My notes</h3>
       <textarea
-        className="min-h-[220px] w-full resize-y rounded-md border border-line bg-surface px-2.5 py-2 text-sm leading-relaxed text-text outline-none transition-colors focus:border-accent read-only:text-muted"
+        className="min-h-[220px] resize-y px-3 py-2.5 text-sm leading-relaxed read-only:text-muted-foreground"
         value={notesDraft}
         onChange={(e) => onEditNotes(e.target.value)}
         onBlur={onBlurNotes}
@@ -849,39 +845,40 @@ function Detail({
 
   const filesPane = (
     <section className="max-w-[68ch]">
-      <h3>Context files</h3>
+      <h3 className="mb-2">Context files</h3>
       {files.length > 0 && (
         <ul className="m-0 mb-2 flex list-none flex-wrap gap-1.5 p-0">
           {files.map((f) => (
             <li
               key={f.id}
-              className="flex max-w-full items-center gap-1.5 rounded-full border border-line bg-raised py-1 pl-2 pr-1 text-xs"
+              className="flex max-w-full items-center gap-1.5 rounded-full border border-border bg-secondary py-1 pl-2.5 pr-1 text-xs"
             >
               {/* A dot per kind, as a real element rather than ::before, so the
                   colour can be a literal class the scanner sees. */}
-              <span className={"h-1.5 w-1.5 flex-none rounded-full " + (KIND_DOT[f.kind] ?? "bg-muted")} />
+              <span className={"h-1.5 w-1.5 flex-none rounded-full " + (KIND_DOT[f.kind] ?? "bg-muted-foreground")} />
               <span className="max-w-[26ch] overflow-hidden text-ellipsis whitespace-nowrap" title={f.name}>
                 {f.name}
               </span>
-              <span className="text-muted">{size(f.bytes)}</span>
+              <span className="font-mono text-[11px] text-muted-foreground">{size(f.bytes)}</span>
               <button
-                className="border-none px-1 text-sm leading-none text-muted transition-colors hover:enabled:text-bad disabled:text-line"
+                className="flex size-5 items-center justify-center rounded-full text-muted-foreground transition-colors hover:enabled:bg-accent hover:enabled:text-destructive disabled:opacity-40"
                 onClick={() => onDetach(f.id)}
                 disabled={busy || attaching || running}
                 aria-label={`Remove ${f.name}`}
               >
-                ×
+                <X className="size-3" />
               </button>
             </li>
           ))}
         </ul>
       )}
-      <button onClick={onAttach} disabled={busy || attaching || running}>
+      <Button variant="outline" size="sm" onClick={onAttach} disabled={busy || attaching || running}>
+        <Paperclip />
         {attaching ? "Working…" : "Add files"}
-      </button>
+      </Button>
       {/* Said plainly and next to the control, because it is the one thing
           here that leaves the machine. */}
-      <p className="mt-1.5 max-w-[60ch] text-xs text-muted">
+      <p className="mt-2 max-w-[60ch] text-xs text-muted-foreground">
         Text, code, PDFs, images and Office files. Their contents are sent to
         Anthropic when the notes are written.
       </p>
@@ -893,11 +890,11 @@ function Detail({
   // exactly the text Write notes sends.
   const transcriptPane = (
     <section>
-      <h3>Transcript</h3>
+      <h3 className="mb-2">Transcript</h3>
       {capturing ? (
         <>
           {segments.length === 0 && (
-            <p className="text-muted">
+            <p className="text-muted-foreground">
               {isRecording ? "Listening — the first block lands after two minutes." : "Finishing the last block…"}
             </p>
           )}
@@ -905,26 +902,26 @@ function Detail({
             {segments.map((s) =>
               s.text ? (
                 <p key={s.id}>
-                  <span className="mr-2 text-xs text-muted">{hhmm(s.started_at)}</span> {s.text}
+                  <span className="mr-2 font-mono text-[11px] text-muted-foreground">{hhmm(s.started_at)}</span> {s.text}
                 </p>
               ) : (
                 // A visible gap, not a silent one: a chunk that failed to
                 // transcribe is two minutes the notes will never see — unless
                 // it is typed back in once the meeting has stopped.
-                <p key={s.id} className="my-2 text-xs text-muted">
-                  <span className="mr-2">{hhmm(s.started_at)}</span> (this stretch could not be transcribed)
+                <p key={s.id} className="my-2 text-xs text-muted-foreground">
+                  <span className="mr-2 font-mono text-[11px]">{hhmm(s.started_at)}</span> (this stretch could not be transcribed)
                 </p>
               ),
             )}
           </div>
           {!isRecording && segments.length > 0 && (
-            <p className="text-xs text-muted">Finishing the last block…</p>
+            <p className="text-xs text-muted-foreground">Finishing the last block…</p>
           )}
         </>
       ) : (
         <>
           {!running && (
-            <p className="my-1.5 text-xs text-muted">
+            <p className="mb-2.5 text-xs text-muted-foreground">
               Fix names and mis-heard words, then write the notes.
             </p>
           )}
@@ -935,7 +932,7 @@ function Detail({
             </p>
           )}
           <textarea
-            className="min-h-[60vh] w-full max-w-[80ch] resize-y rounded-md border border-line bg-surface px-3 py-2.5 text-sm leading-relaxed text-text outline-none transition-colors focus:border-accent read-only:text-muted"
+            className="min-h-[60vh] max-w-[80ch] resize-y px-3.5 py-3 text-sm leading-relaxed read-only:text-muted-foreground"
             value={transcriptDraft}
             onChange={(e) => onEditTranscript(e.target.value)}
             onBlur={onBlurTranscript}
@@ -957,21 +954,21 @@ function Detail({
       <div className="flex items-center gap-2.5">
         <h3>Summary</h3>
         {finished && !editing && (
-          <button className="border-none bg-transparent p-0 text-accent underline decoration-dotted hover:text-muted" onClick={beginEdit} disabled={busy}>
+          <Button mode="link" underlined="dashed" size="sm" onClick={beginEdit} disabled={busy}>
             Edit
-          </button>
+          </Button>
         )}
         {editing && (
-          <button className="border-none bg-transparent p-0 text-accent underline decoration-dotted hover:text-muted" onClick={endEdit} disabled={busy}>
+          <Button mode="link" underlined="dashed" size="sm" onClick={endEdit} disabled={busy}>
             Done
-          </button>
+          </Button>
         )}
         {!editing && detail.summary_edited_at != null && (
-          <span className="text-xs italic text-muted">edited by you</span>
+          <span className="font-mono text-[11px] text-muted-foreground">edited by you</span>
         )}
       </div>
       {stale && finished && !editing && (
-        <p className="my-1.5 text-xs text-warn">
+        <p className="mt-2 text-xs text-warn">
           Written before the transcript changed. Re-run notes to rebuild it
           from the current text.
         </p>
@@ -979,42 +976,41 @@ function Detail({
       {editing ? (
         <>
           <textarea
-            className="min-h-[260px] w-full resize-y rounded-md border border-line bg-surface px-2.5 py-2 font-mono text-[13px] leading-relaxed text-text outline-none transition-colors focus:border-accent [tab-size:2]"
+            className="mt-3 min-h-[260px] resize-y px-3 py-2.5 font-mono text-[13px] leading-relaxed [tab-size:2]"
             value={summaryDraft}
             onChange={(e) => onEditSummary(e.target.value)}
             spellCheck={false}
             autoFocus
           />
-          <p className="mt-1.5 max-w-[60ch] text-xs text-muted">
+          <p className="mt-2 max-w-[60ch] text-xs text-muted-foreground">
             Markdown. Code goes in ``` fences with a language; maths in $…$ inline
             or $$…$$ on its own lines.
           </p>
-          <div className="mt-3 border-t border-line pt-3">
-            <p className="text-muted">Preview</p>
+          <div className="mt-4 border-t border-border pt-4">
+            <p className="eyebrow mb-3">Preview</p>
             {previewSource.trim() ? (
               <Markdown source={previewSource} />
             ) : (
-              <p className="text-muted">Nothing to show yet.</p>
+              <p className="text-muted-foreground">Nothing to show yet.</p>
             )}
           </div>
         </>
       ) : detail.summary ? (
-        <Markdown source={detail.summary} />
+        <div className="mt-3">
+          <Markdown source={detail.summary} />
+        </div>
       ) : (
         !running &&
         (finished ? (
-          <p className="text-muted">
+          <p className="mt-3 text-muted-foreground">
             No notes yet —{" "}
-            <button
-              className="border-none bg-transparent p-0 text-accent underline decoration-dotted hover:text-muted"
-              onClick={() => setTab("transcript")}
-            >
+            <Button mode="link" underlined="dashed" className="text-sm" onClick={() => setTab("transcript")}>
               review the transcript
-            </button>
+            </Button>
             , then write them.
           </p>
         ) : (
-          <p className="text-muted">No notes yet.</p>
+          <p className="mt-3 text-muted-foreground">No notes yet.</p>
         ))
       )}
     </section>
@@ -1022,7 +1018,7 @@ function Detail({
 
   const actionsPane = actions.length > 0 && (
     <section>
-      <SectionHeading className="mb-2 mt-4">Action items</SectionHeading>
+      <h3 className="mb-2 mt-6">Action items</h3>
       {pending.map((a) => (
         // The whole row is the label, so the text is part of the hit target.
         <label
@@ -1034,17 +1030,18 @@ function Detail({
         </label>
       ))}
       {pending.length > 0 && (
-        <Button tone="primary" className="mt-3" onClick={onApprove} disabled={busy || ticked.size === 0}>
+        <Button className="mt-3" onClick={onApprove} disabled={busy || ticked.size === 0}>
+          <Plus />
           Add {ticked.size} to backlog
         </Button>
       )}
       {approved.map((a) => (
-        <div key={a.id} className="flex max-w-[60ch] items-center gap-2.5 py-1 text-muted">
+        <div key={a.id} className="flex max-w-[60ch] items-center gap-2.5 py-1 text-muted-foreground">
           {/* Already a task: the same control, ticked and inert. */}
           <Checkbox size={26} checked disabled label={`${a.text} — already in the backlog`} />
           <span className="min-w-0 flex-1">
             {a.text}
-            <span className="text-muted"> · in the backlog</span>
+            <span className="text-muted-foreground"> · in the backlog</span>
           </span>
         </div>
       ))}
@@ -1056,9 +1053,10 @@ function Detail({
   const finishedRow = finished && (
     <div className="mt-5 flex flex-wrap items-center gap-2">
       {!confirm && (
-        <button onClick={onResume} disabled={busy || !canRecord}>
-          ● Resume transcribing
-        </button>
+        <Button variant="outline" onClick={onResume} disabled={busy || !canRecord}>
+          <Mic />
+          Resume transcribing
+        </Button>
       )}
       {writeControls}
     </div>
@@ -1067,7 +1065,7 @@ function Detail({
   return (
     <>
       <h2>{meeting.title || (isRecording ? "Recording…" : "Untitled meeting")}</h2>
-      <p className="text-muted">
+      <p className="mt-1.5 font-mono text-xs text-muted-foreground">
         {hhmm(meeting.started_at)}
         {meeting.ended_at ? `–${hhmm(meeting.ended_at)}` : ""} · {meeting.segment_count} segment
         {meeting.segment_count === 1 ? "" : "s"}
@@ -1088,45 +1086,49 @@ function Detail({
           </div>
         </div>
       ) : (
-        <>
-          <nav className="mt-3.5 flex gap-2 border-b border-line pb-2.5">
-            <TabButton active={tab === "summary"} onClick={() => setTab("summary")}>
+        <Tabs value={tab} onValueChange={(v) => setTab(v as Tab)} className="mt-5">
+          <SegmentList>
+            <SegmentTrigger value="summary" icon={FileText}>
               Summary
-            </TabButton>
-            <TabButton active={tab === "notes"} onClick={() => setTab("notes")}>
+            </SegmentTrigger>
+            <SegmentTrigger value="notes" icon={NotebookPen}>
               Notes
-            </TabButton>
-            <TabButton active={tab === "transcript"} onClick={() => setTab("transcript")}>
+            </SegmentTrigger>
+            <SegmentTrigger value="transcript" icon={ScrollText}>
               Transcript
-            </TabButton>
-          </nav>
+            </SegmentTrigger>
+          </SegmentList>
 
-          {tab === "summary" && (
-            <>
-              {meeting.state === "failed" && (
-                <div className="mt-4 rounded-md border border-bad px-3 py-2.5 [&_p]:my-1 [&_p]:text-[13px]">
-                  <strong>The notes could not be written.</strong>
-                  <p className="text-muted">{meeting.error}</p>
-                </div>
-              )}
-              {running && <p className="text-muted">Writing the notes…</p>}
-              {summaryPane}
-              {actionsPane}
-              {finishedRow}
-            </>
-          )}
-          {tab === "notes" && (
-            <>
-              {notesPane}
-              {filesPane}
-            </>
-          )}
-          {tab === "transcript" && transcriptPane}
+          <TabsContent value="summary" className="tab-in mt-0">
+            {meeting.state === "failed" && (
+              <div className="mt-5 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 [&_p]:my-1 [&_p]:text-[13px]">
+                <strong className="font-medium text-destructive">The notes could not be written.</strong>
+                <p className="text-muted-foreground">{meeting.error}</p>
+              </div>
+            )}
+            {running && (
+              <p className="mt-5 flex items-center gap-2 text-muted-foreground">
+                <Loader className="size-3.5 animate-spin" />
+                Writing the notes…
+              </p>
+            )}
+            {summaryPane}
+            {actionsPane}
+            {finishedRow}
+          </TabsContent>
+          <TabsContent value="notes" className="tab-in mt-0">
+            {notesPane}
+            {filesPane}
+          </TabsContent>
+          <TabsContent value="transcript" className="tab-in mt-0">
+            {transcriptPane}
+          </TabsContent>
 
-          <button className="mt-6 rounded-md border border-line px-2.5 py-1 text-muted transition-colors hover:border-bad hover:text-bad" onClick={onDelete} disabled={busy}>
+          <Button variant="destructive" appearance="ghost" size="sm" className="mt-8" onClick={onDelete} disabled={busy}>
+            <Trash2 />
             Delete meeting
-          </button>
-        </>
+          </Button>
+        </Tabs>
       )}
     </>
   );

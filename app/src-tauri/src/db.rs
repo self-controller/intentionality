@@ -416,15 +416,24 @@ fn write_details(
     Ok(())
 }
 
-/// Deletion is for backlog rows only — session cards are history and get
-/// dropped, never deleted.
-pub fn delete_backlog_task(conn: &Connection, id: i64) -> Result<()> {
+/// Remove a task completely: a backlog row, or a card on a session that is
+/// still open. Labels go by cascade, a carried copy keeps living with its
+/// `carried_from` cleared, an approved meeting action reads as unapproved
+/// again. A closed session's cards are finished history and stay.
+///
+/// One statement, so the open-session test and the delete cannot be split by
+/// the gate closing the session in between (same reason as `ensure_open`
+/// running inside `apply_board`'s write lock).
+pub fn delete_task(conn: &Connection, id: i64) -> Result<()> {
     let changed = conn.execute(
-        "DELETE FROM task WHERE id = ?1 AND session_id IS NULL",
+        "DELETE FROM task WHERE id = ?1 AND (session_id IS NULL OR session_id IN
+            (SELECT id FROM session WHERE ended_at IS NULL AND close_reason IS NULL))",
         [id],
     )?;
     if changed == 0 {
-        return Err(AppError::Other("only backlog items can be deleted".into()));
+        return Err(AppError::Other(
+            "that task can't be deleted: it isn't in the backlog or on an open session".into(),
+        ));
     }
     Ok(())
 }
@@ -469,6 +478,33 @@ pub fn unpull_task(conn: &mut Connection, session_id: i64, id: i64) -> Result<()
     )?;
     if changed == 0 {
         return Err(AppError::Other(format!("task {id} is not on this board")));
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// The backlog in the order the board shows it, from a drag inside it or a
+/// card dropped into it. It belongs to no session, so unlike apply_board
+/// there is no session to check: the IS NULL guard is the whole fence, and a
+/// row the gate pulled or the board deleted meanwhile fails the write rather
+/// than being yanked back. The gate lists the backlog by position too, so
+/// this order is also the order it offers.
+pub fn order_backlog(conn: &mut Connection, ids: &[i64]) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Everything up by n first, so a row this list doesn't name (added
+    // since the board last read) keeps its place after the ones it does.
+    tx.execute(
+        "UPDATE task SET position = position + ?1 WHERE session_id IS NULL",
+        [ids.len() as i64],
+    )?;
+    for (pos, id) in ids.iter().enumerate() {
+        let changed = tx.execute(
+            "UPDATE task SET position = ?1 WHERE id = ?2 AND session_id IS NULL",
+            params![(pos + 1) as i64, id],
+        )?;
+        if changed == 0 {
+            return Err(AppError::Other(format!("task {id} is not in the backlog")));
+        }
     }
     tx.commit()?;
     Ok(())
@@ -1688,6 +1724,45 @@ pub(crate) mod tests {
         assert_eq!(session_tasks(&conn, session_id).unwrap().len(), 1);
     }
 
+    fn backlog_ids(conn: &Connection) -> Vec<i64> {
+        backlog(conn).unwrap().iter().map(|t| t.id).collect()
+    }
+
+    /// A drag inside the Backlog column sticks, and a row the board didn't
+    /// know about stays after the ones it named, in its own order.
+    #[test]
+    fn order_backlog_writes_the_board_order() {
+        let mut conn = store();
+        let a = add_task(&conn, None, "a").unwrap();
+        let b = add_task(&conn, None, "b").unwrap();
+        let c = add_task(&conn, None, "c").unwrap();
+
+        order_backlog(&mut conn, &[c, a, b]).unwrap();
+        assert_eq!(backlog_ids(&conn), vec![c, a, b]);
+
+        // `a` sits at position 2, inside the 1..=2 this list rewrites: left
+        // alone it would tie with `c` rather than follow it.
+        order_backlog(&mut conn, &[b, c]).unwrap();
+        assert_eq!(backlog_ids(&conn), vec![b, c, a]);
+    }
+
+    /// A row that left the backlog meanwhile refuses the whole write, and
+    /// nothing is half-applied.
+    #[test]
+    fn order_backlog_refuses_what_is_not_in_the_backlog() {
+        let mut conn = store();
+        let (_, on_board) = session_with_task(&conn);
+        let a = add_task(&conn, None, "a").unwrap();
+        let b = add_task(&conn, None, "b").unwrap();
+
+        assert!(order_backlog(&mut conn, &[b, on_board, a]).is_err());
+        assert_eq!(backlog_ids(&conn), vec![a, b]);
+        let pos: i64 = conn
+            .query_row("SELECT position FROM task WHERE id = ?1", [on_board], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pos, 1);
+    }
+
     /// The board on screen can outlive its session: the resume gate closes it
     /// on another VT and the heartbeat only notices on its next tick. A drag in
     /// that window used to rewrite the closed session's history.
@@ -1749,7 +1824,7 @@ pub(crate) mod tests {
         update_task(&mut conn, task_id, "a backlog item", "", None, "medium", &["billing".into()]).unwrap();
         assert_eq!(backlog(&conn).unwrap()[0].labels.len(), 1);
 
-        delete_backlog_task(&conn, task_id).unwrap();
+        delete_task(&conn, task_id).unwrap();
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM task_label", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
@@ -1757,6 +1832,43 @@ pub(crate) mod tests {
         );
         let labels = list_labels(&conn).unwrap();
         assert_eq!((labels[0].name.as_str(), labels[0].uses), ("billing", 0));
+    }
+
+    /// A card on an open session can be deleted outright; once the session
+    /// is closed it is history and refuses. A backlog copy carried from the
+    /// deleted card survives, its `carried_from` cleared.
+    #[test]
+    fn a_session_card_can_be_deleted_only_while_its_session_is_open() {
+        let mut conn = store();
+        let (session_id, task_id) = session_with_task(&conn);
+        update_task(&mut conn, task_id, "t", "", None, "medium", &["billing".into()]).unwrap();
+        conn.execute(
+            "INSERT INTO task (session_id, title, position, carried_from, created_at)
+             VALUES (NULL, 'copy', 1, ?1, 'x')",
+            [task_id],
+        )
+        .unwrap();
+
+        delete_task(&conn, task_id).unwrap();
+        assert!(session_tasks(&conn, session_id).unwrap().is_empty());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM task_label", [], |r| r.get::<_, i64>(0)).unwrap(),
+            0
+        );
+        assert_eq!(backlog(&conn).unwrap().len(), 1);
+        assert_eq!(
+            conn.query_row("SELECT carried_from FROM task WHERE title = 'copy'", [], |r| {
+                r.get::<_, Option<i64>>(0)
+            })
+            .unwrap(),
+            None
+        );
+
+        let (closed_session, closed_task) = session_with_task(&conn);
+        conn.execute("UPDATE session SET close_reason = 'clean' WHERE id = ?1", [closed_session])
+            .unwrap();
+        assert!(delete_task(&conn, closed_task).is_err());
+        assert_eq!(session_tasks(&conn, closed_session).unwrap().len(), 1);
     }
 
     #[test]
