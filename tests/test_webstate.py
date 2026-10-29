@@ -59,13 +59,24 @@ class TestState(unittest.TestCase):
         s.handle({"op": "add", "title": "typed"})
         self.assertEqual([r["today"] for r in s.state()["rows"]], [False, True])
 
-    def test_status_counts_the_ticked_rows_and_the_add_box(self):
+    def test_no_count_line_but_start_still_counts_ticks_and_the_add_box(self):
         s = screen([task(1, "a")])
-        self.assertEqual(s.state()["status"], webstate.EMPTY_HINT)
+        self.assertNotIn("status", s.state())
+        self.assertFalse(s.state()["start_enabled"])
         s.handle({"op": "today", "index": 0})
-        self.assertEqual(s.state()["status"], "1 task for today.")
+        self.assertTrue(s.state()["start_enabled"])
+        s.handle({"op": "today", "index": 0})
         s.handle({"op": "add_text", "text": "half typed"})
-        self.assertEqual(s.state()["status"], "2 tasks for today.")
+        self.assertTrue(s.state()["start_enabled"])
+
+    def test_rows_carry_their_labels_and_a_save_moves_them(self):
+        t = task(1, "a", details=ui.Details("", None, ("school", "urgent")))
+        s = screen([t, task(2, "b")])
+        self.assertEqual([r["labels"] for r in s.state()["rows"]], [["school", "urgent"], []])
+        s.handle({"op": "details_open", "index": 1})
+        s.handle({"op": "details_save", "index": 1, "due": "", "notes": "",
+                  "labels": ["errands"], "pending": ""})
+        self.assertEqual(s.state()["rows"][1]["labels"], ["errands"])
 
     def test_ticking_twice_puts_a_row_back_in_the_backlog(self):
         s = screen([task(1, "a")])
@@ -92,7 +103,6 @@ class TestState(unittest.TestCase):
     def test_start_needs_a_task_but_the_box_counts(self):
         s = screen()
         self.assertFalse(s.state()["start_enabled"])
-        self.assertEqual(s.state()["status"], webstate.EMPTY_HINT)
         s.handle({"op": "add_text", "text": "x"})
         self.assertTrue(s.state()["start_enabled"])
 
@@ -183,7 +193,7 @@ class TestDetails(unittest.TestCase):
                   "notes": "", "labels": [], "pending": ""})
         panel = s.state()["panel"]
         self.assertIsNotNone(panel)
-        self.assertEqual(panel["error"], ui.BAD_DUE)
+        self.assertEqual(panel["error"], "")
 
     def test_a_marked_row_refuses_an_edit(self):
         s = screen([task(1, "a")])
@@ -203,6 +213,76 @@ class TestDetails(unittest.TestCase):
         self.assertEqual([l["name"] for l in offered], ["school", "invented"])
         self.assertTrue(offered[0]["exists"])
         self.assertFalse(offered[1]["exists"])
+
+
+class TestAddWithDetails(unittest.TestCase):
+    FIELDS = {"due": "tomorrow", "notes": "  bring the essay ", "labels": ["School"],
+              "pending": " reading "}
+
+    def test_a_typed_task_lands_with_its_details(self):
+        s = screen()
+        s.handle({"op": "add", "title": "write", "details": dict(self.FIELDS)})
+        row = s.rows.rows[0]
+        self.assertEqual(row.title, "write")
+        self.assertEqual(row.details.due_date, "2026-09-20")
+        self.assertEqual(row.details.notes, "bring the essay")
+        self.assertEqual(row.details.labels, ("School", "reading"))
+        self.assertEqual(s.state()["rows"][0]["labels"], ["School", "reading"])
+
+    def test_landing_bumps_added_and_nothing_else_does(self):
+        s = screen()
+        before = s.state()["added"]
+        s.handle({"op": "add_text", "text": "x"})
+        s.handle({"op": "add", "title": "   ", "details": dict(self.FIELDS)})
+        self.assertEqual(s.state()["added"], before)
+        s.handle({"op": "add", "title": "x"})
+        self.assertEqual(s.state()["added"], before + 1)
+
+    def test_a_bad_due_date_refuses_and_keeps_the_box(self):
+        s = screen()
+        s.handle({"op": "add_text", "text": "write"})
+        s.handle({"op": "add", "title": "write",
+                  "details": {"due": "20260920", "notes": "", "labels": [], "pending": ""}})
+        st = s.state()
+        self.assertEqual(st["rows"], [])
+        self.assertEqual(st["added"], 0)
+        self.assertEqual(st["add_error"], "")
+        # Still counted: the task is sitting in the box.
+        self.assertTrue(st["start_enabled"])
+
+    def test_its_new_labels_are_offered_afterwards(self):
+        s = screen(labels=[ui.Label("school", "#7aa2f7")])
+        s.handle({"op": "add", "title": "a",
+                  "details": {"due": "", "notes": "", "labels": ["SCHOOL", "gym"], "pending": ""}})
+        offered = s.state()["labels"]
+        self.assertEqual([l["name"] for l in offered], ["school", "gym"])
+        self.assertFalse(offered[1]["exists"])
+
+    def test_start_keeps_the_box_details(self):
+        s = screen()
+        s.handle({"op": "submit", "add_text": "last thing", "minutes": "", "details": None,
+                  "add_details": dict(self.FIELDS)})
+        self.assertIsNotNone(s.plan)
+        self.assertEqual(s.plan.new[0].details.labels, ("School", "reading"))
+        self.assertEqual(s.plan.new[0].details.due_date, "2026-09-20")
+
+    def test_a_refused_box_stops_the_start(self):
+        s = screen([task(1, "a")])
+        s.handle({"op": "today", "index": 0})
+        s.handle({"op": "submit", "add_text": "b", "minutes": "", "details": None,
+                  "add_details": {"due": "soon", "notes": "", "labels": [], "pending": ""}})
+        self.assertIsNone(s.plan)
+        self.assertEqual(len(s.rows.rows), 1)
+
+    def test_a_refused_start_does_not_add_the_box_twice(self):
+        # The box lands even when bad minutes then stop the start; added tells
+        # the front end to empty it, so a second Start cannot add it again.
+        s = screen()
+        s.handle({"op": "submit", "add_text": "once", "minutes": "nope", "details": None,
+                  "add_details": None})
+        self.assertIsNone(s.plan)
+        self.assertEqual([r.title for r in s.rows.rows], ["once"])
+        self.assertEqual(s.state()["added"], 1)
 
 
 class TestSubmit(unittest.TestCase):
@@ -233,7 +313,7 @@ class TestSubmit(unittest.TestCase):
         s = screen()
         s.handle(self.base())
         self.assertIsNone(s.plan)
-        self.assertEqual(s.state()["error"], webstate.EMPTY_HINT)
+        self.assertEqual(s.state()["error"], "")
 
     def test_bad_minutes_refuse_to_start(self):
         s = screen([task(1, "a")])
@@ -252,7 +332,7 @@ class TestSubmit(unittest.TestCase):
         s = screen([task(1, "a")])
         s.handle(self.base())
         self.assertIsNone(s.plan)
-        self.assertEqual(s.state()["error"], webstate.EMPTY_HINT)
+        self.assertEqual(s.state()["error"], "")
 
     def test_a_typed_row_left_unticked_goes_to_the_backlog(self):
         s = screen([task(1, "a")])
@@ -279,7 +359,7 @@ class TestSubmit(unittest.TestCase):
         s.handle(self.base(details={"index": 0, "due": "not-a-day", "notes": "",
                                     "labels": [], "pending": ""}))
         self.assertIsNone(s.plan)
-        self.assertEqual(s.state()["panel"]["error"], ui.BAD_DUE)
+        self.assertEqual(s.state()["panel"]["error"], "")
 
     def test_only_changed_details_become_edits(self):
         # The app may be editing the same backlog; writing back merely-loaded
@@ -296,3 +376,72 @@ class TestSubmit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSorting(unittest.TestCase):
+    """Jev filing typed tasks: which rows are asked about, and when an answer
+    may still go on."""
+
+    LABELS = [ui.Label("school", "#7aa2f7", ("HW 6",)), ui.Label("home", "#9ece6a")]
+
+    def typed(self, s, title, **details):
+        s.handle({"op": "add", "title": title, **({"details": details} if details else {})})
+        return s.rows.rows[-1]
+
+    def test_only_typed_unlabelled_rows_are_asked_about_and_each_once(self):
+        s = screen([task(1, "carried")], labels=self.LABELS)
+        bare = self.typed(s, "HW 7")
+        self.typed(s, "tagged", labels=["home"])
+        self.assertEqual(s.to_sort(), [bare])
+        self.assertEqual(s.to_sort(), [])
+        later = self.typed(s, "nap")
+        self.assertEqual(s.to_sort(), [later])
+
+    def test_a_row_saved_by_hand_is_not_asked_about_even_with_no_labels(self):
+        s = screen(labels=self.LABELS)
+        row = self.typed(s, "HW 7", labels=["home"])
+        s.handle({"op": "details_open", "index": 0})
+        s.handle({"op": "details_save", "index": 0, "labels": []})
+        self.assertEqual(row.details.labels, ())
+        self.assertEqual(s.to_sort(), [])
+
+    def test_an_answer_goes_on_and_moves_the_row(self):
+        s = screen(labels=self.LABELS)
+        row = self.typed(s, "HW 7")
+        s.to_sort()
+        self.assertTrue(s.sorted(row, "school"))
+        self.assertEqual(s.state()["rows"][0]["labels"], ["school"])
+        self.assertFalse(s.sorted(row, None))
+
+    def test_a_late_answer_loses_to_the_user(self):
+        s = screen(labels=self.LABELS)
+        gone = self.typed(s, "gone")
+        mine = self.typed(s, "mine")
+        open_ = self.typed(s, "open")
+        s.to_sort()
+        s.handle({"op": "mark", "index": 0, "mark": ui.DELETE})  # removed outright
+        self.assertFalse(s.sorted(gone, "school"))
+        s.handle({"op": "details_open", "index": 0})
+        s.handle({"op": "details_save", "index": 0, "labels": ["home"]})
+        self.assertFalse(s.sorted(mine, "school"))
+        self.assertEqual(mine.details.labels, ("home",))
+        s.handle({"op": "details_open", "index": 1})
+        self.assertFalse(s.sorted(open_, "school"))
+        self.assertEqual(open_.details.labels, ())
+
+    def test_replan_takes_labels_that_landed_after_start(self):
+        s = screen(labels=self.LABELS)
+        s.handle({"op": "submit", "minutes": "", "add_text": "HW 7"})
+        self.assertEqual(s.plan.new, [ui.NewTask("HW 7")])
+        (row,) = s.to_sort()
+        s.sorted(row, "school")
+        self.assertEqual(s.replan().new, [ui.NewTask("HW 7", ui.Details(labels=("school",)))])
+
+    def test_candidates_are_the_stores_labels_then_this_screens(self):
+        s = screen(labels=self.LABELS)
+        self.typed(s, "x", labels=["Errands", "SCHOOL"])
+        self.assertEqual(
+            s.candidates(),
+            [ui.autolabel.Candidate("school", ("HW 6",)), ui.autolabel.Candidate("home"),
+             ui.autolabel.Candidate("Errands")],
+        )

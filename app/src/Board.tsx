@@ -2,12 +2,21 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { listen } from "@tauri-apps/api/event";
 // Types only: the runtime import is the lazy one below, so three.js stays out
 // of the main chunk and loads with the Board tab.
-import type { CardMoveEvent, KanbanCardData, KanbanColumnData, KanbanTheme } from "threejs-elements/kanban";
+import type {
+  CardMoveEvent,
+  FocusRect,
+  KanbanCardData,
+  KanbanColumnData,
+  KanbanMount,
+  KanbanTheme,
+} from "threejs-elements/kanban";
 import type { KanbanBoard3DHandle } from "threejs-elements/react";
+import LabelFilter, { NO_LABEL, labelOptions, matches } from "@/components/LabelFilter";
 import * as api from "./api";
 import CardEditor3D from "./CardEditor3D";
 import { dueInfo, localDate } from "./format";
 import { TaskForm, blankTask } from "./TaskEditor";
+import { TaskView } from "./TaskView";
 import type { Board as BoardData, Priority, Status, Task } from "./types";
 
 const KanbanBoard3D = lazy(() =>
@@ -33,12 +42,17 @@ const laneLabel = (lane: Lane) => LANES.find((l) => l.lane === lane)!.label;
 // their text, so a short title takes about half a row.
 const LAYOUT = { headerDepth: 0.52, rows: 4 };
 
+// threejs-elements' defaultLayout, in board units: a column's width, the gap
+// between columns and a panel's padding. For the bottom gap below.
+const COLUMN = { width: 2, gap: 0.3, padding: 0.15 };
+const BOARD_WIDTH = LANES.length * COLUMN.width + (LANES.length - 1) * COLUMN.gap;
+
 const FILL = { position: "absolute", inset: 0 } as const;
 
 // A few sparks, a thump and one small hop on a slam, but no flash: it lit a
-// yellow spot in the middle of the card's face. The card flies up critically
-// damped (2√260 ≈ 32), so it arrives without overshooting. A constant: the
-// board re-applies a new object.
+// yellow spot in the middle of the card's face. Cards open instantly (see
+// onCardClick); the focus spring is only what a non-instant open would fly
+// with. A constant: the board re-applies a new object.
 const MOTION = {
   slamFlash: 0,
   sparkCount: 14,
@@ -47,6 +61,23 @@ const MOTION = {
 };
 
 const NO_SESSION = "No open session — start one at the gate.";
+
+// The width, in CSS px, the filter chip needs to say "All labels" in full;
+// narrower, and it is its icon alone.
+const CHIP_WITH_NAME = 112;
+
+// The backlog's label filter (a LabelFilter key; null = every card). Kept out
+// here because Board is unmounted whenever another tab is chosen.
+let rememberedFilter: string | null = null;
+
+const sameRect = (a: FocusRect | null, b: FocusRect | null) =>
+  a === b ||
+  (a != null &&
+    b != null &&
+    Math.round(a.left) === Math.round(b.left) &&
+    Math.round(a.top) === Math.round(b.top) &&
+    Math.round(a.width) === Math.round(b.width) &&
+    Math.round(a.height) === Math.round(b.height));
 
 // app.css's :root is the one source of the palette; these are its values,
 // used only if a variable somehow isn't there (a stylesheet that failed to
@@ -178,10 +209,15 @@ function arrangement(tasks: Task[]) {
   return { todo: ids("planned"), doing: ids("doing"), done: ids("done"), dropped: ids("dropped") };
 }
 
-// The card in front of the camera: one being edited, or one being made from a
-// lane's "+". `shown` once it has arrived and the form is on it; `leaving` once
-// Save, Cancel or Delete has sent it back, until it lands.
-type Open = ({ kind: "edit"; task: Task } | { kind: "new"; lane: Lane }) & { shown: boolean; leaving: boolean };
+// The card in front of the camera: one being read (a click opens it this
+// way), one being edited (its Edit button), or one being made from a lane's
+// "+". `shown` while the face is on it -- at once, as cards open instantly;
+// `leaving` once Close, Save, Cancel or Delete has sent it back, until it
+// lands.
+type Open = ({ kind: "view" | "edit"; task: Task } | { kind: "new"; lane: Lane }) & {
+  shown: boolean;
+  leaving: boolean;
+};
 
 // A card that is already on the board (just pulled, or just made), put in its
 // lane from a fresh read: the frontend's copy doesn't have it yet.
@@ -210,6 +246,17 @@ export default function Board() {
   // A write the backend refused, shown above the board it reloaded — not the
   // fatal screen, which hid the board until the tab was remounted.
   const [notice, setNotice] = useState<string | null>(null);
+  const [filter, setFilterState] = useState(rememberedFilter);
+  // Cards a filtered backlog shows although they don't match: ones just
+  // dropped, made or edited in it, which must not vanish as they land.
+  // Forgotten when the filter changes.
+  const [kept, setKept] = useState<ReadonlySet<number>>(new Set());
+  // Where the Backlog header's free stretch is on screen, for the filter.
+  const [slot, setSlot] = useState<FocusRect | null>(null);
+  // CSS px kept clear under the board. fillHeight fits the board to the box's
+  // height, so its bottom margin is a few px while its sides keep a wider one;
+  // this makes up the difference.
+  const [bottom, setBottom] = useState(0);
 
   // Read once: the board takes its theme on mount only.
   const theme = useMemo(boardTheme, []);
@@ -242,15 +289,27 @@ export default function Board() {
   }, []);
   // The heartbeat loop lets go of a session closed elsewhere and adopts the
   // one a resume gate starts; either way the board on screen is the old one.
+  // A card saved without labels gets one from Jev a moment later
+  // (autolabel.rs), after the card has already landed.
   useEffect(() => {
     refresh();
     const unlistenOpened = listen("session:opened", refresh);
     const unlistenClosed = listen("session:closed", refresh);
+    const unlistenLabelled = listen("task:labelled", refresh);
     return () => {
       unlistenOpened.then((f) => f());
       unlistenClosed.then((f) => f());
+      unlistenLabelled.then((f) => f());
     };
   }, [refresh]);
+
+  const options = useMemo(() => (board ? labelOptions(board.backlog) : []), [board]);
+  // A label whose last card has left the backlog filters nothing any more.
+  const active = filter != null && options.some((o) => o.key === filter) ? filter : null;
+  const shows = useCallback(
+    (t: Task) => active == null || matches(t, active) || kept.has(t.id),
+    [active, kept],
+  );
 
   // A new board object is a new columns array, which is also how a refused
   // move is undone: the 3D board animates to whatever it is handed.
@@ -263,9 +322,54 @@ export default function Board() {
       color: laneColors[lane],
       // The session lanes' "+" only means something while a session is open.
       canAdd: lane === "backlog" || board.session != null,
-      cards: (lane === "backlog" ? byPriority(board.backlog) : lanes[lane]).map((t) => toCard(t, palette, today)),
+      cards: (lane === "backlog" ? byPriority(board.backlog).filter(shows) : lanes[lane]).map((t) =>
+        toCard(t, palette, today),
+      ),
     }));
-  }, [board, laneColors, palette, today]);
+  }, [board, laneColors, palette, today, shows]);
+
+  // The filter sits over the header's free stretch, which moves when the board
+  // re-frames (a resize, a layoutchange) or redraws the header (its count).
+  // Measured a frame later, once the board has caught up.
+  const box = useRef<HTMLDivElement>(null);
+  const measureFrame = useRef(0);
+  const measure = useCallback(() => {
+    cancelAnimationFrame(measureFrame.current);
+    measureFrame.current = requestAnimationFrame(() => {
+      const next = boardRef.current?.getHeaderSlot("backlog") ?? null;
+      setSlot((prev) => (sameRect(prev, next) ? prev : next));
+      // The header's on-screen height gives px per board unit; from that, the
+      // gap beside the (centered) board and the one above it, which the camera
+      // mirrors below. Near overhead, so foreshortening is negligible.
+      const width = box.current?.clientWidth;
+      if (!next || !width || next.height <= 0) return;
+      const unit = next.height / LAYOUT.headerDepth;
+      const side = (width - BOARD_WIDTH * unit) / 2;
+      const top = next.top - COLUMN.padding * unit;
+      const gap = Math.max(0, Math.round(side - top));
+      setBottom((prev) => (Math.abs(prev - gap) < 1 ? prev : gap));
+    });
+  }, []);
+  const onReady = useCallback(
+    (mount: KanbanMount) => {
+      mount.board.addEventListener("layoutchange", measure);
+      mount.board.addEventListener("dragend", measure);
+      mount.board.addEventListener("focusclose", measure);
+      measure();
+    },
+    [measure],
+  );
+  const loaded = board != null;
+  useEffect(() => {
+    if (!box.current) return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(box.current);
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(measureFrame.current);
+    };
+  }, [measure, loaded]);
+  useEffect(() => measure(), [columns, measure]);
 
   if (err) return <div className="p-12 text-center text-muted-foreground">{err}</div>;
   if (!board) return null;
@@ -285,6 +389,25 @@ export default function Board() {
     setBoard({ ...board });
   };
 
+  const setFilter = (key: string | null) => {
+    rememberedFilter = key;
+    setFilterState(key);
+    setKept(new Set());
+  };
+  const keep = (id: number) => setKept((k) => new Set(k).add(id));
+  // A card made in the filtered backlog starts out wearing the label shown.
+  const presetLabel = options.find((o) => o.key === active)?.label ?? null;
+
+  // A drop's index counts the cards the backlog shows; its order is the whole
+  // list's. The card goes before the shown card it was dropped above, or just
+  // after the last one shown.
+  const backlogIndex = (task: Task, index: number) => {
+    const rest = byPriority(board.backlog.filter((t) => t.id !== task.id));
+    const shown = rest.filter(shows);
+    if (index < shown.length) return rest.indexOf(shown[index]);
+    return shown.length ? rest.indexOf(shown[shown.length - 1]) + 1 : rest.length;
+  };
+
   // Every move: optimistic first, then one write (two for a pull out of the
   // backlog), then a reload.
   const onCardMove = (e: CardMoveEvent) => {
@@ -295,16 +418,18 @@ export default function Board() {
     setNotice(null);
     if (onBoard) {
       if (target === "backlog") {
+        const index = backlogIndex(onBoard, e.toIndex);
+        keep(taskId);
         setBoard({
           ...board,
           tasks: board.tasks.filter((t) => t.id !== taskId),
-          backlog: reordered(board.backlog, { ...onBoard, session_id: null, status: "planned" }, e.toIndex),
+          backlog: reordered(board.backlog, { ...onBoard, session_id: null, status: "planned" }, index),
         });
         // An unpull lands at the end of the backlog; the second write puts
         // it where it was dropped.
         api
           .unpullTask(taskId)
-          .then(() => placeInBacklog(taskId, e.toIndex))
+          .then(() => placeInBacklog(taskId, index))
           .then(refresh)
           .catch(fail);
         return;
@@ -314,7 +439,7 @@ export default function Board() {
       api.applyBoard(arrangement(next)).then(refresh).catch(fail);
     } else if (inBacklog) {
       if (target === "backlog") {
-        const next = reordered(board.backlog, inBacklog, e.toIndex);
+        const next = reordered(board.backlog, inBacklog, backlogIndex(inBacklog, e.toIndex));
         setBoard({ ...board, backlog: next });
         api.orderBacklog(next.map((t) => t.id)).then(refresh).catch(fail);
         return;
@@ -338,11 +463,14 @@ export default function Board() {
   const onCardClick = (card: KanbanCardData) => {
     const id = Number(card.id);
     const task = board.tasks.find((t) => t.id === id) ?? board.backlog.find((t) => t.id === id);
-    if (task && boardRef.current?.openCard(card.id)) setOpen({ kind: "edit", task, shown: false, leaving: false });
+    // Instant: no flight up and no growing, the card is just there.
+    if (task && boardRef.current?.openCard(card.id, { instant: true }))
+      setOpen({ kind: "view", task, shown: true, leaving: false });
   };
 
   const onAddClick = (lane: Lane) => {
-    if (boardRef.current?.openNew(lane)) setOpen({ kind: "new", lane, shown: false, leaving: false });
+    if (boardRef.current?.openNew(lane, undefined, { instant: true }))
+      setOpen({ kind: "new", lane, shown: true, leaving: false });
   };
 
   const leave = () => setOpen((o) => o && { ...o, leaving: true });
@@ -359,6 +487,15 @@ export default function Board() {
       setBoard(b);
     });
 
+  // Edit and its Cancel swap the card's face; the card stays up.
+  const setMode = (kind: "view" | "edit") =>
+    setOpen((o) => (o && o.kind !== "new" && !o.leaving ? { ...o, kind } : o));
+
+  // The open card as the board now has it, so a label recoloured in the
+  // editor shows in the view it goes back to.
+  const current = (task: Task) =>
+    board.tasks.find((t) => t.id === task.id) ?? board.backlog.find((t) => t.id === task.id) ?? task;
+
   const cancel = () => {
     if (!open || open.leaving) return;
     leave();
@@ -372,7 +509,7 @@ export default function Board() {
           inset-0 gets one from the flex-grown wrapper. Nothing sits above it:
           the board is the whole screen under the nav, and the two things
           worth saying float over its top-left corner instead of taking a row. */}
-      <div className="relative min-h-[360px] flex-1">
+      <div ref={box} className="relative min-h-[360px] flex-1">
         <div className="pointer-events-none absolute left-4 top-3 z-[5] flex flex-col items-start gap-2">
           {notice && (
             <p className="rounded-md border border-warn/20 bg-warn/10 px-3 py-1.5 text-[13px] text-warn backdrop-blur">
@@ -388,7 +525,7 @@ export default function Board() {
               // As a style, not a class: the component's own inline
               // `position: relative` would override an `absolute` class, and the
               // box would then size itself from the canvas instead of filling in.
-              style={FILL}
+              style={bottom ? { ...FILL, bottom } : FILL}
               columns={columns}
               theme={theme}
               // Near overhead, so the board faces the user with just a hint of
@@ -409,29 +546,54 @@ export default function Board() {
               onCardMove={onCardMove}
               onCardClick={onCardClick}
               ref={boardRef}
+              onReady={onReady}
               onFocusArrive={() => setOpen((o) => o && { ...o, shown: true })}
               onFocusClose={() => setOpen(null)}
             />
           )}
         </Suspense>
 
+        {/* Hidden while a card is open (the board is dimmed behind it), and
+            when there is no label to choose. */}
+        {slot && !open && (active != null || options.some((o) => o.key !== NO_LABEL)) && (
+          <div
+            className="pointer-events-none absolute z-[5] flex items-center justify-end"
+            style={{ left: slot.left, top: slot.top, width: slot.width, height: slot.height }}
+          >
+            <LabelFilter
+              options={options}
+              value={active}
+              total={board.backlog.length}
+              compact={slot.width < CHIP_WITH_NAME}
+              onChange={setFilter}
+            />
+          </div>
+        )}
+
         {open && (
-          <CardEditor3D board={boardRef} shown={open.shown && !open.leaving} onDismiss={cancel}>
-            {open.kind === "new" ? (
+          <CardEditor3D board={boardRef} shown={open.shown && !open.leaving} mode={open.kind} onDismiss={cancel}>
+            {open.kind === "view" ? (
+              <TaskView
+                task={current(open.task)}
+                today={today}
+                onEdit={() => setMode("edit")}
+                onClose={cancel}
+              />
+            ) : open.kind === "new" ? (
               <TaskForm
-                initial={blankTask("")}
+                initial={blankTask("", open.lane === "backlog" ? presetLabel : null)}
                 heading={`New task in ${laneLabel(open.lane)}`}
                 saveText="Add task"
                 save={(title, notes, dueDate, priority, labels) =>
                   api
                     .createTask(title, notes, dueDate, priority, labels, open.lane === "backlog")
                     // A new session card starts in To Do.
-                    .then((id) =>
-                      (open.lane === "backlog" || open.lane === "planned"
-                        ? Promise.resolve()
-                        : place(id, open.lane)
-                      ).then(() => land(id)),
-                    )
+                    .then((id) => {
+                      keep(id);
+                      return (
+                        open.lane === "backlog" || open.lane === "planned" ? Promise.resolve() : place(id, open.lane)
+                      ).then(() => land(id));
+                    })
                 }
                 onClose={cancel}
                 onDelete={null}
@@ -440,14 +602,18 @@ export default function Board() {
             ) : (
               <TaskForm
                 key={open.task.id}
-                initial={open.task}
+                initial={current(open.task)}
                 saveText="Save"
                 save={(title, notes, dueDate, priority, labels) =>
                   api
                     .updateTask(open.task.id, title, notes, dueDate, priority, labels)
-                    .then(() => land(open.task.id))
+                    .then(() => {
+                      keep(open.task.id);
+                      return land(open.task.id);
+                    })
                 }
-                onClose={cancel}
+                // Back to reading it; the dimmed board around it still closes.
+                onClose={() => setMode("view")}
                 onLabelsChanged={refresh}
                 // Any card on this board can be deleted outright, backlog or
                 // session (the editor asks first).

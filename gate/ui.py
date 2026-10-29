@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import NamedTuple
 
+from . import autolabel
+
 
 class GateAborted(Exception):
     """User bailed out (Ctrl-C / Ctrl-D on the terminal, SIGINT to the
@@ -51,10 +53,12 @@ def confirm_choice(prompt: str, choices: str) -> str:
 
 
 class Label(NamedTuple):
-    """A label that already exists, as the details editor offers it."""
+    """A label that already exists, as the details editor offers it, with
+    titles already filed under it (newest first) for sorting a new task."""
 
     name: str
     color: str
+    examples: tuple[str, ...] = ()
 
 
 def clean_labels(names: Iterable[str]) -> tuple[str, ...]:
@@ -185,12 +189,12 @@ class WelcomeList:
             row.mark = None
 
     def set_details(self, index: int, details: Details) -> str | None:
-        """Replace a row's details. Returns why not, when it can't be done."""
+        """Replace a row's details. None = done; any string, even empty, = refused."""
         row = self.rows[index]
         if row.mark:
             return MARKED
         if details.due_date is not None and not is_day(details.due_date):
-            return BAD_DUE
+            return ""
         row.details = Details(details.notes.strip(), details.due_date, clean_labels(details.labels))
         return None
 
@@ -265,10 +269,6 @@ def parse_minutes(raw: str) -> int | None:
     return minutes
 
 
-EMPTY_HINT = "Tick at least one task for today to start."
-BAD_DUE = "A due date is a day like 2026-09-18, or today or tomorrow."
-
-
 def is_day(text: str) -> bool:
     """'YYYY-MM-DD' exactly. fromisoformat alone also takes '20260918', and
     the store's string order is date order only in the one fixed width."""
@@ -288,7 +288,7 @@ def parse_due(raw: str, today: date) -> str | None:
     if raw == "tomorrow":
         return (today + timedelta(days=1)).isoformat()
     if not is_day(raw):
-        raise ValueError(BAD_DUE)
+        raise ValueError()
     return raw
 
 
@@ -367,11 +367,11 @@ def _terminal_welcome(tasks: list[ActiveTask], error: str, labels: list[Label]) 
         if not raw:
             if rows.today_count():
                 break
-            message = EMPTY_HINT
             continue
         command = _COMMAND.fullmatch(raw)
         if command is None:
-            rows.add(raw)
+            if rows.add(raw):
+                _terminal_sort(rows.rows[-1], labels)
             continue
         number = int(command[2])
         if not 1 <= number <= len(rows.rows):
@@ -387,6 +387,16 @@ def _terminal_welcome(tasks: list[ActiveTask], error: str, labels: list[Label]) 
             message = rows.toggle(number - 1, mark) or ""
         show = True
     return rows.plan(ask_minutes())
+
+
+def _terminal_sort(row: Row, labels: list[Label]) -> None:
+    """File a task just typed under a label, if Jev is sure of one. Waits for
+    the answer: the next prompt is a moment later, never a wrong list."""
+    candidates = [autolabel.Candidate(label.name, tuple(label.examples)) for label in labels]
+    label = autolabel.ask(row.title, "", candidates)
+    if label:
+        row.details = Details(labels=(label,))
+        print(f"  filed under {label}")
 
 
 def _terminal_details(rows: WelcomeList, index: int, labels: list[Label]) -> str:

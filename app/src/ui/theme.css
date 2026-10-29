@@ -1,8 +1,6 @@
 /* The shared base. Imported by both bundles: the Tauri app and the gate. The
    palette below is the gate's; the app (app.css) re-maps it onto shadcn's
-   token names and git.cafe's dark values, without touching what is here.
-   Preflight comes first; katex.min.css is imported after it in Markdown.tsx,
-   because KaTeX relies on unreset table and border behaviour. */
+   token names and git.cafe's dark values, without touching what is here. */
 /* source(none): no automatic scan. Each bundle names its own roots with
    @source (app.css, gate.css); auto-detection from app/ also read the Rust
    sources and lockfiles and emitted classes nothing uses. */

@@ -6,41 +6,34 @@ your backlog), finish or delete others and add what else you intend to do, and
 the ticked ones become the session's task list — no desktop until at least one
 task is ticked. Inside the session, a desktop app shows
 those tasks as a kanban board next to what
-[ActivityWatch](https://activitywatch.net/) actually observed, and a model
-periodically writes a short productivity note. It also transcribes meetings on
-demand and turns them into notes with action items. All data stays in a local
-SQLite database, with two exceptions spelled out below: if you configure API
-keys, each analysis sends that stretch's activity summary — window titles
-included — to the Anthropic API, and each meeting you record sends its audio to
-the OpenAI transcription API and the resulting transcript to Anthropic.
+[ActivityWatch](https://activitywatch.net/) actually observed, and every so
+often checks how much of a stretch went to the tasks. All data stays in a
+local SQLite database, with one exception spelled out below: if you configure
+a TypeSafe key, the window titles that checks and the at-risk timer judge,
+your session's task titles and notes, and each new task you add without a
+label (with your label names), go to TypeSafe's API.
 
 Current status: **v0.5**. The gate is deliberately conversation-free — you
 edit the list yourself (the AI chat of v0.4 is gone from the gate; git has
 it). Unfinished tasks carry into a backlog the next gate's welcome screen
 shows you first.
 The Tauri desktop app is the in-session interface: kanban board, activity
-dashboard, randomized-interval analyses, and the meeting note taker.
+dashboard, and randomized-interval analyses.
 
 ## Requirements
 
 - Python 3.11+ (tested on 3.14), stdlib only — the gate has
   zero dependencies.
 - For the desktop app: Rust + Node (see `app/` below), webkit2gtk, and — for
-  the analysis feature only — an Anthropic API key in
-  `~/.config/intentionality/api_key` (chmod 600) or `ANTHROPIC_API_KEY`.
-  Without a key the app still works; analyses are skipped with a log line.
-  With one, each analysis sends the board — your task list and where each
-  task stands — and the observed activity — app names **and the window titles under them** — to the
-  Anthropic API. Titles carry document names, page titles and URLs, which is a
-  good deal more than app names do; without a key none of it leaves the
-  machine.
-- For the meeting note taker only: `pipewire-utils` (for `pw-record` and
-  `pw-dump`, already present on a standard Fedora desktop) and an OpenAI API
-  key in
-  `~/.config/intentionality/openai_key` (chmod 600) or `OPENAI_API_KEY`.
-  Without a key the rest of the app is unaffected and Start transcribing
-  reports the missing key. See "The meeting note taker" below for what leaves
-  the machine when you use it.
+  the checks, the at-risk timer's relevance verdicts and filing new tasks
+  under labels (the gate uses the same key) — a TypeSafe API key in
+  `~/.config/intentionality/typesafe_key` (chmod 600) or `TYPESAFE_API_KEY`.
+  Without a key the app still works; checks are skipped with a log line, the
+  checkpoint still fires (unjudged), and the timer shows on every flagged page.
+  With one, what is sent is listed under "What leaves the machine" below.
+  Nothing goes to Anthropic any more: the Claude-written analyses are gone
+  (git has `app/src-tauri/src/claude.rs`), their rows stay readable, and
+  `~/.config/intentionality/api_key` is unused and can be deleted.
 
 ## Setup
 
@@ -68,6 +61,10 @@ The gate is one welcome screen. It lists your **active tasks** — the backlog:
 whatever earlier sessions left unfinished, plus anything you added to the
 backlog in the app — and you edit that list into this session's:
 
+- Tasks are listed in a **dropdown per label** (click a label's header to fold
+  it away), with an **Other** dropdown last for tasks that have no label. A
+  task with several labels is listed under each of them — it is the same task,
+  so ticking one copy ticks them all.
 - **Tick** a task to do it today: ticked tasks go on today's board (To Do),
   carried tasks first. Tasks start **unticked** and stay in the backlog, so
   unfinished work carried over from earlier sessions is never put on the board
@@ -77,7 +74,9 @@ backlog in the app — and you edit that list into this session's:
   from, and takes it off the list.
 - **Delete** removes it for good (struck through until you start; press it
   again to undo). The app's card editor has the same Delete button.
-- **Add** a task by typing it.
+- **Add** a task by typing it. One added with no labels is filed under a
+  label for you when Jev is sure of one (see **Filed by Jev** below): it moves
+  into that label's dropdown a moment later, and **Details** takes it off.
 - **Details** opens a panel under any task, carried or typed: a **due date**
   (typed, Today / Tomorrow, or a calendar), **notes**, and **labels** — click
   any label that exists to tag it, or type a new one to create it.
@@ -93,6 +92,25 @@ N, `d N` / `x N` to mark task N done / deleted (again to undo),
 `e N` to change task N's due date, notes (one line) and labels (blank keeps,
 `-` clears), and a blank line to start. There is no "what do you want to get done?"
 question — the list is that answer.
+
+**Filed by Jev.** A task added with no labels — typed at the gate (either
+front end) or saved on the app's board — is shown to TypeSafe's Jev beside
+every label there is and up to six titles already filed under each, and gets
+at most one of those labels. Never a new one. In one request (about 0.2 s),
+Jev picks the label that fits best and, separately for each label, says
+whether the task belongs there at all. The label goes on only when both
+answers are at least 0.7 (`MIN` in `gate/autolabel.py` and
+`app/src-tauri/src/autolabel.rs`, kept equal by a test). So when two labels
+both fit about equally ("School" and a course's own label), or nothing fits
+well, the task is left as it was. When two labels both fit, Jev is told to
+prefer the more specific one. A label you choose by hand always wins: a task
+you labelled, a panel you saved, or a card you relabelled before the answer
+arrived is left alone. At the gate, Start waits up to 3 s for an answer still
+out. With no key or no network nothing is sent, and the task simply has no
+label. Each decision is logged (`gate.log` for the gate, the journal for the
+app). `cargo test live_sort -- --ignored --nocapture` (in `app/src-tauri`)
+asks the real Jev about a few titles against your live labels, read-only, and
+prints what each would be filed under (billed).
 
 ### Ending a session
 
@@ -218,16 +236,17 @@ checkbox with the desktop app, so the two halves look like one product.
 
 It opens on **"Let's get to work."** in white on black, which fades into the
 welcome screen after about a second (any key or click skips it). The screen is
-the task list — one checkbox per task, ticked to bring it into the session and
-unticked to strike it out and delete it on Start — with a Details button per
-row, Done on a task carried from an earlier session, an add box, the minutes,
-and a Start button that stays disabled until there is a task. The details
-panel opens in place under its row, and Start saves it first.
+the task list, grouped into label dropdowns, on the desktop app's black — one
+checkbox per task, ticked to bring it into today's board — with Details and
+Delete buttons per row, Done on a task carried from an earlier session, an add
+box, and a footer holding the minutes and a Start button that stays disabled
+until a task is ticked. The details panel opens in place under the row it was
+opened from, and Start saves it first. The page itself scrolls, and the footer
+stays pinned to the bottom, so a long list or an open panel never hides Start.
 
 **The React side owns no list logic.** It posts intents; `gate/webstate.py`
 applies them to `ui.WelcomeList` and pushes back a whole screen. Every string
-the screen shows — the greeting, each row's detail line, the status line,
-every refusal — is computed in `gate/ui.py` and travels as finished text, so
+the screen shows — the greeting, each row's detail line, every refusal — is computed in `gate/ui.py` and travels as finished text, so
 the graphical gate and the terminal gate cannot disagree about what a tick
 means, and `flow.py` does not know which one is on. (`gate close` still asks
 its debrief questions, as a text entry or a row of buttons under a log pane.)
@@ -454,6 +473,8 @@ Runs inside the session (it is deliberately not the gate — a window inside
 GNOME can always be alt-tabbed away; the lockout lives at the console). Three
 surfaces, all bare-bones for now:
 
+**Ctrl+Tab** / **Ctrl+Shift+Tab** step through the tabs.
+
 - **Board** — To Do / Doing / Done lanes over the current session's tasks
   (drag to move), a dropped tray that is a fourth drop target, and the backlog
   in a sidebar: pull items into today, add new ones, delete stale ones.
@@ -471,20 +492,47 @@ surfaces, all bare-bones for now:
   before anything uses them; a label stays until you delete it (one still in
   use asks first, and deleting takes it off every card).
   Notes, labels and due dates travel with a task when the gate carries it into
-  the backlog.
-- **Dashboard** — recent sessions, their task outcomes, and per-app active
-  time from ActivityWatch with AFK subtracted, each app expandable to the
-  window titles that made up its time.
+  the backlog. A card saved with no labels may get one a moment later (see
+  **Filed by Jev** above).
+- **Dashboard** — **today**, since local midnight. **Time active** and
+  **Time away** lead as large figures (ActivityWatch, AFK subtracted past a
+  5-minute grace — see the timer below). A pie
+  splits the active time into **Relevant to a task**, **Not relevant** and
+  **Not judged**, by the at-risk timer's own rule: each page of today against
+  the tasks in **Doing** right now, read from Jev's cached verdicts, so the
+  Dashboard and the clock never disagree about a page. While nothing is in
+  Doing, every page of the day counts as not relevant, as the clock shows it;
+  time in no session counts as not judged. Reading costs nothing; **Judge N pages with
+  Jev** asks about the busiest unjudged pages (up to 30, like a check), which
+  is billed and sends those titles to TypeSafe. Under the pie, relevant time
+  by task; beside it, the at-risk apps panel. **Recent sessions** — each
+  session's task outcomes and per-window active time — is folded away
+  underneath, and the build line sits at the foot of the tab.
 - **Analyses** — at randomized intervals (mean `analysis_mean_minutes` in the
-  store's `meta` table, default 60) the app sends the board state and per-app
-  activity totals — the busiest 8 apps, each with
-  its 5 longest-running window titles — to Claude and stores a short
-  observation: headline, 0-100 alignment, a sentence or two. Titles are what
-  let it tell research from drift; on app names alone a browser is
-  unreadable. It lands as an
-  unread badge in the app *and* a desktop notification. Quiet windows (< 5 min
-  active) are skipped. "Run a check now" deliberately does not notify — you
-  are already looking at the tab that answers it.
+  store's `meta` table, default 60) the app runs a **check** on the stretch
+  since the last one. Every page of it (the 30 busiest, each window title
+  normalised the way the timer does it) is judged against every task of the
+  session that was not dropped — done ones too, since time spent finishing a
+  task was time on it — by the at-risk timer's own question to
+  [Jev](https://docs.typesafe.ai), through the timer's own cache and bar
+  (below). The **alignment** is the share of judged active time on pages some
+  task excuses; time past the 30 pages, an app's "(other)" rollup, and pages
+  Jev could not be asked about count as *not judged*, and under half judged
+  means no number at all. Jev answers with probabilities, never prose, so the
+  headline and the sentences are written by the app (`check.rs`). The tab
+  shows where the time went by task, the at-risk apps' time in the stretch,
+  and every page with its verdict; a page no task needed carries the same
+  **Appeal** as the clock's arrow, and a win there keeps the timer off that
+  page too (it counts from the next check — a row is a snapshot). Rows the
+  Claude-era analysis wrote stay readable, shown the way they were written.
+  A check lands as an unread badge in the app *and* a desktop notification.
+  Quiet windows (< 5 min active) are skipped. "Run a check now" deliberately
+  does not notify — you are already looking at the tab that answers it.
+
+  **Early check on drift.** While the timer is up captioned *Not relevant to
+  any task* during a session, that time is counted; at `drift_check_minutes`
+  (a `meta` setting, default 10, 0 = off) since the last check, a check runs
+  early instead of waiting for its draw, and its notification says so.
 - **Checkpoint** — when the time you said you would be here runs out
   (`intended_minutes`, set at the gate), the app runs an analysis of its own,
   raises a desktop notification, and puts a full-screen checkpoint in front of
@@ -493,9 +541,11 @@ surfaces, all bare-bones for now:
   never closes the session — that stays the gate's job.
 
   Recommendations come from a fixed catalog in
-  `src-tauri/src/recommendations.rs`; the model picks one id from it and
-  writes a sentence saying why it fits. Only the id is stored, so rewording an
-  entry applies to every checkpoint already recorded. Every entry's `source`
+  `src-tauri/src/recommendations.rs`; Jev picks one id from it with a single
+  choice question, matching the stretch (the clock, the board, the check's
+  numbers) against the situation each entry `fits`, and the app writes the
+  sentence under it. Only the id is stored, so rewording an entry applies to
+  every checkpoint already recorded. Every entry's `source`
   is currently `None` and the screen says so — these are sensible defaults,
   not research findings, and that is the slot real citations go in.
 
@@ -587,165 +637,194 @@ open again while it is already running starts a *second* process, with its own
 analysis timer; if that ever becomes a real annoyance the fix is
 `tauri-plugin-single-instance`.
 
-## The meeting note taker
+### At-risk apps: the on-screen timer
 
-The Meetings tab records a meeting, transcribes it as it goes, and turns the
-transcript into a write-up and action items. The write-up is one markdown
-document — an opening paragraph, key points, and additional information when
-there is any, with fenced code blocks and `$…$` LaTeX where the meeting had
-code or maths. It is the model's draft until you press **Edit**; then it is
-yours, and **Re-run notes** asks before replacing a document you have changed.
-After a meeting the detail pane has three tabs: **Summary** (the write-up and
-the action items), **Notes** (your scratchpad and context files) and
-**Transcript** (cleaned, with the raw segments behind a toggle).
+Flag an app or a website you lose time to — `linkedin.com`, `youtube.com`,
+`discord` — from the **At-risk apps** panel on the Dashboard. While a
+flagged one is the window in front, a giant clock sits at the top right of the
+screen with today's **off-task total**, counting up. There is one clock,
+shared by every app and site: it counts today's time on every page that
+would show it now (a flagged page no Doing task excuses, or any page Jev found
+relevant to none of them), each moment once. So a new off-task site picks up
+from the day's total rather than from zero, and switching between two of them
+never starts it over. Switch to something relevant and it goes; come back and
+it carries on from the total. An appeal you win takes that page's time back
+out. It shows over fullscreen windows too, and cannot be dragged or dismissed.
+It hides in the overview, on the lock screen, and once you are away. **Away**
+means 5 minutes with no keyboard or mouse input (GNOME's screen-blank delay).
+ActivityWatch calls you AFK after 3, but until the screen goes dark you may
+be reading or watching, so the first 5 minutes of every idle stretch count as
+present everywhere: in the clock, on the Dashboard and in the checks
+(`observed::IDLE_GRACE_SECS`). The panel lists today's time on every flag,
+with the total counted once even where two flags overlap.
 
-Pick a microphone, press **Start transcribing** and it opens; press **Stop**
-and it shuts at once. The notes are written behind you — a line under the
-button says whether it is still cleaning the transcript or writing the notes
-— and you can **start the next meeting straight away**: the microphone was
-free the moment Stop returned, and only the model calls are queued, so a
-second wrap-up waits for the first rather than competing with it. Nothing
-else starts a recording — there is no timer, no scheduler and no startup path
-that can, which is the one hard rule this feature has.
+**Unless the page is relevant to a task.** Before the clock appears, the page
+is judged against every task in the board's **Doing** column by
+[Jev](https://docs.typesafe.ai), TypeSafe's System One model: one request,
+one yes/no question per task, each answered with a probability. A page that
+at least one task can plausibly need — the job post for *apply to 3 roles* —
+gets no clock at all; the feed gets the clock, captioned **Not relevant to any
+task**, with a small arrow beside the caption. Jev sees each task's title
+and its notes, so a note that names the sites or folders a task uses counts.
+Click the arrow and a box opens right under the clock with the cursor already
+in it: say why the page serves a task and press Enter, and Jev re-judges it
+with your explanation (the whole case so far, every time). The answer
+replaces the caption. A verdict at or over the bar (70 %, `meta` setting
+`relevance_min`) stops the clock for that page and is remembered; short of
+it, the box waits for more. Esc, or a click on any window, closes it. Jev
+answers with probabilities, not prose, so the "chat" is you making the case
+and the app wording the verdict.
 
-### Correcting the transcript
+**A case you win is remembered beyond its page.** Every later judgement is
+shown your newest won appeals (up to 12: the window, the task, what you
+said), and the rule tells Jev that the same reasoning holds for a window like
+it — so the next Stack Overflow tab for the same bug needs no new appeal. A
+win also clears Jev's earlier "not relevant" verdicts for that task, so each
+of those pages is asked again, with your case, the next time it is in front;
+until then its time is out of today's off-task total.
 
-Click any block in the raw transcript to fix what was heard: a mangled name,
-a piece of jargon, or a stretch that failed to transcribe at all, which shows
-as "(this stretch could not be transcribed)" and opens an empty box you can
-type into. It works while the meeting is still recording, while the notes are
-being written, and long afterwards — there is no state in which the record of
-what was said is frozen against you.
+**Every other window is judged too.** Any tab or app that stays in front for
+1.5 s is put to Jev the same way, flagged or not. One that is relevant to none
+of the Doing tasks gets the same clock, the same caption and arrow, and the
+same shared count. **With nothing in Doing**, no open session included,
+nothing is relevant: every window gets the clock, captioned **Nothing in
+Doing** and without an arrow, and all of that time is off task. Nothing else
+ever shows on an unflagged window: with no key or TypeSafe unreachable it
+looks exactly as it did before. A flagged window is still judged the moment
+it comes to the front.
+What counts as one page, so the same thing is judged once
+(`app/src-tauri/src/subject.rs`):
 
-Corrections go into the raw segments, because the raw segments are what the
-notes are built from: **Re-run notes** re-summarizes from them, so a fix
-reaches the next write-up. The write-up says when it predates your
-corrections, and offers the re-run rather than taking it — a re-run is a
-model call, and when to spend it is your call. Editing one block
-never rewrites another, and the timestamps stay put, so the meeting is still
-navigable after a correction.
-While the microphone is open the tab shows a red pulsing indicator, the
-elapsed time, and the level meter described below.
+- **A browser tab** is its title, without unread counts or the browser's name.
+  When the title alone says little, it is also the page it sits under: Canvas
+  calls every course's file list *Files*, so a Files tab is *Files · 2026FA -
+  INTRO DATA SCIENCE …*, judged apart from another course's Files. That page
+  comes from the browser's own history (`app/src-tauri/src/places.rs`): the
+  tab's address is the one last visited under its title, and the page above
+  is the nearest one on the same site with a title of its own, skipping the
+  site's front page and one-word listings such as *Courses*. It is used only
+  when at least half its words are not already in the tab's title. Firefox
+  and its forks (Zen among them) only; the history is copied to
+  `$XDG_RUNTIME_DIR`, read into memory and the copy deleted at once. Two
+  open tabs with the same bare title in different courses both read as the
+  one visited last, and today's earlier time on a bare title is counted
+  under what it means now.
+- **VS Code** (and Code - OSS, VSCodium, Cursor) is the project folder it has
+  open: every file of `cereal` is *VS Code: cereal*, and Jev is told the
+  project, never the file name.
+- **A terminal** is the project it is working in: every terminal in
+  `intentionality` is *Terminal: intentionality*, whether it sits at a prompt
+  in `~/D/p/i/app`, runs `npm run tauri build`, or runs a Claude Code session
+  titled `remove-wordmark-title-bar`. Outside any project it is its folder,
+  except that a Claude Code session there is its own page, since `~` holds
+  sessions about anything. A spinner frame or a `— claude --resume …` tail
+  does not make a new page.
+- **The project** behind an editor or terminal is found on the machine
+  (`app/src-tauri/src/folder.rs`), because titles rarely say where they are.
+  fish's shortened path is matched against the folders that exist. A Claude
+  Code session's folder comes from Claude Code's own records: the running
+  sessions in `~/.claude/sessions/*.json` (never the `.key` files beside them)
+  and the titles in its transcripts. VS Code's folder comes from its
+  `workspaceStorage/*/workspace.json`. The project is the nearest git
+  repository above that folder, or failing one the nearest folder with a
+  README. Jev is shown the folder, the project's name and the README's
+  opening sentence, so a task worded by purpose ("fix the meeting notepad")
+  can still match a folder called `cereal`. A Claude Code session that has no
+  title yet, and whose folder cannot be told, is not judged at all.
+- **Any other app** is its window title, so each Discord channel and each PDF
+  is its own page.
+- **Never judged:** this app's own window (so the board stays reachable
+  without a clock) and file dialogs (`xdg-desktop-portal-*`).
 
-How it works: one `pw-record` process writes raw 16 kHz mono PCM to its stdout,
-Rust processes that stream 20 ms at a time and slices it into two-minute
-chunks, and each chunk is sent to OpenAI's transcription API as it is cut. That
-is why the transcript appears during the meeting, and why Stop has only the
-final part-chunk left to transcribe before the notes can be written. Stop
-returns as soon as the microphone is shut, and that last chunk and the summary
-are finished behind it — which is what the **Writing the notes…** button is
-reporting. Each chunk's audio is held in memory, uploaded, and dropped; **no
-audio is ever written to disk or to the store.** That is unchanged by
-everything below: the meter and the source selector add no file, no recording
-and no new row.
+Verdicts are cached in the store (`relevance` table, keyed by the page as
+above and the task's text), so a page seen before is decided without
+a request and an edited task is judged afresh. The at-risk panel's footer
+counts them and offers **Forget**, which costs nothing but the requests to ask
+again.
+With no TypeSafe key the header says so and
+every flagged page shows the clock captioned **Relevance unchecked**; put the key at
+`~/.config/intentionality/typesafe_key` (chmod 600) or in `TYPESAFE_API_KEY`.
 
-### Choosing a microphone
+The checks (above) ask this same question, through this same cache and bar,
+about every page of their stretch, so the timer and the Analyses tab cannot
+disagree about a page: a page a check judged is already decided when the
+timer meets it, and an appeal won in either place holds in both.
 
-The dropdown above Start lists PipeWire's capture sources; **System default
-microphone** is the entry that changes nothing. Your choice is remembered
-across restarts by node *name*, not by PipeWire's object serial, because a
-serial is reassigned when a device is unplugged and plugged back in. If the
-remembered device is not there when the tab loads — or has gone by the time you
-press Start — the selector falls back to the system default and says so. It
-does not forget your choice: the backend reports a `pw-dump` that failed and a
-`pw-dump` that found nothing the same way, so a momentary hiccup would
-otherwise throw away a deliberate pick. Plug the device back in and it is
-selected again; only choosing something yourself changes what is remembered.
+**What leaves the machine:** for the timer, every window you stay on for
+1.5 s, flagged or not: a browser's tab title, another app's window title, an
+editor's project folder name (not its file names), a terminal's directory or
+session name. For an editor or terminal whose folder is found, that folder's
+path from `~` (never your user name), the project's name and the first
+sentence of its README go too; Claude Code's records, its transcripts and
+VS Code's workspace list are only read locally, never sent. For a browser
+tab whose title alone says little, the site's name (not the address) and the
+title of the page it sits under go too; the browser's history is only read
+locally, never sent. With them go the titles and notes of the session's Doing
+tasks, the window, task and text of your newest won appeals (up to 12), and,
+on an appeal, what you typed. This app's own window and file
+dialogs send nothing, and with no open session nothing is sent at all. For each check, the titles of up to 30 windows of its
+stretch — flagged or not — with the titles and notes of the session's tasks;
+pages already in the cache are not sent again. For the checkpoint, the
+board's task titles and the check's numbers. For each task added with no
+labels, at the gate or in the app: its title and notes, every label's name and
+up to six titles filed under each. App names travel with the titles. Nothing
+else does, and nothing goes anywhere without a key.
 
-That check is the app's own, and it has to be: `pw-record` does **not** refuse
-an unknown `--target`. It falls back to the default source, streams happily and
-reports nothing until it exits, so an unplugged microphone would otherwise
-produce a recording from the wrong device rather than an error. The
-selector is disabled while a recording is running — `pw-record` is given its
-source when it starts, so changing it mid-meeting could only mislead.
+How a window is matched, because ActivityWatch records an app and a window
+title but never a URL:
 
-An empty list is not a failure. If PipeWire is unavailable or `pw-dump` says
-nothing, only System default is offered and the detail goes to the journal.
+- **A website** is looked for by its name: `linkedin.com` matches a browser
+  window whose title contains the word *LinkedIn* ("Feed | LinkedIn — Zen
+  Browser"). `www.`, `https://` and any path are ignored, and `bbc.co.uk` looks
+  for *bbc*. A site whose tab titles never name it will not match; flag the
+  word its titles do use instead.
+- **Anything else** is looked for as typed, in the app's id (`discord`,
+  `spotify`) or, in a browser, in the title.
+- Whole words only, case-insensitive, so `x.com` does not match
+  `xdg-desktop-portal-gtk`. Titles count only inside a browser: an editor with
+  `linkedin.py` open is not LinkedIn time.
 
-### Reading the level meter
+The time comes from ActivityWatch and the verdict cache, never a model call
+(focused-window time, minus AFK past the grace — the same arithmetic as the
+Dashboard), so removing a flag loses nothing and adding one
+counts the whole of today straight away. *Which* window is in front comes
+from the shell extension below, the moment it changes — a tab switch shows
+up in milliseconds, and a page already judged is decided in the same instant.
+Without the extension (or with the v1 copy still loaded) the app falls back to
+polling ActivityWatch's newest event, a second or two behind.
 
-The bars beside the recording clock are the **raw** microphone level, before
-any gain: 24 bars, one per 100 ms window, scrolling right to left over the last
-2.4 seconds. Height is mapped from dBFS, not linear amplitude — speech across a
-room is invisible on a linear scale. The small line under them reports input,
-output and peak levels plus the gain currently applied.
+**The clock is drawn by a GNOME Shell extension.** On GNOME/Wayland an app
+cannot place its own window or keep it above the others; only the compositor
+can. So the app decides what to show and `gnome-extension/at-risk-timer@intentionality`
+only draws it, over D-Bus; it also reports every change of focused window or
+title back, and holds the appeal box the arrow opens, sending your case to
+the app and showing the answer it gets back. It hides
+itself within 4 s if the app stops talking to it. Install it once — a symlink,
+so later repo edits need only another re-login, never a re-copy:
 
-Nothing about the strip is decorative. Every bar is a measurement that arrived
-from the capture thread; there is no timer and no interpolation, so a strip
-that stops moving means the levels stopped, and a strip resting at its floor
-means the microphone is hearing nothing. After about four seconds of sustained
-low *raw* level it says **very quiet — check the mic or move closer**. That
-warning tracks the raw level only, never the gain. Under
-`prefers-reduced-motion` the bars lose their smoothing between values but keep
-updating at the same rate.
+```bash
+ln -s "$PWD/gnome-extension/at-risk-timer@intentionality" ~/.local/share/gnome-shell/extensions/
+# then log out and back in -- on Wayland the shell only looks for new
+# extensions at login, so `gnome-extensions enable` says "does not exist"
+# until then -- and after logging back in:
+gnome-extensions enable at-risk-timer@intentionality
+```
 
-The red indicator, not the meter, remains the answer to "is this recording?".
+The header says **timer overlay not installed** until that is done, and
+**timer overlay is out of date** when the extension's code changed and the
+shell is still running the old copy (log out and back in). It also says
+**window tracking is off** when the Focused Window D-Bus extension is
+disabled — without it awatcher sees only XWayland apps, so the timer, the
+Dashboard and every analysis go quietly blind (this happened for two days in
+October 2026, when another extension's setup rewrote the enabled list; the
+fix is `gnome-extensions enable focused-window-dbus@flexagoon.com`).
 
-### Automatic gain, and what it cannot do
-
-A speaker across a room arrives far below what the transcription model wants,
-and the internal laptop microphone is already at its hardware ceiling
-(`amixer -c0 sget Dmic0` reads `Capture 70 [100%] [20.00dB]` against a limit of
-70; `pw-record --volume` caps at 1.0). So the capture path applies bounded
-digital gain: up to +30 dB toward a conservative -20 dBFS target, held rather
-than raised whenever the raw input is below a noise floor, with a soft limiter
-before the 16-bit conversion so a sudden loud frame compresses instead of
-clipping.
-
-**Gain increases amplitude, not information.** If distant speech and room noise
-arrive at the same signal-to-noise ratio, both are raised together, and
-over-amplified room noise is a known way to make these models hallucinate. A
-USB boundary microphone, a lavalier, or anything else closer to the speaker is
-the real fix for a lecture; this is what makes the room *audible*, not what
-makes it *clear*.
-
-Set `INTENTIONALITY_AGC=off` to capture without it. The meter still runs, so
-this is a controlled A/B and not a different program — which matters precisely
-because no audio is kept to compare afterwards.
-
-### Configuration
-
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `INTENTIONALITY_AGC` | on | `off` disables automatic gain; metering is unaffected. |
-| `INTENTIONALITY_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | Also accepts `whisper-1`. Anything else is refused at Start. |
-| `INTENTIONALITY_TRANSCRIBE_LANGUAGE` | `en` | An ISO-639-1 code. **Recording another language needs this set.** |
-
-Both transcription variables are validated before the microphone opens, so a
-typo costs a Start error rather than a recorded meeting that turns out to have
-been rejected chunk by chunk. The allowed model list is short on purpose:
-diarization models are rejected even though the endpoint takes them, because
-their request and response shape differs from the carry-forward `prompt` this
-app uses to stitch chunk boundaries. A model override is not a language
-setting; the two are separate for that reason.
-
-Recording lives in Rust, not in the React component, so switching to the Board
-and back does not stop it. If a chunk fails to transcribe the meeting carries
-on and the gap is shown in the transcript rather than hidden. If the app is
-killed mid-meeting, everything transcribed up to that point is already saved
-and the meeting is marked failed on the next start rather than left recording
-forever. If the model call fails, the transcript is still there and the detail
-pane offers a retry that costs no audio.
-
-Action items are proposals, not tasks. Each gets a checkbox, and **Add N to
-backlog** inserts the ticked ones as backlog tasks (`source = 'meeting'`) that
-the next gate offers you. Approving twice cannot insert twice.
-
-**What leaves the machine.** This is the largest exception to "all data stays
-local" in the project. The analysis call sends app and window names; this sends
-what was said in a room, and it can capture people who never agreed to it. The
-audio goes to OpenAI and the transcript then goes to Anthropic for the notes.
-Both happen only between your Start and your Stop.
-
-Level data stays on the machine and is never stored: the meter's events are
-ephemeral, and the journal gets one summary line per two-minute chunk (raw and
-output RMS, peak, median and maximum gain) and never a sample. That line still
-reveals when a room was acoustically active, which is why it is a summary.
-
-The transcript is treated as untrusted input, like window titles: it is wrapped
-in delimiters the transcript itself cannot forge, and the model is told it is a
-recording of what people said and never instructions to follow. A participant
-saying "ignore your previous instructions" is recorded, not obeyed.
+To check the timer from a terminal (GNOME refuses screenshots to other
+programs): `gdbus call --session --dest org.gnome.Shell --object-path
+/org/intentionality/Timer --method org.intentionality.Timer.State` — it
+reports the caption, whether the arrow is up, and the focused window as the
+shell sees it. The app logs every change of what is on screen, and every page
+a task excused: `journalctl --user -b | grep 'at risk'`.
 
 ## ActivityWatch
 
@@ -765,10 +844,12 @@ still display, and observations show as unavailable.
 
 A single SQLite file: `~/.local/share/intentionality/store.db`. Tables:
 `session`, `task` (rows with `session_id NULL` are the backlog),
-`label` + `task_label` (the tags a task wears), `analysis`,
-`meeting` + `meeting_segment` + `meeting_action` (the note taker), and `meta`
-(schema version + settings). Recorded audio is **not** among them — each chunk
-is transcribed and dropped, so only text is ever stored. Only `gate/store.py` and the app's
+`label` + `task_label` (the tags a task wears), `risk_app` (the flagged
+at-risk apps), `relevance` (Jev's cached page-vs-task verdicts), `analysis`,
+and `meta` (schema version + settings). `meeting`, `meeting_segment`,
+`meeting_action` and `meeting_file` are dormant: they hold what the removed
+meeting note taker recorded, and nothing reads or writes them any more.
+Only `gate/store.py` and the app's
 `db.rs` touch this file; migrations belong to Python alone — `store.init()`
 upgrades old stores (after an online self-backup to `store.db.v1.bak`), and
 the app refuses politely with `python3 -m gate migrate` when the schema is
@@ -789,26 +870,14 @@ older than it understands. Inspect it anytime with the `sqlite3` CLI.
 | `INTENTIONALITY_GATE_INSPECT` | Enables the WebKit inspector on the gate, for design work | *(off)* |
 | `INTENTIONALITY_GATE_SANDBOX` | Puts WebKit's sandbox back for one run — a diagnostic, see "The graphical gate" | *(sandbox off)* |
 
-Two keys, two files, two providers: the Anthropic key at
-`~/.config/intentionality/api_key` (analyses, checkpoints and meeting notes)
-and the OpenAI key at `~/.config/intentionality/openai_key` (transcription
-only). Each is read by exactly one module and neither reaches the webview.
-
-Meeting notes run on `claude-sonnet-5`;
-analyses and checkpoints stay on `claude-opus-5`. Meeting attachments are
-capped at 25 MB per file and 50 MB per meeting. PDFs and images are uploaded
-to the Anthropic Files API when a notes run starts, referenced by id, and
-deleted when the run ends however it ends. Each upload also carries a 4-hour
-expiry in case the app dies mid-run. Text and Office files send only their
-extracted text.
-
-The analysis model (`claude-opus-5`) lives in `app/src-tauri/src/claude.rs`;
-the key comes from `~/.config/intentionality/api_key` or `ANTHROPIC_API_KEY`
-and never reaches the webview. Window titles are the least trustworthy input in
-that prompt — a page can title itself anything, including something addressed
-to the model — so each one is flattened to a single line, quoted, and
-length-capped before it goes in, and the system prompt says outright that
-titles are data to judge and never instructions to follow.
+The TypeSafe client is `app/src-tauri/src/jev.rs` (model alias `jev-latest`;
+the versioned model that answered is stored with every verdict and every
+check). The key comes from `~/.config/intentionality/typesafe_key` or
+`TYPESAFE_API_KEY` and never reaches the webview; `TYPESAFE_API_URL` points
+the client at a local stub for testing. A window title is the least
+trustworthy input — a page can title itself anything — but it travels as a
+JSON field, not inside a prompt, and Jev answers only with probabilities, so
+the worst a title can do is sway its own page's verdict.
 
 ## Project layout
 
@@ -831,20 +900,27 @@ gate/
 ├── handoff.py     # launches the desktop as a child, waits
 ├── debrief.py     # end-of-session per-task resolution
 ├── store.py       # the only Python module that touches sqlite3; owns migrations
-├── schema.sql     # session / task / analysis / meeting / meta tables (v10)
+├── schema.sql     # session / task / analysis / meta tables (v14)
 ├── ui.py          # the welcome list + questions; terminal by default, or a backend
 ├── gui.py         # the WebKit backend, for running under cage
 ├── webstate.py    # the welcome screen as data -- pure, no gi, so it is testable
+├── autolabel.py   # Jev files a typed, unlabelled task under a label (the gate's one request)
 ├── config.py      # paths and env var names
 └── webui/         # the built React bundle (committed: login cannot run npm)
 
 app/                # the Tauri desktop app, and the gate's front end
-├── src/            # React + Tailwind: Board, Analyses, Meetings, Dashboard
+├── src/            # React + Tailwind: Board, Analyses, Dashboard
 │   └── ui/         # the shared theme and components, used by both bundles
 ├── gate-ui/        # the gate's React, built into gate/webui/ by build:gate
-└── src-tauri/src/  # Rust: db, aw, observed, claude, scheduler, commands,
-                    #       meeting + record + gain + level + audio
-                    #       + transcribe (the note taker)
+└── src-tauri/src/  # Rust: db, aw, observed, scheduler, commands,
+                    #       screen_time + overlay (the at-risk timer),
+                    #       relevance + jev (is the page relevant to a task?),
+                    #       analysis + check (the checks, judged by Jev),
+                    #       autolabel (a new card filed under a label by Jev)
+
+gnome-extension/
+└── at-risk-timer@intentionality/  # draws the at-risk timer, reports the focused
+                                   # window (symlinked into ~/.local/share/gnome-shell/extensions)
 
 tests/
 ├── test_store.py   # data-layer tests: migration, carry, close idempotency
@@ -853,8 +929,10 @@ tests/
 ├── test_welcome.py # the shared list model and the terminal welcome
 ├── test_gui.py     # the ui backend seam, button labels, `gate handoff`
 ├── test_webstate.py # the welcome screen's state, with no display and no gi
+├── test_autolabel.py # filing by Jev: policy, the request (local stub), the app's twin
 ├── test_resume.py  # the away-time threshold that decides a resume gate
-└── test_units.py   # the systemd units and launchers: no Exec into /home, PAM
+├── test_units.py   # the systemd units and launchers: no Exec into /home, PAM
+└── test_extension.py # the timer extension: clock arithmetic (under gjs), layout
 ```
 
 `flow.py` never imports `sqlite3` or the network — it only calls into

@@ -1,6 +1,4 @@
 use crate::db;
-use crate::models::RecordingNow;
-use crate::record;
 use rusqlite::Connection;
 use std::sync::Mutex;
 
@@ -11,46 +9,20 @@ pub struct AppState {
     /// and race on where the latest analysis ended — both runs would judge the same window.
     /// A tokio mutex, not a std one: it is held across awaits.
     pub analysis_lock: tokio::sync::Mutex<()>,
+    /// Poked when an appeal writes a verdict, so the timer loop judges the
+    /// page in front again at once instead of on its next scheduled look.
+    pub relevance_changed: tokio::sync::Notify,
+    /// Poked by the timer loop when unexcused at-risk time since the last
+    /// check reaches meta `drift_check_minutes`: the analysis loop then runs
+    /// a check early rather than waiting for its draw.
+    pub drift_check: tokio::sync::Notify,
+    /// Seconds a "Not relevant to any task" clock has been on screen since
+    /// the last check landed (or the session changed).
+    drift: Mutex<f64>,
     session_id: Mutex<Option<i64>>,
     /// When this process started. The bar a session has to clear to be
     /// adopted mid-flight — see main::adopt_session_after.
     app_started_at: String,
-    /// The meeting the microphone is feeding, if any. Its presence is what
-    /// refuses a second Start, and holding the Stopper here is what lets the
-    /// Stop command reach a pw-record process owned by a background task.
-    meeting: Mutex<Option<MeetingHandle>>,
-}
-
-pub struct MeetingHandle {
-    pub id: i64,
-    /// When the microphone opened for this recording — the meeting's start
-    /// for a new one, the moment it was picked back up for a resumed one.
-    pub since: String,
-    stopper: Option<record::Stopper>,
-    /// The task draining the microphone. Stop awaits it so the final chunk is
-    /// transcribed and stored before the transcript is handed to the model.
-    capture: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl MeetingHandle {
-    pub fn new(
-        id: i64,
-        since: String,
-        stopper: Option<record::Stopper>,
-        capture: tokio::task::JoinHandle<()>,
-    ) -> Self {
-        Self { id, since, stopper, capture: Some(capture) }
-    }
-    /// Close the microphone. The capture task then sees EOF, flushes its tail
-    /// chunk and finishes.
-    pub fn stop_capture(&mut self) {
-        if let Some(stopper) = self.stopper.take() {
-            stopper.stop();
-        }
-    }
-    pub fn take_capture(&mut self) -> Option<tokio::task::JoinHandle<()>> {
-        self.capture.take()
-    }
 }
 
 impl AppState {
@@ -58,13 +30,27 @@ impl AppState {
         Self {
             conn: Mutex::new(conn),
             analysis_lock: tokio::sync::Mutex::new(()),
+            relevance_changed: tokio::sync::Notify::new(),
+            drift_check: tokio::sync::Notify::new(),
+            drift: Mutex::new(0.0),
             session_id: Mutex::new(session_id),
             app_started_at: db::now(),
-            meeting: Mutex::new(None),
         }
     }
     pub fn session_id(&self) -> Option<i64> {
         *self.session_id.lock().unwrap()
+    }
+    /// Count `secs` more of unexcused at-risk time; the new total.
+    pub fn add_drift(&self, secs: f64) -> f64 {
+        let mut drift = self.drift.lock().unwrap();
+        *drift += secs.max(0.0);
+        *drift
+    }
+    pub fn drift_seconds(&self) -> f64 {
+        *self.drift.lock().unwrap()
+    }
+    pub fn reset_drift(&self) {
+        *self.drift.lock().unwrap() = 0.0;
     }
     /// Make the held session match the store: let go of one closed elsewhere
     /// and, in the same step, adopt its successor — what the resume gate
@@ -87,26 +73,9 @@ impl AppState {
         }
         let opened = crate::adopt_session_after(&conn, &self.app_started_at);
         *held = opened;
+        // Drift belongs to the session it was counted in.
+        self.reset_drift();
         (closed, opened)
-    }
-
-    pub fn meeting_id(&self) -> Option<i64> {
-        self.meeting.lock().unwrap().as_ref().map(|m| m.id)
-    }
-    pub fn recording(&self) -> Option<RecordingNow> {
-        self.meeting
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|m| RecordingNow { meeting_id: m.id, since: m.since.clone() })
-    }
-    pub fn set_meeting(&self, handle: MeetingHandle) {
-        *self.meeting.lock().unwrap() = Some(handle);
-    }
-    /// Take the running meeting out. Taking rather than reading is what makes
-    /// two concurrent Stops safe: only one of them gets the handle.
-    pub fn take_meeting(&self) -> Option<MeetingHandle> {
-        self.meeting.lock().unwrap().take()
     }
 }
 
@@ -163,6 +132,24 @@ mod tests {
         close(&state, old);
         assert_eq!(state.sync_session(), (Some(old), None));
         assert_eq!(state.session_id(), None);
+    }
+
+    #[test]
+    fn drift_counts_up_and_starts_over_with_a_new_session() {
+        let conn = db::tests::store();
+        let old = open_session(&conn);
+        let state = AppState::new(conn, Some(old));
+        assert_eq!(state.add_drift(1.0), 1.0);
+        assert_eq!(state.add_drift(-5.0), 1.0); // a clock running backwards adds nothing
+        assert_eq!(state.add_drift(2.5), 3.5);
+        state.sync_session(); // still open: nothing changes, drift included
+        assert_eq!(state.drift_seconds(), 3.5);
+        close(&state, old);
+        state.sync_session();
+        assert_eq!(state.drift_seconds(), 0.0);
+        state.add_drift(4.0);
+        state.reset_drift();
+        assert_eq!(state.drift_seconds(), 0.0);
     }
 
     #[test]

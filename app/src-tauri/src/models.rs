@@ -20,20 +20,10 @@ pub struct Session {
     pub task_count: i64,
 }
 
-/// One PipeWire capture node, for the source selector.
-#[derive(Serialize, Debug)]
-pub struct AudioSource {
-    /// What `pw-record --target` is given: the node name. Never the object
-    /// serial, which is reassigned when a device reconnects.
-    pub target: String,
-    /// What a person reads. Never passed to pw-record.
-    pub label: String,
-}
-
 /// A tag a task wears. Free text the user invented; the colour was assigned
 /// when the label was first created and never changes, so the same word is the
 /// same colour on every card.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Label {
     pub name: String,
     pub color: String,
@@ -48,7 +38,7 @@ pub struct LabelSummary {
     pub uses: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct Task {
     pub id: i64,
     pub session_id: Option<i64>,
@@ -116,6 +106,96 @@ pub struct Analysis {
     pub recommendation_note: Option<String>,
 }
 
+/// What Jev judged for one check, stored as analysis.judged_json. A
+/// snapshot: the relevance cache it was read from changes later (appeals,
+/// edits, Forget), and the alignment on the row must keep matching this
+/// breakdown. Rows written before v14 have none and show the old way.
+/// `default` everywhere so a field added later reads old rows.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(default)]
+pub struct Judged {
+    /// Every versioned Jev behind the verdicts used, oldest cache row first.
+    pub models: Vec<String>,
+    /// The bar a verdict had to clear: meta relevance_min at the time.
+    pub threshold: f64,
+    /// "scheduled", "manual", "drift" (early, on unexcused at-risk time), or
+    /// "checkpoint".
+    pub trigger: String,
+    /// Time on each task the check could credit, board order.
+    pub tasks: Vec<TaskTime>,
+    /// The stretch's pages, most time first, as far as the check looked.
+    pub pages: Vec<JudgedPage>,
+    pub aligned_seconds: f64,
+    pub off_seconds: f64,
+    /// Time no verdict covers: pages past the cap, the "(other)" rollup, and
+    /// pages Jev could not be asked about.
+    pub unjudged_seconds: f64,
+    /// Flagged apps in this stretch, flag order. Empty when none was used.
+    pub risk: Vec<RiskTime>,
+    /// The checkpoint's recommendation as Jev chose it. None on checks.
+    pub pick: Option<Pick>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(default)]
+pub struct TaskTime {
+    pub task_id: i64,
+    pub title: String,
+    pub seconds: f64,
+}
+
+/// One page of a check's stretch and how it was decided.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(default)]
+pub struct JudgedPage {
+    /// The window as ActivityWatch recorded it: what an appeal is opened for.
+    pub app: String,
+    pub title: String,
+    /// The title as shown: unread count and browser name taken off.
+    pub name: String,
+    /// The cache key's page half.
+    pub page: String,
+    pub seconds: f64,
+    /// "excused" (a task cleared the bar), "no_task" (every task judged, none
+    /// did) or "unjudged".
+    pub verdict: String,
+    /// The excusing verdict, or else the closest one: what the row shows.
+    pub task_id: Option<i64>,
+    pub task_title: Option<String>,
+    pub probability: Option<f64>,
+    /// "model" or "appeal".
+    pub source: Option<String>,
+}
+
+/// One flagged app's time in a check's stretch, split by what the verdicts
+/// said about the pages it was on.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(default)]
+pub struct RiskTime {
+    pub name: String,
+    pub seconds: f64,
+    pub excused_seconds: f64,
+    pub no_task_seconds: f64,
+    pub unjudged_seconds: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(default)]
+pub struct Pick {
+    /// The catalog id that was used, after validation.
+    pub id: String,
+    /// Jev's probability for every option it was offered.
+    pub probabilities: BTreeMap<String, f64>,
+    pub confidence: f64,
+}
+
+/// One analysis opened in the tab: what was tracked, and what Jev made of it.
+#[derive(Serialize)]
+pub struct AnalysisDetail {
+    pub observed: Observed,
+    pub judged: Option<Judged>,
+}
+
 #[derive(Serialize)]
 pub struct Health {
     pub schema_version: i64,
@@ -126,103 +206,101 @@ pub struct Health {
     /// Why the resume gate will not fire, when it will not. None = installed
     /// and matching the repo (or no repo to compare against).
     pub resume_gate: Option<String>,
+    /// Why the at-risk timer cannot reach the screen, when it cannot: the
+    /// GNOME Shell extension that draws it is missing or older than this app.
+    pub overlay: Option<String>,
+    /// Set when ActivityWatch cannot see Wayland windows, because the Focused
+    /// Window D-Bus extension it reads them from is off. Every observation is
+    /// then blind, the timer included.
+    pub window_tracking: Option<String>,
+    /// Set when pages cannot be judged for relevance: no TypeSafe key. The
+    /// timer then shows for every flagged page, captioned as unchecked, and
+    /// checks are skipped.
+    pub relevance: Option<String>,
 }
 
-/// A transcribed meeting. `state` says where it is, so a meeting whose notes
-/// failed still displays with its transcript rather than looking empty.
-///
-/// This is the list row as well as the detail header, so it deliberately
-/// carries no large text: `notes`, the transcript and the write-up
-/// (`summary`) live on `MeetingDetail`, which is only ever fetched one
-/// meeting at a time.
-#[derive(Serialize)]
-pub struct Meeting {
+/// An app or website the user flagged as at risk, by the name they typed.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct RiskApp {
     pub id: i64,
-    pub session_id: Option<i64>, // None = recorded between sessions
-    pub started_at: String,
-    pub ended_at: Option<String>,
-    pub title: String,
-    // "recording" | "summarizing" | "done" | "failed". ('cleaning' is only
-    // ever seen on a row a build with the old repair pass left behind.)
-    pub state: String,
+    pub name: String,
+}
+
+/// One flagged app's time today: every moment it was the focused window and
+/// the user was not away.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct RiskTotal {
+    pub id: i64,
+    pub name: String,
+    pub seconds: f64,
+}
+
+/// Today on the at-risk apps. `total` counts a moment once however many flags
+/// matched it, so it can be less than the rows' sum, never more.
+#[derive(Serialize, Debug)]
+pub struct RiskToday {
+    pub apps: Vec<RiskTotal>,
+    pub total: f64,
+    /// Rows in the relevance cache: pages × tasks Jev has judged.
+    pub judged: i64,
+    /// Why no time could be read (ActivityWatch down). The flags are still
+    /// listed, at zero, so one can be removed while AW is away.
     pub error: Option<String>,
-    pub segment_count: i64,
-    /// Whether notes have been written. 'done' without them means stopped
-    /// and waiting for Write notes; this lets the list say so without
-    /// carrying the write-up itself.
-    pub has_summary: bool,
 }
 
-/// The microphone is open on this meeting, and has been since `since`.
-///
-/// `since` is not the meeting's `started_at`: a meeting picked back up a day
-/// after it ended has been recording for minutes, not a day, and the clock on
-/// the record bar should say so. It lives in Rust with the recording itself,
-/// so a tab switch that remounts the UI gets the same answer back.
-#[derive(Serialize)]
-pub struct RecordingNow {
-    pub meeting_id: i64,
-    pub since: String,
+/// Today since local midnight, across sessions, as the Dashboard leads with
+/// it: where the active time went by the timer's own rule (a page is relevant
+/// when some task of the session it fell in clears the bar).
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+pub struct TodayTime {
+    pub active_seconds: f64,
+    pub afk_seconds: f64,
+    pub aligned_seconds: f64,
+    pub off_seconds: f64,
+    /// Time no verdict covers, `outside_seconds` included.
+    pub unjudged_seconds: f64,
+    /// Active time in no session: no tasks, so nothing to be relevant to.
+    pub outside_seconds: f64,
+    /// Relevant time by the task that excused it, most first. Carried copies
+    /// of one task are one row.
+    pub tasks: Vec<TaskTime>,
+    /// Unjudged pages Jev could be asked about now, up to one check's worth.
+    pub askable: usize,
+    /// The bar a verdict has to clear: meta relevance_min.
+    pub threshold: f64,
+    /// Why some pages could not be judged on the last ask (no key, Jev down).
+    pub error: Option<String>,
 }
 
-#[derive(Serialize)]
-pub struct MeetingSegment {
-    pub id: i64,
-    pub seq: i64,
-    pub started_at: String,
-    pub text: String, // "" when that chunk's transcription failed
+/// Jev's verdict on one page for one task on the board. `probability` is
+/// None while the task has not been judged against this page (a cache miss
+/// the model could not be asked about).
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct Verdict {
+    pub task_id: i64,
+    pub task_title: String,
+    pub probability: Option<f64>,
+    /// "model" (the page alone) or "appeal" (with the user's argument).
+    pub source: Option<String>,
+    pub model: Option<String>,
+    pub created_at: Option<String>,
 }
 
-#[derive(Serialize)]
-pub struct MeetingAction {
-    pub id: i64,
-    pub position: i64,
-    pub text: String,
-    /// None until approved. Some(id) is the record that this action already
-    /// became a backlog task, which is what stops a second approval from
-    /// inserting it twice.
-    pub task_id: Option<i64>,
-}
-
-/// A file the user attached as context for one meeting.
-///
-/// Note what is absent: `path` and `extracted`. The webview never learns where
-/// this app put the copy, and never gets the file's text back out -- it went
-/// in as context for the model, and the chip only needs enough to be
-/// recognised and removed.
-#[derive(Serialize)]
-pub struct MeetingFile {
-    pub id: i64,
-    pub position: i64,
-    pub name: String, // the original basename, display only
-    pub kind: String, // "text" | "pdf" | "image" | "office"
-    pub bytes: i64,
-    pub added_at: String,
-}
-
-/// One meeting with everything the detail pane needs, in a single command:
-/// the transcript arrives as segments for the live view while recording, and
-/// stitched into one text for the editor once it has stopped.
-#[derive(Serialize)]
-pub struct MeetingDetail {
-    pub meeting: Meeting,
-    pub segments: Vec<MeetingSegment>,
-    pub actions: Vec<MeetingAction>,
-    /// What the user typed. Never model output.
-    pub notes: String,
-    /// The write-up: one markdown document, the model's draft until the user
-    /// edits it. None until the model has run.
-    pub summary: Option<String>,
-    /// When the user last saved an edit to `summary`; None while it is as the
-    /// model wrote it. The UI asks before a re-run overwrites an edited
-    /// document, and this is how it knows to.
-    pub summary_edited_at: Option<String>,
-    /// `db::transcript`: what the editor shows and what the model is given.
-    pub transcript: String,
-    /// When the user last edited the transcript (or it grew on a resume);
-    /// None while it is as the current write-up saw it. Non-None means the
-    /// write-up was made from an older transcript, which is what the stale
-    /// marker says and what Re-run notes fixes.
-    pub transcript_edited_at: Option<String>,
-    pub files: Vec<MeetingFile>,
+/// A page judged against the session's unfinished tasks, board order.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct Judgement {
+    /// The cache key: window class and normalised title, lowercased.
+    pub app: String,
+    pub page: String,
+    /// The title as the shell showed it.
+    pub title: String,
+    pub verdicts: Vec<Verdict>,
+    /// Index into `verdicts` of the task that excuses the page, if one does.
+    pub relevant: Option<usize>,
+    pub threshold: f64,
+    /// No open session, or nothing unfinished on it: nothing to be relevant to.
+    pub no_tasks: bool,
+    /// Why the model could not be asked, when it could not. The verdicts the
+    /// cache already held still stand.
+    pub error: Option<String>,
 }

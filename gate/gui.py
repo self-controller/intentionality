@@ -14,7 +14,10 @@ GTK widget in this process on this process's default GLib main context, so a
 postMessage from the page arrives exactly the way a button's "clicked" used
 to: each question pushes its state and then spins the main context until an
 answer arrives. The store connection never crosses a thread and flow stays the
-plain sequential code it is. No local server, no subprocess.
+plain sequential code it is. No local server, no subprocess. The one
+exception is Jev filing a typed task under a label (autolabel.py): that
+request waits on a thread of its own, and its answer comes back to this one
+through the main context like any other event.
 
 The window cannot be closed: it has no decorations, a close request (the X a
 compositor would draw, Alt+F4, GTK's own close action) is refused, and Escape
@@ -32,10 +35,11 @@ import json
 import os
 import signal
 import sys
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 
-from . import ui, webstate
+from . import autolabel, ui, webstate
 from .ui import GateAborted
 
 # The debrief names its keys once, in an earlier print, not in every
@@ -52,6 +56,16 @@ _KNOWN_LABELS = {
 DEFAULT_FONT_PX = 26
 REFERENCE_REM_PX = 16
 
+# The cursor theme size the gate asks GTK for: exactly the width of GTK's own
+# built-in cursor images. cage has no cursor-shape protocol, so GTK 4.22 draws
+# the pointer itself from 32x32 textures (/org/gtk/libgdk/cursor/*) whose
+# hotspots are in texture pixels (pointer 14,9; text 14,15). It scales each
+# one by theme_size / 32 but hands the compositor the hotspot unscaled, so at
+# any size but 32 the drawn tip and the real pointer part company: at GNOME's
+# 24 the hand and the I-beam sat ~4.5 px down-right of where a click landed.
+# Under GNOME, mutter draws the cursor and this setting changes nothing.
+CURSOR_PX = 32
+
 # The built bundle. Committed, because login cannot depend on an npm build.
 WEBUI = Path(__file__).resolve().parent / "webui" / "index.html"
 # A synthetic base URI, so the document gets a real origin instead of an
@@ -61,13 +75,18 @@ BASE_URI = "gate://app/"
 
 # The page's background, for the window as well. The window shows through for
 # the first few hundred ms, until WebKit's web process hands over its first
-# frame; matching it to the page (theme.css --color-bg) means that gap is
+# frame; matching it to the page (gate.css --color-bg) means that gap is
 # invisible rather than a flash of whatever GTK falls back to.
-BACKGROUND = "#343a40"
+BACKGROUND = "#0c0c0c"
 
 # How long the page gets to say hello before we give up and let the terminal
 # gate run instead.
 READY_SECONDS = 10.0
+
+# After Start, how long answers about typed tasks still get to land. Jev
+# answers in well under a second; this is only the most a slow network can
+# hold the session back.
+SORT_WAIT = 3.0
 
 # The environment the webview runs in. It lives here, not in the launchers, so
 # that every entry point gets the same one: the login gate under cage, the
@@ -109,6 +128,38 @@ def webkit_env(env: Mapping[str, str]) -> dict[str, str]:
     return extra
 
 
+# Scrolling. Cage has no natural-scrolling setting, and a page that reverses
+# wheel events itself cannot win: WebKitGTK coasts after the fingers lift
+# (kinetic scrolling) without sending the page a single wheel event, so that
+# coast cannot be prevented or reversed. Measured with a virtual touchpad: the
+# page moved the right way while the fingers did, then jumped back and coasted
+# the wrong way -- the "jitter". So the window takes every scroll before
+# WebKit sees it, and tells the page how far to move (window.__gateScroll).
+#
+# CSS px per GDK unit, matching what WebKit itself scrolls (measured on
+# WebKitGTK 2.52; the same at every zoom level): a touchpad's surface units,
+# and one notch of a mouse wheel.
+TOUCHPAD_PX = 2.5
+WHEEL_PX = 105.0
+# Where the natural-scrolling choices live. Read-only, so it works at a
+# console with no session bus: dconf reads its database file directly.
+NATURAL_SCHEMAS = ("org.gnome.desktop.peripherals.touchpad", "org.gnome.desktop.peripherals.mouse")
+# GNOME's own defaults, for when the settings cannot be read.
+NATURAL_DEFAULTS = (True, False)
+
+
+def scroll_step(dx: float, dy: float, wheel: bool, natural: bool, inverted: bool) -> tuple[float, float]:
+    """CSS px to scroll the page for one GDK scroll event.
+
+    `natural` is the desktop's setting for this kind of device; `inverted`
+    says the compositor has applied it already. GNOME's mutter does, so a gate
+    run inside GNOME passes deltas through; cage never does, so at the console
+    the gate reverses them itself. Pure, so it is testable without a display."""
+    scale = WHEEL_PX if wheel else TOUCHPAD_PX
+    sign = -scale if natural and not inverted else scale
+    return dx * sign, dy * sign
+
+
 def parse_choices(prompt: str, choices: str) -> list[tuple[str, str]]:
     """(key, label) per choice: from the known key sets, else the key."""
     known = _KNOWN_LABELS.get(choices, {})
@@ -144,7 +195,12 @@ class GtkUI:
         if not Gtk.init_check() or Gdk.Display.get_default() is None:
             raise RuntimeError("no display to open a window on")
         # Before the window exists, so its very first frame is black too.
-        Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", True)
+        gtk_settings = Gtk.Settings.get_default()
+        gtk_settings.set_property("gtk-application-prefer-dark-theme", True)
+        # Size, then name: GTK passes the size on only when it has a theme
+        # name, and under cage nothing else may give it one. See CURSOR_PX.
+        gtk_settings.set_property("gtk-cursor-theme-size", CURSOR_PX)
+        gtk_settings.set_property("gtk-cursor-theme-name", "Adwaita")
         css = Gtk.CssProvider()
         css.load_from_string(f"window {{ background-color: {BACKGROUND}; }}")
         Gtk.StyleContext.add_provider_for_display(
@@ -199,6 +255,20 @@ class GtkUI:
         # itself; this controller is the backstop for when it cannot.
         keys.connect("key-pressed", self._on_key)
         self.window.add_controller(keys)
+
+        # Capture phase, the opposite of the keys and just as deliberate: the
+        # window sees each scroll before WebKit does, and claiming it keeps
+        # WebKit from scrolling or coasting at all. See TOUCHPAD_PX.
+        self._natural = self._natural_scroll()
+        self._inverted = False
+        scroll = Gtk.EventControllerScroll.new(
+            Gtk.EventControllerScrollFlags.BOTH_AXES | Gtk.EventControllerScrollFlags.KINETIC
+        )
+        scroll.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        scroll.connect("scroll-begin", self._on_scroll_begin)
+        scroll.connect("scroll", self._on_scroll)
+        scroll.connect("decelerate", self._on_decelerate)
+        self.window.add_controller(scroll)
 
         GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, self._abort)
         self.window.present()
@@ -375,11 +445,15 @@ class GtkUI:
         screen = webstate.WelcomeScreen(tasks, list(notes), error, list(labels))
         answer: list = []
 
+        # Typed rows Jev is being asked about, until each answer lands.
+        out: list = []
+
         def handle(msg: dict) -> None:
             screen.handle(msg)
             if screen.plan is not None:
                 answer.append(screen.plan)
             else:
+                self._sort(screen, out)
                 self._push(screen.state())
 
         self._handler = handle
@@ -390,7 +464,55 @@ class GtkUI:
             self._wait(answer, after=lambda: None)
         finally:
             self._handler = None
-        return answer[0]
+        # A task typed and started in one go is asked about only now, and
+        # every answer still out gets a moment, so the session starts with
+        # the labels Jev gives.
+        self._sort(screen, out)
+        self._settle(out)
+        return screen.replan()
+
+    def _sort(self, screen: webstate.WelcomeScreen, out: list) -> None:
+        """Ask Jev about each newly typed, unlabelled row, one thread each. The
+        thread only waits on the network; the answer comes back through the
+        main context, so the screen and the store stay on this thread."""
+        rows = screen.to_sort()
+        if not rows:
+            return
+        candidates = screen.candidates()
+
+        def landed(row, label) -> bool:
+            out[:] = [r for r in out if r is not row]
+            if screen.sorted(row, label) and screen.plan is None:
+                self._push(screen.state())
+            return False
+
+        for row in rows:
+            out.append(row)
+
+            def work(row=row, title=row.title, notes=row.details.notes) -> None:
+                label = autolabel.ask(title, notes, candidates)
+                self.GLib.idle_add(landed, row, label)
+
+            threading.Thread(target=work, daemon=True).start()
+
+    def _settle(self, out: list) -> None:
+        """Spin until every answer in `out` has landed or SORT_WAIT is up. An
+        answer later than that is dropped with the screen."""
+        if not out:
+            return
+        context = self.GLib.MainContext.default()
+        expired: list = []
+        tid = self.GLib.timeout_add(
+            int(SORT_WAIT * 1000), lambda: (expired.append(True), False)[1]
+        )
+        try:
+            while out and not expired and not self.closed and self._fatal is None:
+                context.iteration(True)
+        finally:
+            try:
+                self.GLib.Source.remove(tid)
+            except Exception:
+                pass
 
     def _wait(self, answer: list, after=None) -> None:
         """Spin the main loop until `answer` has an element, then clear the
@@ -421,6 +543,50 @@ class GtkUI:
             handler()
             return True
         return False
+
+    # ------------------------------------------------------------ scrolling
+
+    def _natural_scroll(self) -> tuple[bool, bool]:
+        """(touchpad, mouse): whether the desktop scrolls naturally."""
+        from gi.repository import Gio
+
+        source = Gio.SettingsSchemaSource.get_default()
+        out = []
+        for schema, default in zip(NATURAL_SCHEMAS, NATURAL_DEFAULTS):
+            try:
+                found = source.lookup(schema, True) if source else None
+                out.append(Gio.Settings.new(schema).get_boolean("natural-scroll") if found else default)
+            except Exception:
+                out.append(default)
+        return out[0], out[1]
+
+    def _scroll_page(self, call: str) -> None:
+        self.web.evaluate_javascript(f"window.__gateScroll && window.__gateScroll.{call}", -1)
+
+    def _on_scroll_begin(self, _controller) -> None:
+        # Fingers on the touchpad again: catch a coast that is still running.
+        self._scroll_page("stop()")
+
+    def _on_scroll(self, controller, dx: float, dy: float) -> bool:
+        event = controller.get_current_event()
+        if event is not None and event.get_modifier_state() & self.Gdk.ModifierType.CONTROL_MASK:
+            # Ctrl+scroll would zoom the page; the zoom is the gate's to set.
+            return True
+        wheel = controller.get_unit() == self.Gdk.ScrollUnit.WHEEL
+        inverted = False
+        if event is not None and hasattr(event, "get_relative_direction"):
+            inverted = event.get_relative_direction() == self.Gdk.ScrollRelativeDirection.INVERTED
+        if not wheel:
+            self._inverted = inverted  # for the coast that may follow
+        x, y = scroll_step(dx, dy, wheel, self._natural[1 if wheel else 0], inverted)
+        self._scroll_page(f"by({x:.2f}, {y:.2f})")
+        return True
+
+    def _on_decelerate(self, _controller, vx: float, vy: float) -> None:
+        # Only a touchpad flick ends this way. Velocity is in surface units a
+        # second, so it converts exactly like a delta.
+        x, y = scroll_step(vx, vy, False, self._natural[0], self._inverted)
+        self._scroll_page(f"fling({x:.2f}, {y:.2f})")
 
     def _on_close(self, _window) -> bool:
         # Every close arrives here, whoever asked for it: True refuses it.

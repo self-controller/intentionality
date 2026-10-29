@@ -1,14 +1,16 @@
 //! The invoke surface. Thin: every command validates, delegates to db/aw,
 //! and returns serializable models. Nothing here holds a lock across await.
 
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::models::{
-    Analysis, Arrangement, AudioSource, Board, Health, LabelSummary, Meeting, MeetingDetail,
-    Observed, RecordingNow, Session, Task,
+    Analysis, AnalysisDetail, Arrangement, Board, Health, Judgement, LabelSummary, Observed,
+    RiskApp, RiskToday, RiskTotal, Session, Task, TodayTime,
 };
+use crate::relevance::{self, Page};
 use crate::state::AppState;
 use crate::{
-    analysis, attach, audio, aw, build_info, db, meeting, observed, resume_units, scheduler,
+    analysis, autolabel, aw, build_info, db, jev, observed, overlay, resume_units, scheduler,
+    screen_time, today,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -32,7 +34,115 @@ pub async fn health(state: State<'_, AppState>) -> Result<Health> {
         // A directory walk of ~25 files, next to the network probe above.
         build: build_info::current(),
         resume_gate: resume_units::warning(),
+        // Two session-bus round trips to gnome-shell, each well under 1 ms.
+        overlay: overlay::warning().await,
+        window_tracking: overlay::window_tracking_warning().await,
+        relevance: jev::warning(),
     })
+}
+
+/// Today's time on every flagged app. AW being down still lists the flags
+/// (at zero, with the reason), so the menu can always remove one.
+#[tauri::command]
+pub async fn risk_today(state: State<'_, AppState>) -> Result<RiskToday> {
+    let (apps, judged) = {
+        let conn = state.conn.lock().unwrap();
+        (db::list_risk_apps(&conn)?, db::relevance_count(&conn)?)
+    };
+    if apps.is_empty() {
+        return Ok(RiskToday { apps: Vec::new(), total: 0.0, judged, error: None });
+    }
+    match screen_time::today(&apps).await {
+        Ok(today) => Ok(RiskToday { judged, ..today }),
+        Err(err) => Ok(RiskToday {
+            apps: apps
+                .into_iter()
+                .map(|a| RiskTotal { id: a.id, name: a.name, seconds: 0.0 })
+                .collect(),
+            total: 0.0,
+            judged,
+            error: Some(err.to_string()),
+        }),
+    }
+}
+
+/// The page as the cache knows it, for the appeal panel's first render:
+/// no request is made here. `window_app` is the window class the shell
+/// reported, `title` its title as shown.
+#[tauri::command]
+pub fn page_judgement(
+    state: State<'_, AppState>,
+    window_app: String,
+    title: String,
+) -> Result<Judgement> {
+    let conn = state.conn.lock().unwrap();
+    relevance::cached(&conn, state.session_id(), &Page { app: window_app, title })
+}
+
+/// The user's case that a page serves one of the tasks, put to Jev with the
+/// whole argument so far. The verdict is stored, and the timer loop is poked
+/// so a page just excused leaves the screen without waiting for its next
+/// look. Never an Err for a model problem: the judgement carries it.
+#[tauri::command]
+pub async fn appeal(
+    app: AppHandle,
+    window_app: String,
+    title: String,
+    argument: Vec<String>,
+) -> Result<Judgement> {
+    let argument: Vec<String> =
+        argument.into_iter().map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect();
+    if argument.is_empty() {
+        return Err(AppError::Other("say why the page serves a task".into()));
+    }
+    let judgement =
+        relevance::appeal(app.clone(), Page { app: window_app, title }, argument).await;
+    app.state::<AppState>().relevance_changed.notify_one();
+    Ok(judgement)
+}
+
+/// Drop every cached verdict. Nothing is lost but requests: the next visit
+/// to each page asks Jev again.
+#[tauri::command]
+pub fn forget_relevance(app: AppHandle, state: State<'_, AppState>) -> Result<usize> {
+    let forgotten = {
+        let conn = state.conn.lock().unwrap();
+        db::relevance_forget(&conn)?
+    };
+    app.state::<AppState>().relevance_changed.notify_one();
+    Ok(forgotten)
+}
+
+/// Today since midnight for the Dashboard, from the relevance cache alone:
+/// asks Jev nothing, so it can be polled.
+#[tauri::command]
+pub async fn today_time(app: AppHandle) -> Result<TodayTime> {
+    today::today(&app, false).await
+}
+
+/// The Dashboard's button: Jev asked about the busiest pages today still has
+/// no verdict for (a check's worth), then today again. The timer loop is
+/// poked so a page just excused leaves the screen at once.
+#[tauri::command]
+pub async fn judge_today(app: AppHandle) -> Result<TodayTime> {
+    let today = today::today(&app, true).await;
+    app.state::<AppState>().relevance_changed.notify_one();
+    today
+}
+
+#[tauri::command]
+pub fn add_risk_app(state: State<'_, AppState>, name: String) -> Result<RiskApp> {
+    if screen_time::keyword(&name).is_empty() {
+        return Err(AppError::Other("name an app or a website".into()));
+    }
+    let conn = state.conn.lock().unwrap();
+    db::add_risk_app(&conn, &name)
+}
+
+#[tauri::command]
+pub fn remove_risk_app(state: State<'_, AppState>, id: i64) -> Result<()> {
+    let conn = state.conn.lock().unwrap();
+    db::remove_risk_app(&conn, id)
 }
 
 #[tauri::command]
@@ -67,7 +177,12 @@ pub fn order_backlog(state: State<'_, AppState>, ids: Vec<i64>) -> Result<()> {
 }
 
 #[tauri::command]
-pub fn add_task(state: State<'_, AppState>, title: String, to_backlog: bool) -> Result<i64> {
+pub fn add_task(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    title: String,
+    to_backlog: bool,
+) -> Result<i64> {
     let title = title.trim();
     if title.is_empty() {
         return Err(crate::error::AppError::Other("empty title".into()));
@@ -76,14 +191,21 @@ pub fn add_task(state: State<'_, AppState>, title: String, to_backlog: bool) -> 
     if session_id.is_none() && !to_backlog {
         return Err(crate::error::AppError::Other("no open session".into()));
     }
-    let conn = state.conn.lock().unwrap();
-    db::add_task(&conn, session_id, title)
+    let id = {
+        let conn = state.conn.lock().unwrap();
+        db::add_task(&conn, session_id, title)?
+    };
+    tauri::async_runtime::spawn(autolabel::sort(app, id));
+    Ok(id)
 }
 
 /// A new card from the editor, details and all, in the session or the
-/// backlog. Same arguments as update_task, same meaning.
+/// backlog. Same arguments as update_task, same meaning. A card saved with
+/// no labels is then shown to Jev, which may file it under one
+/// (autolabel.rs); the board hears `task:labelled` when it does.
 #[tauri::command]
 pub fn create_task(
+    app: AppHandle,
     state: State<'_, AppState>,
     title: String,
     notes: String,
@@ -101,8 +223,14 @@ pub fn create_task(
         return Err(crate::error::AppError::Other("no open session".into()));
     }
     let due_date = blank_is_none(due_date.as_deref());
-    let mut conn = state.conn.lock().unwrap();
-    db::create_task(&mut conn, session_id, title, notes.trim(), due_date, &priority, &labels)
+    let id = {
+        let mut conn = state.conn.lock().unwrap();
+        db::create_task(&mut conn, session_id, title, notes.trim(), due_date, &priority, &labels)?
+    };
+    if labels.iter().all(|l| l.trim().is_empty()) {
+        tauri::async_runtime::spawn(autolabel::sort(app, id));
+    }
+    Ok(id)
 }
 
 /// The task editor saves everything it holds at once — `labels` is the full
@@ -208,11 +336,11 @@ pub fn list_recent_analyses(state: State<'_, AppState>, limit: i64) -> Result<Ve
 }
 
 /// Fetched per selected analysis rather than shipped with the whole list —
-/// the blob is far larger than the row it belongs to.
+/// the blobs are far larger than the row they belong to.
 #[tauri::command]
-pub fn get_analysis_observed(state: State<'_, AppState>, id: i64) -> Result<Observed> {
+pub fn get_analysis_detail(state: State<'_, AppState>, id: i64) -> Result<AnalysisDetail> {
     let conn = state.conn.lock().unwrap();
-    db::analysis_observed(&conn, id)
+    db::analysis_detail(&conn, id)
 }
 
 #[tauri::command]
@@ -224,7 +352,7 @@ pub fn mark_analysis_seen(state: State<'_, AppState>, id: i64) -> Result<()> {
 /// The manual trigger — the timer without the wait. Invaluable for testing.
 #[tauri::command]
 pub async fn run_analysis_now(app: AppHandle) -> Result<Option<i64>> {
-    let id = analysis::run(&app).await?;
+    let id = analysis::run(&app, analysis::Trigger::Manual).await?;
     if let Some(id) = id {
         let _ = app.emit("analysis:new", id);
     }
@@ -258,293 +386,4 @@ pub async fn run_checkpoint_now(app: AppHandle) -> Result<Option<i64>> {
     // Emits and notifies itself, so unlike run_analysis_now there is nothing
     // to do here afterwards.
     analysis::run_checkpoint(&app).await
-}
-
-// --- meetings ---------------------------------------------------------------
-
-/// The PipeWire capture sources that can be recorded from, for the selector
-/// on the Meetings screen. Empty is a valid answer and not an error: a machine
-/// with no PipeWire, or none it will admit to, must still be able to press
-/// Start and get the system default.
-///
-/// Async because it must be, exactly like `start_meeting` below: a sync
-/// command runs on the GTK main thread, where spawning a `tokio::process`
-/// panics with "there is no reactor running" inside a non-unwinding frame and
-/// aborts the whole process rather than returning an error.
-#[tauri::command]
-pub async fn list_audio_sources() -> Result<Vec<AudioSource>> {
-    Ok(audio::sources().await)
-}
-
-/// Open the microphone, optionally on a named PipeWire source. Deliberately
-/// the only way recording ever begins: no timer, no scheduler and no startup
-/// path calls this.
-///
-/// Async because it must be: a sync command runs on the main thread, and
-/// opening the microphone there panics with no reactor running and aborts the
-/// process mid-click. See record::start.
-#[tauri::command]
-pub async fn start_meeting(app: AppHandle, target: Option<String>) -> Result<RecordingNow> {
-    meeting::start(&app, target).await
-}
-
-/// Open the microphone again on a finished meeting; new chunks carry on after
-/// its last segment. The next Stop leaves the whole transcript ready to
-/// review; the old notes stay until Write notes replaces them. Async for the same reason as `start_meeting`.
-#[tauri::command]
-pub async fn resume_meeting(
-    app: AppHandle,
-    meeting_id: i64,
-    target: Option<String>,
-) -> Result<RecordingNow> {
-    meeting::resume(&app, meeting_id, target).await
-}
-
-/// Close the microphone. Returns as soon as it is shut; the tail chunk is
-/// drained in the background, and `meeting:done` fires once the meeting is
-/// stopped and its transcript ready to edit. No notes are written here.
-#[tauri::command]
-pub async fn stop_meeting(app: AppHandle) -> Result<i64> {
-    meeting::stop(&app).await
-}
-
-/// Whether a meeting is recording right now, for a UI that has just mounted
-/// or switched back to the tab. Recording lives in Rust, so the answer
-/// survives the React component being unmounted and remounted.
-#[tauri::command]
-pub fn recording_meeting(state: State<'_, AppState>) -> Result<Option<RecordingNow>> {
-    Ok(state.recording())
-}
-
-#[tauri::command]
-pub fn list_meetings(state: State<'_, AppState>, limit: i64) -> Result<Vec<Meeting>> {
-    let conn = state.conn.lock().unwrap();
-    db::list_meetings(&conn, limit.clamp(1, 200))
-}
-
-#[tauri::command]
-pub fn get_meeting(state: State<'_, AppState>, meeting_id: i64) -> Result<MeetingDetail> {
-    let conn = state.conn.lock().unwrap();
-    let meeting = db::get_meeting(&conn, meeting_id)?
-        .ok_or_else(|| crate::error::AppError::Other("no such meeting".into()))?;
-    let (summary, summary_edited_at) = db::meeting_summary(&conn, meeting_id)?;
-    Ok(MeetingDetail {
-        segments: db::meeting_segments(&conn, meeting_id)?,
-        actions: db::meeting_actions(&conn, meeting_id)?,
-        notes: db::meeting_notes_text(&conn, meeting_id)?,
-        summary,
-        summary_edited_at,
-        transcript: db::transcript(&conn, meeting_id)?,
-        transcript_edited_at: db::transcript_edited_at(&conn, meeting_id)?,
-        files: db::meeting_files(&conn, meeting_id)?,
-        meeting,
-    })
-}
-
-/// Turn ticked action items into backlog tasks. Returns how many were created,
-/// which can be fewer than asked for: an item already approved is skipped
-/// rather than inserted twice.
-#[tauri::command]
-pub fn approve_actions(
-    state: State<'_, AppState>,
-    meeting_id: i64,
-    action_ids: Vec<i64>,
-) -> Result<usize> {
-    let mut conn = state.conn.lock().unwrap();
-    db::approve_actions(&mut conn, meeting_id, &action_ids)
-}
-
-/// The scratchpad, saved. Any state: it is the user's own text, and a debounced
-/// autosave landing just after Stop must not be rejected.
-#[tauri::command]
-pub fn set_meeting_notes(
-    state: State<'_, AppState>,
-    meeting_id: i64,
-    notes: String,
-) -> Result<()> {
-    let conn = state.conn.lock().unwrap();
-    db::set_meeting_notes(&conn, meeting_id, &notes)
-}
-
-/// The edited transcript, the whole of it. Refused while recording -- see
-/// db::set_meeting_transcript.
-#[tauri::command]
-pub fn set_meeting_transcript(
-    state: State<'_, AppState>,
-    meeting_id: i64,
-    text: String,
-) -> Result<()> {
-    let mut conn = state.conn.lock().unwrap();
-    db::set_meeting_transcript(&mut conn, meeting_id, &text)
-}
-
-/// The user's edit to the write-up. Unlike the scratchpad this is refused
-/// while the notes are being written -- see db::set_meeting_summary.
-#[tauri::command]
-pub fn set_meeting_summary(
-    state: State<'_, AppState>,
-    meeting_id: i64,
-    summary: String,
-) -> Result<()> {
-    let conn = state.conn.lock().unwrap();
-    db::set_meeting_summary(&conn, meeting_id, &summary)
-}
-
-/// Open the native picker, then copy, validate and record whatever was chosen.
-///
-/// The picker runs here rather than in the webview, which is why
-/// `capabilities/default.json` still grants nothing but `core:` permissions:
-/// the same reasoning as tauri-plugin-notification. It also means a path never
-/// crosses into the frontend in either direction — the webview asks for files
-/// and gets metadata back.
-///
-/// Partial success is the normal outcome and is reported as such: picking four
-/// files where one is a 30-page PDF should attach three and say why the fourth
-/// did not, rather than failing all four.
-#[tauri::command]
-pub async fn attach_meeting_files(
-    app: AppHandle,
-    meeting_id: i64,
-) -> Result<AttachOutcome> {
-    use tauri_plugin_dialog::DialogExt;
-
-    // The blocking picker must not run on the GTK main thread, and a sync
-    // command does exactly that -- see the note on list_audio_sources above
-    // for what that costs. The oneshot keeps this off it.
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .file()
-        .set_title("Attach context for this meeting")
-        .pick_files(move |paths| {
-            let _ = tx.send(paths);
-        });
-    let picked = rx
-        .await
-        .map_err(|_| crate::error::AppError::Other("the file picker closed unexpectedly".into()))?
-        .unwrap_or_default();
-
-    let mut rejected = Vec::new();
-    for path in picked {
-        let Some(path) = path.into_path().ok() else {
-            rejected.push("that file could not be read".to_string());
-            continue;
-        };
-        let shown = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "that file".into());
-
-        // Copying, sniffing and unzipping are all blocking work on files that
-        // can be megabytes, so none of it belongs on an async worker.
-        let staged = match tokio::task::spawn_blocking({
-            let path = path.clone();
-            move || attach::stage(meeting_id, &path)
-        })
-        .await
-        {
-            Ok(Ok(staged)) => staged,
-            Ok(Err(e)) => {
-                rejected.push(format!("{shown}: {e}"));
-                continue;
-            }
-            // A panic in a parser reading someone else's file is contained
-            // here rather than taking the app down with it.
-            Err(_) => {
-                rejected.push(format!("{shown}: could not be read"));
-                continue;
-            }
-        };
-
-        let state = app.state::<AppState>();
-        let row = {
-            let mut conn = state.conn.lock().unwrap();
-            db::add_meeting_file(
-                &mut conn,
-                meeting_id,
-                &db::NewFile {
-                    name: &staged.name,
-                    path: &staged.path().to_string_lossy(),
-                    kind: staged.kind.as_str(),
-                    bytes: staged.bytes as i64,
-                    extracted: staged.extracted.as_deref(),
-                },
-                attach::MAX_FILES,
-                attach::MAX_TOTAL_FILE_BYTES,
-                attach::MAX_EXTRACTED_CHARS_TOTAL as i64,
-            )
-        };
-        match row {
-            Ok(id) => {
-                // The row committed; now put the file where it says it is. If
-                // that fails there is no file to point at, so the row goes.
-                if let Err(e) = staged.promote() {
-                    let conn = state.conn.lock().unwrap();
-                    let _ = db::delete_meeting_file(&conn, meeting_id, id);
-                    staged.discard();
-                    rejected.push(format!("{shown}: {e}"));
-                }
-            }
-            Err(e) => {
-                staged.discard();
-                rejected.push(format!("{shown}: {e}"));
-            }
-        }
-    }
-
-    // The whole chip list, not just what this call added: the frontend
-    // replaces its list wholesale and a partial one would drop the rest.
-    let state = app.state::<AppState>();
-    let conn = state.conn.lock().unwrap();
-    let files = db::meeting_files(&conn, meeting_id)?;
-    Ok(AttachOutcome { files, rejected })
-}
-
-#[derive(serde::Serialize)]
-pub struct AttachOutcome {
-    pub files: Vec<crate::models::MeetingFile>,
-    /// One readable line per file that was refused, so the user learns which
-    /// of four files was the problem rather than that "something" was.
-    pub rejected: Vec<String>,
-}
-
-#[tauri::command]
-pub fn remove_meeting_file(
-    state: State<'_, AppState>,
-    meeting_id: i64,
-    file_id: i64,
-) -> Result<()> {
-    let path = {
-        let conn = state.conn.lock().unwrap();
-        db::delete_meeting_file(&conn, meeting_id, file_id)?
-    };
-    attach::remove_file(&path);
-    Ok(())
-}
-
-/// Write (or re-write) the notes for a stopped meeting. One model call and no
-/// audio, from the transcript as the user has edited it and whatever notes
-/// and files are attached now.
-#[tauri::command]
-pub async fn rerun_meeting_notes(app: AppHandle, meeting_id: i64) -> Result<()> {
-    meeting::rerun_notes(&app, meeting_id).await
-}
-
-#[tauri::command]
-pub fn delete_meeting(state: State<'_, AppState>, meeting_id: i64) -> Result<()> {
-    if state.meeting_id() == Some(meeting_id) {
-        return Err(crate::error::AppError::Other(
-            "stop the recording before deleting it".into(),
-        ));
-    }
-    // SQLite first, filesystem after. ON DELETE CASCADE takes the rows with
-    // the meeting, and the whole directory goes after -- every copy this
-    // meeting owns is inside it, which is why there is nothing to look up.
-    // A cleanup that fails must not roll back a deletion the user already saw
-    // succeed, so it is logged and left to the startup sweep.
-    {
-        let conn = state.conn.lock().unwrap();
-        db::delete_meeting(&conn, meeting_id)?;
-    }
-    attach::remove_meeting_dir(meeting_id);
-    Ok(())
 }

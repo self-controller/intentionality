@@ -1,0 +1,9 @@
+{
+  "uuid": "at-risk-timer@intentionality",
+  "name": "intentionality at-risk timer",
+  "description": "Draws intentionality's timer at the top right of the screen while an app or website you flagged is focused and no task on your board excuses the page. GNOME doesn't let an app keep a window above the others, so intentionality needs this helper; it decides what to show, this only draws it, reports the focused window, and opens a box under the clock when you click its arrow, where you tell intentionality why the page serves a task.",
+  "shell-version": [
+    "50"
+  ],
+  "version": 3
+}

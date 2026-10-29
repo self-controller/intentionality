@@ -1,19 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { ChartNoAxesColumn, Mic, ScanEye, SquareKanban } from "lucide-react";
+import { ChartNoAxesColumn, ScanEye, SquareKanban } from "lucide-react";
 import { SegmentList, SegmentTrigger } from "@/components/SegmentTabs";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 import * as api from "./api";
 import type { Health } from "./types";
 import Analyses from "./Analyses";
+import Appeal from "./Appeal";
 import Board from "./Board";
 import Checkpoint from "./Checkpoint";
 import Dashboard from "./Dashboard";
-import Meetings from "./Meetings";
-import type { Analysis } from "./types";
+import type { Analysis, PageRef } from "./types";
 
-type Screen = "board" | "analyses" | "meetings" | "dashboard";
+type Screen = "board" | "analyses" | "dashboard";
+/** The tabs in header order, for Ctrl+Tab / Ctrl+Shift+Tab. */
+const SCREENS: Screen[] = ["board", "analyses", "dashboard"];
 
 /** Something in the header worth a glance: amber, with a dot. */
 function Warning({ children }: { children: React.ReactNode }) {
@@ -48,6 +50,9 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("board");
   const [unseen, setUnseen] = useState(0);
   const [checkpoint, setCheckpoint] = useState<Analysis | null>(null);
+  // The page an Analyses row is being appealed for, while its appeal is open.
+  // (The on-screen clock argues its own case, in the box under it.)
+  const [appeal, setAppeal] = useState<PageRef | null>(null);
   // Stable: Analyses' load effect depends on it, and a fresh function every
   // App render would tear down its listener and refetch its whole list.
   const onSeen = useCallback(() => setUnseen((n) => Math.max(0, n - 1)), []);
@@ -91,6 +96,21 @@ export default function App() {
     };
   }, []);
 
+  // Ctrl+Tab / Ctrl+Shift+Tab step through the tabs, wrapping at either
+  // end. Not while a checkpoint or an appeal is over the window.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // `code`, not `key`: on X11/Wayland Shift+Tab is the ISO_Left_Tab
+      // keysym, so `key` need not say "Tab" and the back step never fired.
+      if (!e.ctrlKey || e.code !== "Tab" || checkpoint || appeal) return;
+      e.preventDefault();
+      const step = e.shiftKey ? -1 : 1;
+      setScreen((s) => SCREENS[(SCREENS.indexOf(s) + step + SCREENS.length) % SCREENS.length]);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [checkpoint, appeal]);
+
   if (error) return <Splash>{error}</Splash>;
   if (!healthState)
     return <div className="flex min-h-screen items-center justify-center text-muted-foreground">…</div>;
@@ -114,8 +134,11 @@ export default function App() {
     // it is left and mounted fresh when it is chosen again -- as the old
     // conditional rendering did, which the screens rely on.
     <Tabs value={screen} onValueChange={(v) => setScreen(v as Screen)} className="flex min-h-screen flex-col">
-      <header className="sticky top-0 z-20 flex h-14 flex-none items-center gap-5 border-b border-border bg-background/80 px-5 backdrop-blur">
-        <span className="flex-none select-none text-lg font-semibold tracking-[-0.04em]">intentionality</span>
+      {/* The window is undecorated, so this header is its drag handle. */}
+      <header
+        data-tauri-drag-region
+        className="sticky top-0 z-20 flex h-14 flex-none items-center gap-5 rounded-t-xl border-b border-border bg-background/80 px-5 backdrop-blur"
+      >
         <ScrollArea className="min-w-0">
           <SegmentList>
             <SegmentTrigger value="board" icon={SquareKanban}>
@@ -128,9 +151,6 @@ export default function App() {
                   {unseen}
                 </span>
               )}
-            </SegmentTrigger>
-            <SegmentTrigger value="meetings" icon={Mic}>
-              Meetings
             </SegmentTrigger>
             <SegmentTrigger value="dashboard" icon={ChartNoAxesColumn}>
               Dashboard
@@ -146,23 +166,31 @@ export default function App() {
             </Warning>
           )}
           {healthState.resume_gate && <Warning>{healthState.resume_gate}</Warning>}
-          {/* Always present, not only when something is wrong: the point is
-              that the running build can be identified at a glance. */}
-          <span className="ms-1 font-mono text-[11px] text-muted-foreground">{build}</span>
+          {healthState.window_tracking && <Warning>{healthState.window_tracking}</Warning>}
+          {healthState.overlay && <Warning>{healthState.overlay}</Warning>}
+          {healthState.relevance && <Warning>{healthState.relevance}</Warning>}
         </div>
       </header>
       <TabsContent value="board" className="tab-in mt-0 flex flex-1 flex-col">
         <Board />
       </TabsContent>
       <TabsContent value="analyses" className="tab-in mt-0">
-        <Analyses hasSession={healthState.session != null} onSeen={onSeen} />
-      </TabsContent>
-      <TabsContent value="meetings" className="tab-in mt-0">
-        <Meetings />
+        <Analyses
+          hasSession={healthState.session != null}
+          sessionId={healthState.session?.id ?? null}
+          appealOpen={appeal != null}
+          onAppeal={setAppeal}
+          onSeen={onSeen}
+        />
       </TabsContent>
       <TabsContent value="dashboard" className="tab-in mt-0">
-        <Dashboard />
+        {/* The build line is at the foot of the Dashboard; a build behind
+            its source still warns up in the header. */}
+        <Dashboard build={build} />
       </TabsContent>
+      {appeal && (
+        <Appeal key={appeal.app + "\n" + appeal.title} page={appeal} onClose={() => setAppeal(null)} />
+      )}
       {checkpoint && (
         <Checkpoint
           analysis={checkpoint}

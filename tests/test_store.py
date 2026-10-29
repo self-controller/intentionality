@@ -448,6 +448,46 @@ CREATE INDEX task_session ON task (session_id, position);
 CREATE INDEX analysis_session ON analysis (session_id);
 """
 
+# v11 = v10 + task.priority, appended by ALTER TABLE.
+V11_SCHEMA = V10_SCHEMA.replace(
+    "('schema_version', '10')", "('schema_version', '11')"
+).replace(
+    "    due_date     TEXT\n);",
+    "    due_date     TEXT,\n    priority     TEXT NOT NULL DEFAULT 'medium'"
+    " CHECK (priority IN ('high', 'medium', 'low'))\n);",
+)
+
+# v12 = v11 + risk_app, a CREATE-only step.
+V12_SCHEMA = V11_SCHEMA.replace(
+    "('schema_version', '11')", "('schema_version', '12')"
+) + """
+CREATE TABLE risk_app (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    created_at TEXT NOT NULL
+);
+"""
+
+
+# v13 = v12 + relevance, a CREATE-only step.
+V13_SCHEMA = V12_SCHEMA.replace(
+    "('schema_version', '12')", "('schema_version', '13')"
+) + """
+CREATE TABLE relevance (
+    id          INTEGER PRIMARY KEY,
+    app         TEXT NOT NULL,
+    page        TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    task_text   TEXT NOT NULL,
+    task_title  TEXT NOT NULL,
+    probability REAL NOT NULL,
+    source      TEXT NOT NULL CHECK (source IN ('model', 'appeal')),
+    argument    TEXT,
+    model       TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE UNIQUE INDEX relevance_page_task ON relevance (app, page, task_text);
+"""
 
 class StoreCase(unittest.TestCase):
     def setUp(self):
@@ -648,23 +688,23 @@ class StoreCase(unittest.TestCase):
 
 
 class TestInitAndMigration(StoreCase):
-    def test_fresh_init_is_v11(self):
+    def test_fresh_init_is_v14(self):
         conn = self.fresh()
         version = conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()[0]
-        self.assertEqual(version, "11")
+        self.assertEqual(version, "14")
 
     def test_init_idempotent(self):
         conn = self.fresh()
         store.init(conn)  # second run must be a no-op, not a re-create
-        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "14")
 
     def test_migrates_v1_preserving_rows(self):
         self.v1_fixture()
         conn = self.fresh()
         # A v1 store walks all the way up, not just one step.
-        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "14")
         session = store.get_session(conn, 1)
         self.assertEqual(session["statement"], "old session")
         self.assertIsNone(session["last_heartbeat"])
@@ -692,7 +732,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v2_preserving_rows(self):
         self.v2_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "14")
         (row,) = store.get_analyses(conn, 1)
         self.assertEqual(row["headline"], "Steady")
         self.assertEqual(row["kind"], "check")  # the default the rebuild gives
@@ -729,7 +769,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v3_preserving_rows(self):
         self.v3_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "14")
         # The task rebuild is the risky half of this migration: everything
         # below was copied out of the old table and back into a new one.
         (task,) = store.get_tasks(conn, 1)
@@ -924,6 +964,68 @@ class TestInitAndMigration(StoreCase):
             )
         conn.close()
 
+    def v11_fixture(self) -> None:
+        """The shape before risk_app: one session with a high-priority task."""
+        conn = sqlite3.connect(config.STORE_PATH)
+        conn.executescript(V11_SCHEMA)
+        with conn:
+            conn.execute(
+                "INSERT INTO session (id, started_at, statement, intended_minutes,"
+                " mode) VALUES (1, '2026-10-18T09:00:00+00:00', '', 60, 'manual')"
+            )
+            conn.execute(
+                "INSERT INTO task (id, session_id, title, position, priority, created_at)"
+                " VALUES (1, 1, 'ship it', 1, 'high', '2026-10-18T09:00:00+00:00')"
+            )
+        conn.close()
+
+    def v12_fixture(self) -> None:
+        """The shape before relevance: a session, a task and one flagged site."""
+        conn = sqlite3.connect(config.STORE_PATH)
+        conn.executescript(V12_SCHEMA)
+        with conn:
+            conn.execute(
+                "INSERT INTO session (id, started_at, statement, intended_minutes,"
+                " mode) VALUES (1, '2026-10-26T09:00:00+00:00', '', 60, 'manual')"
+            )
+            conn.execute(
+                "INSERT INTO task (id, session_id, title, position, priority, created_at)"
+                " VALUES (1, 1, 'ship it', 1, 'high', '2026-10-26T09:00:00+00:00')"
+            )
+            conn.execute(
+                "INSERT INTO risk_app (id, name, created_at)"
+                " VALUES (1, 'linkedin.com', '2026-10-26T09:00:00+00:00')"
+            )
+        conn.close()
+
+    def v13_fixture(self) -> None:
+        """The shape before judged_json: a session with one Claude-era check
+        and one cached verdict."""
+        conn = sqlite3.connect(config.STORE_PATH)
+        conn.executescript(V13_SCHEMA)
+        with conn:
+            conn.execute(
+                "INSERT INTO session (id, started_at, statement, intended_minutes,"
+                " mode) VALUES (1, '2026-10-27T09:00:00+00:00', '', 60, 'manual')"
+            )
+            conn.execute(
+                "INSERT INTO task (id, session_id, title, position, priority, created_at)"
+                " VALUES (1, 1, 'ship it', 1, 'high', '2026-10-27T09:00:00+00:00')"
+            )
+            conn.execute(
+                "INSERT INTO analysis (id, session_id, created_at, window_start,"
+                " window_end, headline, alignment, body, observed_json)"
+                " VALUES (1, 1, '2026-10-27T10:00:00+00:00', '2026-10-27T09:00:00+00:00',"
+                " '2026-10-27T10:00:00+00:00', 'Mostly on the code', 80, 'Editor time.', '{}')"
+            )
+            conn.execute(
+                "INSERT INTO relevance (app, page, title, task_text, task_title,"
+                " probability, source, model, created_at) VALUES ('code', 'main.rs',"
+                " 'main.rs', 'ship it\n', 'ship it', 0.9, 'model', 'jev-1.14.0',"
+                " '2026-10-27T09:30:00+00:00')"
+            )
+        conn.close()
+
     def test_migration_end_state_matches_schema_sql(self):
         """schema.sql promises to describe what the migrations produce.
 
@@ -944,6 +1046,9 @@ class TestInitAndMigration(StoreCase):
             "v8_fixture",
             "v9_fixture",
             "v10_fixture",
+            "v11_fixture",
+            "v12_fixture",
+            "v13_fixture",
         ):
             with self.subTest(fixture=name):
                 self._assert_end_state_matches(getattr(self, name))
@@ -1033,7 +1138,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v4_preserving_rows(self):
         self.v4_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "14")
         # The v5 meeting rebuild is the risky half: every row was copied out
         # of the old table and back into a new one with two more columns.
         meeting = conn.execute("SELECT * FROM meeting WHERE id = 1").fetchone()
@@ -1157,7 +1262,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v5_preserving_rows(self):
         self.v5_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "14")
         meeting = conn.execute("SELECT * FROM meeting WHERE id = 1").fetchone()
         self.assertEqual(meeting["title"], "Roadmap")
         self.assertEqual(meeting["notes"], "Dana = Dana K.")
@@ -1199,7 +1304,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v6_preserving_rows(self):
         self.v6_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "14")
         rows = conn.execute("SELECT * FROM task ORDER BY id").fetchall()
         self.assertEqual([r["title"] for r in rows], ["on the board", "carried once"])
         # Every existing task starts with empty notes, never NULL.
@@ -1299,7 +1404,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v7_preserving_rows(self):
         self.v7_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "14")
         rows = conn.execute("SELECT * FROM task ORDER BY id").fetchall()
         self.assertEqual([r["notes"] for r in rows], ["half done", "half done"])
         # Every existing task starts with no due date.
@@ -1331,7 +1436,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v8_preserving_rows(self):
         self.v8_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "14")
         meeting = conn.execute("SELECT * FROM meeting WHERE id = 1").fetchone()
         # Nothing the meeting already held may be disturbed by the new column.
         self.assertEqual(meeting["title"], "Standup")
@@ -1368,7 +1473,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v9_preserving_rows_and_using_the_index(self):
         self.v9_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "14")
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM task").fetchone()[0], 2)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM analysis").fetchone()[0], 1)
         plan = " ".join(
@@ -1393,7 +1498,7 @@ class TestInitAndMigration(StoreCase):
     def test_migrates_v10_preserving_rows_at_medium_priority(self):
         self.v10_fixture()
         conn = self.fresh()
-        self.assertEqual(store.get_setting(conn, "schema_version"), "11")
+        self.assertEqual(store.get_setting(conn, "schema_version"), "14")
         rows = conn.execute(
             "SELECT id, title, notes, due_date, carried_from, priority FROM task ORDER BY id"
         ).fetchall()
@@ -1406,6 +1511,157 @@ class TestInitAndMigration(StoreCase):
         )
         self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
         self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_v12_migration_makes_backup(self):
+        self.v11_fixture()
+        self.fresh()
+        backup = Path(str(config.STORE_PATH) + ".pre-v12.bak")
+        bconn = sqlite3.connect(backup)
+        self.assertEqual(  # the backup is still v11
+            bconn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0],
+            "11",
+        )
+        bconn.close()
+
+    def test_migrates_v11_preserving_rows_with_no_risk_apps(self):
+        self.v11_fixture()
+        conn = self.fresh()
+        self.assertEqual(store.get_setting(conn, "schema_version"), "14")
+        self.assertEqual(
+            tuple(conn.execute("SELECT id, title, priority FROM task").fetchone()),
+            (1, "ship it", "high"),
+        )
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM risk_app").fetchone()[0], 0)
+        self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_a_risk_app_is_one_row_whatever_its_case(self):
+        for fixture in (None, self.v11_fixture):
+            with self.subTest(migrated=fixture is not None):
+                for leftover in Path(self._tmp.name).glob("store.db*"):
+                    leftover.unlink()
+                if fixture:
+                    fixture()
+                conn = self.fresh()
+                with conn:
+                    conn.execute(
+                        "INSERT INTO risk_app (name, created_at) VALUES ('linkedin.com', ?)",
+                        (store.now(),),
+                    )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    with conn:
+                        conn.execute(
+                            "INSERT INTO risk_app (name, created_at) VALUES ('LinkedIn.com', ?)",
+                            (store.now(),),
+                        )
+                conn.close()
+
+    def test_v13_migration_makes_backup(self):
+        self.v12_fixture()
+        self.fresh()
+        backup = Path(str(config.STORE_PATH) + ".pre-v13.bak")
+        bconn = sqlite3.connect(backup)
+        self.assertEqual(  # the backup is still v12
+            bconn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0],
+            "12",
+        )
+        bconn.close()
+
+    def test_v14_migration_makes_backup(self):
+        self.v13_fixture()
+        self.fresh()
+        backup = Path(str(config.STORE_PATH) + ".pre-v14.bak")
+        bconn = sqlite3.connect(backup)
+        self.assertEqual(  # the backup is still v13
+            bconn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0],
+            "13",
+        )
+        bconn.close()
+
+    def test_migrates_v13_keeping_claude_checks_unjudged(self):
+        """Every row from before v14 was written by Claude: judged_json NULL is
+        what tells the app to show it the old way. The verdict cache rides
+        through untouched."""
+        self.v13_fixture()
+        conn = self.fresh()
+        self.assertEqual(store.get_setting(conn, "schema_version"), "14")
+        self.assertEqual(
+            tuple(conn.execute(
+                "SELECT id, headline, alignment, judged_json FROM analysis"
+            ).fetchone()),
+            (1, "Mostly on the code", 80, None),
+        )
+        self.assertEqual(
+            tuple(conn.execute("SELECT page, probability FROM relevance").fetchone()),
+            ("main.rs", 0.9),
+        )
+        self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_migrates_v12_preserving_rows_with_no_verdicts(self):
+        self.v12_fixture()
+        conn = self.fresh()
+        self.assertEqual(store.get_setting(conn, "schema_version"), "14")
+        self.assertEqual(
+            tuple(conn.execute("SELECT id, title, priority FROM task").fetchone()),
+            (1, "ship it", "high"),
+        )
+        self.assertEqual(
+            tuple(conn.execute("SELECT id, name FROM risk_app").fetchone()), (1, "linkedin.com")
+        )
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM relevance").fetchone()[0], 0)
+        self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_a_verdict_is_one_row_per_page_and_task(self):
+        """The cache's contract: a second answer for the same page and task
+        replaces the first, whether the store was born v13 or migrated."""
+        row = (
+            "app.zen_browser.zen", "feed | linkedin", "(3) Feed | LinkedIn — Zen Browser",
+            "apply to 3 roles\n", "apply to 3 roles", "model", "jev-1.14.0",
+        )
+        for fixture in (None, self.v12_fixture):
+            with self.subTest(migrated=fixture is not None):
+                for leftover in Path(self._tmp.name).glob("store.db*"):
+                    leftover.unlink()
+                if fixture:
+                    fixture()
+                conn = self.fresh()
+                insert = (
+                    "INSERT INTO relevance (app, page, title, task_text, task_title,"
+                    " probability, source, model, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                )
+                with conn:
+                    conn.execute(insert, row[:5] + (0.2, row[5], row[6], store.now()))
+                with self.assertRaises(sqlite3.IntegrityError):
+                    with conn:
+                        conn.execute(insert, row[:5] + (0.9, row[5], row[6], store.now()))
+                with conn:
+                    conn.execute(
+                        "INSERT INTO relevance (app, page, title, task_text, task_title,"
+                        " probability, source, argument, model, created_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        " ON CONFLICT (app, page, task_text) DO UPDATE SET"
+                        " probability = excluded.probability, source = excluded.source,"
+                        " argument = excluded.argument",
+                        row[:5] + (0.9, "appeal", "I am applying there", row[6], store.now()),
+                    )
+                self.assertEqual(
+                    tuple(
+                        conn.execute(
+                            "SELECT COUNT(*), MAX(probability), MAX(source) FROM relevance"
+                        ).fetchone()
+                    ),
+                    (1, 0.9, "appeal"),
+                )
+                # Only the two sources there are.
+                with self.assertRaises(sqlite3.IntegrityError):
+                    with conn:
+                        conn.execute(
+                            insert, ("x", "y", "y", "t", "t", 0.5, "guess", "m", store.now())
+                        )
+                conn.close()
 
     def test_priority_refuses_anything_but_the_three_levels(self):
         for fixture in (None, self.v10_fixture):

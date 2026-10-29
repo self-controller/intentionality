@@ -10,7 +10,18 @@ import type { Row } from "./types";
  *  Delete is its own button and means what it says -- the task is struck
  *  through and removed for good when you start; pressing it again is the
  *  undo. "Done" is separate again: it resolves the carried original. */
-export default function TaskRow({ row, open }: { row: Row; open: boolean }) {
+export default function TaskRow({
+  row,
+  open,
+  onDetails,
+}: {
+  row: Row;
+  /** This copy of the row has the details panel under it. */
+  open: boolean;
+  /** Told before a panel opens, so the screen knows which copy asked -- a
+   *  task with several labels is listed once per label. */
+  onDetails?: () => void;
+}) {
   const marked = row.mark !== null;
 
   return (
@@ -24,7 +35,7 @@ export default function TaskRow({ row, open }: { row: Row; open: boolean }) {
       <div className="min-w-0 flex-1 pt-[0.25em]">
         <p
           className={
-            "truncate text-[1.05em] leading-snug transition-colors duration-200 " +
+            "line-clamp-2 break-words text-[1.05em] leading-snug transition-colors duration-200 " +
             (marked ? "text-muted line-through" : row.today ? "text-text" : "text-muted")
           }
           title={row.title}
@@ -44,7 +55,14 @@ export default function TaskRow({ row, open }: { row: Row; open: boolean }) {
           </Button>
         )}
         <Button
-          onClick={() => post(open ? "details_close" : "details_open", { index: row.index })}
+          onClick={() => {
+            if (open) {
+              post("details_close", { index: row.index });
+            } else {
+              onDetails?.();
+              post("details_open", { index: row.index });
+            }
+          }}
           className={open ? "!border-accent !text-accent" : ""}
         >
           Details

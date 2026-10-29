@@ -5,6 +5,18 @@
 @source "./";
 @source "../src/ui/";
 
+/* The gate's base is the desktop app's near-black (app.css --background),
+   not theme.css's grey. Only the dark end moves: inputs and wells sit one
+   step above the page, as the app's cards do, and hairlines go with them.
+   Text, muted and accent are unchanged. gui.py's BACKGROUND matches --color-bg
+   so the window behind the first frame is the same black. */
+@theme {
+  --color-bg: #0c0c0c;
+  --color-surface: #111111;
+  --color-raised: #262626;
+  --color-line: #262626;
+}
+
 /* Sizing lives in exactly one place: the webview's zoom, computed in
    gate/webview.py as (INTENTIONALITY_GATE_FONT_PX / 16) / monitor_scale.
    That makes one rem the same number of *physical* pixels under cage as it is
@@ -13,9 +25,23 @@
    scales itself. */
 
 html,
-body,
-#root {
+body {
   height: 100%;
+}
+
+/* The document is the scroller, not a div inside it. A nested overflow box
+   takes the wheel and the keys only while the pointer or focus is over it;
+   the page itself always does. Screens grow down a flex column so a short one
+   can still fill (and centre in) the window. scroll-padding keeps a focused
+   field clear of the welcome screen's sticky footer. */
+html {
+  scroll-padding-bottom: 7rem;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
 }
 
 body {
@@ -28,7 +54,8 @@ body {
   /* A console, not a document. */
   user-select: none;
   -webkit-user-select: none;
-  overflow: hidden;
+  /* Vertical scrolling only; the starfield is wider than the window. */
+  overflow-x: hidden;
 }
 
 /* Typing is the one place selection should work. */
@@ -56,7 +83,7 @@ textarea {
    layer is one element whose box-shadow is the whole field, plus an :after
    copy 2000px below it so the loop never shows a seam. The shadow list lives
    in one custom property per layer so the element and its copy share it.
-   Near-white stars on a grey sky that lightens toward the bottom. Positions are a fixed random scatter over 2000x2000px.
+   Near-white stars on the gate's black. Positions are a fixed random scatter over 2000x2000px.
 
    One tile is 2000px wide, but at the real gate (cage, 2880px panel, zoom
    1.625 at the default font size, more at smaller ones) the viewport can be
@@ -68,7 +95,7 @@ textarea {
   inset: 0;
   overflow: hidden;
   pointer-events: none;
-  background: radial-gradient(ellipse at bottom, #6c757d 0%, #343a40 55%, #212529 100%);
+  background: var(--color-bg);
   --stars-1:
     31px 1678px,
     1923px 1353px,
@@ -1107,3 +1134,124 @@ textarea {
 @media (prefers-reduced-motion: reduce) {
   .stars-col > div { animation: none; }
 }
+
+/* The shared neumorphic checkbox (theme.css), recoloured for the black page.
+   Same recipe as the app's (app.css): the chip is a shade off the page, as
+   neumorphism needs, and a hairline ring keeps its edge where the dark
+   shadow vanishes against black. Same layer, later in the bundle, so these
+   win; hover and checked are restated because theme.css's selectors for them
+   are more specific. */
+@layer components {
+  .nb-mark { background: #161616; }
+  .nb-check input:checked + .nb-mark { background: linear-gradient(145deg, #0f0f0f, #181818); }
+  .nb-check .nb-mark {
+    box-shadow:
+      inset 0 0 0 1px rgb(255 255 255 / 0.09),
+      0 1px 2px rgb(0 0 0 / 0.5);
+  }
+  .nb-check:hover .nb-mark {
+    box-shadow:
+      inset 0 0 0 1px rgb(255 255 255 / 0.18),
+      0 1px 3px rgb(0 0 0 / 0.6);
+  }
+  .nb-check input:checked + .nb-mark,
+  .nb-check input:active + .nb-mark {
+    box-shadow:
+      inset 0 0 0 1px rgb(255 255 255 / 0.12),
+      inset calc(var(--cb) * 2 / 58) calc(var(--cb) * 2 / 58) calc(var(--cb) * 4 / 58) rgb(0 0 0 / 0.6);
+  }
+  .nb-check input:focus-visible + .nb-mark { outline-color: var(--color-muted); }
+}
+
+/* ------------------------------------------------------------------------
+   Intro: "Let's get to work." through a tunnel of cards (Intro.tsx).
+   Drawn, not photographed -- the gate has no network at login and the
+   bundle is one file. Prefixed mask/clip for WebKitGTK. */
+
+.intro-dots {
+  background-image: radial-gradient(rgb(255 255 255 / 0.09) 1px, transparent 1px);
+  background-size: 28px 28px;
+  -webkit-mask-image: radial-gradient(ellipse 70% 70% at 50% 50%, #000 60%, transparent 100%);
+  mask-image: radial-gradient(ellipse 70% 70% at 50% 50%, #000 60%, transparent 100%);
+}
+
+.intro-glow {
+  background: radial-gradient(circle at center, rgb(233 236 239 / 0.07) 0%, transparent 70%);
+}
+
+.intro-ring {
+  border-radius: 9999px;
+  border: 1px solid rgb(255 255 255 / 0.07);
+}
+
+.intro-ring-dashed {
+  border-style: dashed;
+  border-color: rgb(255 255 255 / 0.06);
+}
+
+.intro-title {
+  color: var(--color-text);
+  background-image: linear-gradient(to bottom, #ffffff, #ffffff 45%, rgb(255 255 255 / 0.42));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.intro-card {
+  position: relative;
+  display: flex;
+  height: 100%;
+  width: 100%;
+  flex-direction: column;
+  justify-content: space-between;
+  overflow: hidden;
+  border-radius: 1rem;
+  padding: 1.1rem;
+  background:
+    radial-gradient(120% 80% at 0% 0%, rgb(233 236 239 / 0.1), transparent 60%),
+    linear-gradient(155deg, #1f1f1f 0%, #131313 45%, #0c0c0c 100%);
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.1),
+    0 20px 40px -12px rgb(0 0 0 / 0.9),
+    0 0 36px -10px rgb(233 236 239 / 0.14);
+}
+
+.intro-card-check {
+  height: 1.3rem;
+  width: 1.3rem;
+  border-radius: 0.35rem;
+  box-shadow: inset 0 0 0 1.5px rgb(255 255 255 / 0.22);
+}
+
+.intro-card-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  font-size: 0.95rem;
+  font-weight: 500;
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+  color: rgb(248 249 250 / 0.92);
+}
+
+.intro-card-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.intro-card-lines > span {
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: rgb(255 255 255 / 0.1);
+}
+
+.intro-card-lines > span:last-child { width: 60%; }
+
+@keyframes intro-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.intro-fade { animation: intro-fade 0.6s ease-out both; }

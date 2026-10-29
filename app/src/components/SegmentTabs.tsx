@@ -3,8 +3,7 @@ import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
 /** The app's one tab look: joined, bordered segments, with a bar under the
- *  active one (Origin UI's segmented shadcn tabs). The header nav and the
- *  meeting detail tabs both use it, so the class strings live here once. */
+ *  active one (Origin UI's segmented shadcn tabs), used by the header nav. */
 
 export function SegmentList({ className, children }: { className?: string; children: React.ReactNode }) {
   return (

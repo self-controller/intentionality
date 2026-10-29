@@ -1,4 +1,4 @@
--- Schema v10, applied in full by store.init() on a fresh database only.
+-- Schema v12, applied in full by store.init() on a fresh database only.
 -- Existing databases are upgraded by the migrations in store.py; this file
 -- must always describe the same end state those migrations produce.
 -- journal_mode is persistent; set at creation.
@@ -9,7 +9,7 @@ CREATE TABLE meta (
     value TEXT NOT NULL
 );
 
-INSERT INTO meta (key, value) VALUES ('schema_version', '11');
+INSERT INTO meta (key, value) VALUES ('schema_version', '14');
 
 CREATE TABLE session (
     id                INTEGER PRIMARY KEY,
@@ -104,8 +104,15 @@ CREATE TABLE analysis (
     -- its text: improving the wording later then applies to every past
     -- checkpoint. NULL on plain checks.
     recommendation_id   TEXT,
-    recommendation_note TEXT             -- one sentence tying the advice to
+    recommendation_note TEXT,            -- one sentence tying the advice to
                                          -- what was actually observed
+    -- v14. What Jev judged for this row, as JSON: every page of the stretch
+    -- with the task that excused it (if one did), time per task, the at-risk
+    -- line, and the checkpoint's pick. A snapshot, because the relevance
+    -- cache it was read from changes later (appeals, edits, Forget) and the
+    -- stored alignment must keep matching its breakdown. NULL = a row the
+    -- Claude-era analysis wrote. Last, because ADD COLUMN appends.
+    judged_json         TEXT
 );
 CREATE INDEX analysis_session ON analysis (session_id);  -- v10
 
@@ -211,3 +218,41 @@ CREATE TABLE meeting_file (
 );
 
 CREATE INDEX meeting_file_meeting ON meeting_file (meeting_id, position);
+
+-- Apps and websites the user flagged as at risk of eating the day: while one
+-- is the focused window the desktop app puts a timer on screen, and its header
+-- shows today's time on each. Only the flag lives here -- the time itself is
+-- read from ActivityWatch, so removing a flag loses nothing.
+CREATE TABLE risk_app (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL COLLATE NOCASE UNIQUE,  -- as typed: linkedin.com, discord
+    created_at TEXT NOT NULL
+);
+
+-- Jev's verdict on one page for one task: the TypeSafe model's probability
+-- that the window named by `title` is relevant to the task, asked once and
+-- cached here so the next visit to that page needs no request. Whether the
+-- page counts as relevant is NOT stored: it is probability >= the threshold
+-- (meta relevance_min, default 0.7) at read time, so tuning the threshold
+-- never re-asks the model. Keyed by the task's text, not its id, so a carried
+-- copy still hits and an edited task is judged again. Only the desktop app
+-- reads or writes it; it is a cache, and dropping every row loses nothing but
+-- requests.
+CREATE TABLE relevance (
+    id          INTEGER PRIMARY KEY,
+    app         TEXT NOT NULL,          -- window class, lowercased: app.zen_browser.zen
+    page        TEXT NOT NULL,          -- the title normalised and lowercased
+    title       TEXT NOT NULL,          -- the title as seen, for display
+    task_text   TEXT NOT NULL,          -- task title + '\n' + notes when judged
+    task_title  TEXT NOT NULL,
+    probability REAL NOT NULL,          -- Jev's answer, 0..1
+    -- 'model': judged on the page alone. 'appeal': the user argued the case
+    -- in the app, and this is the verdict with that argument weighed in.
+    source      TEXT NOT NULL CHECK (source IN ('model', 'appeal')),
+    argument    TEXT,                   -- what the user said; appeals only
+    model       TEXT NOT NULL,          -- the versioned model that answered
+    created_at  TEXT NOT NULL
+);
+
+-- One verdict per page and task; a new answer replaces the old.
+CREATE UNIQUE INDEX relevance_page_task ON relevance (app, page, task_text);

@@ -1,426 +1,156 @@
-import * as React from 'react';
-import { cn } from '@/lib/utils';
-import { Slot } from '@radix-ui/react-slot';
-import { cva, type VariantProps } from 'class-variance-authority';
-import { ChevronDown, LucideIcon } from 'lucide-react';
+import * as React from "react";
+import { cva } from "class-variance-authority";
+import { ArrowRight } from "lucide-react";
+import { cn } from "@/lib/utils";
 
-// ReUI's Button, as pasted. One fix: the sm + icon compound variant opened its
-// arbitrary variant with a stray second bracket (`[[&_svg…`), so its icon
-// size never applied.
-const buttonVariants = cva(
-  'cursor-pointer group whitespace-nowrap focus-visible:outline-hidden inline-flex items-center justify-center has-data-[arrow=true]:justify-between whitespace-nowrap text-sm font-medium ring-offset-background transition-[color,box-shadow] disabled:pointer-events-none disabled:opacity-60 [&_svg]:shrink-0',
+// The pasted InteractiveHoverButton, as every button in the app: a bordered
+// pill with a dot, which on hover swells into a fill while the label slides
+// out and comes back in with an arrow. Changes from the paste:
+// - Width follows the label (no w-32), so the padding leaves the overlay room
+//   for its arrow, and the dot sits in the left padding rather than at 20%,
+//   where a short pill would put it on the label.
+// - Children are drawn twice (at rest, and in the overlay), so an icon
+//   before the label rides along.
+// - `destructive` is red throughout; `selected` (a toggle that is on) holds
+//   the hovered look; `mode="icon"` is a round pill whose dot blooms from the
+//   middle, with no slide and no arrow.
+
+type Variant = "primary" | "secondary" | "outline" | "ghost" | "destructive";
+type Size = "sm" | "md" | "lg";
+
+const pill = cva(
+  "group relative inline-flex shrink-0 cursor-pointer select-none items-center justify-center overflow-hidden " +
+    "whitespace-nowrap rounded-full border bg-background font-semibold outline-none " +
+    "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background " +
+    "disabled:pointer-events-none disabled:opacity-50 [&_svg]:shrink-0",
   {
     variants: {
-      variant: {
-        primary:
-          'bg-primary text-primary-foreground hover:bg-primary/90 data-[state=open]:bg-primary/90',
-        mono: 'bg-zinc-950 text-white dark:bg-zinc-300 dark:text-black hover:bg-zinc-950/90 dark:hover:bg-zinc-300/90 data-[state=open]:bg-zinc-950/90 dark:data-[state=open]:bg-zinc-300/90',
-        destructive:
-          'bg-destructive text-destructive-foreground hover:bg-destructive/90 data-[state=open]:bg-destructive/90',
-        secondary:
-          'bg-secondary text-secondary-foreground hover:bg-secondary/90 data-[state=open]:bg-secondary/90',
-        outline:
-          'bg-background text-accent-foreground border border-input hover:bg-accent data-[state=open]:bg-accent',
-        dashed:
-          'text-accent-foreground border border-input border-dashed bg-background hover:bg-accent hover:text-accent-foreground data-[state=open]:text-accent-foreground',
-        ghost:
-          'text-accent-foreground hover:bg-accent hover:text-accent-foreground data-[state=open]:bg-accent data-[state=open]:text-accent-foreground',
-        dim: 'text-muted-foreground hover:text-foreground data-[state=open]:text-foreground',
-        foreground: '',
-        inverse: '',
-      },
-      appearance: {
-        default: '',
-        ghost: '',
-      },
-      underline: {
-        solid: '',
-        dashed: '',
-      },
-      underlined: {
-        solid: '',
-        dashed: '',
-      },
       size: {
-        lg: 'h-10 rounded-md px-4 text-sm gap-1.5 [&_svg:not([class*=size-])]:size-4',
-        md: 'h-8.5 rounded-md px-3 gap-1.5 text-[0.8125rem] leading-(--text-sm--line-height) [&_svg:not([class*=size-])]:size-4',
-        sm: 'h-7 rounded-md px-2.5 gap-1.25 text-xs [&_svg:not([class*=size-])]:size-3.5',
+        sm: "h-8 text-xs [&_svg:not([class*=size-])]:size-3.5",
+        md: "h-9 text-[13px] [&_svg:not([class*=size-])]:size-4",
+        lg: "h-10 text-sm [&_svg:not([class*=size-])]:size-4",
       },
-      autoHeight: {
-        true: '',
-        false: '',
-      },
-      shape: {
-        default: '',
-        circle: 'rounded-full',
-      },
-      mode: {
-        default:
-          'focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
-        icon: 'focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
-        link: 'text-primary h-auto p-0 bg-transparent rounded-none hover:bg-transparent data-[state=open]:bg-transparent',
-        input: `
-            justify-start font-normal hover:bg-background [&_svg]:transition-colors [&_svg]:hover:text-foreground data-[state=open]:bg-background
-            focus-visible:border-ring focus-visible:outline-hidden focus-visible:ring-[3px] focus-visible:ring-ring/30
-            [[data-state=open]>&]:border-ring [[data-state=open]>&]:outline-hidden [[data-state=open]>&]:ring-[3px]
-            [[data-state=open]>&]:ring-ring/30
-            aria-invalid:border-destructive/60 aria-invalid:ring-destructive/10 dark:aria-invalid:border-destructive dark:aria-invalid:ring-destructive/20
-            in-data-[invalid=true]:border-destructive/60 in-data-[invalid=true]:ring-destructive/10  dark:in-data-[invalid=true]:border-destructive dark:in-data-[invalid=true]:ring-destructive/20
-          `,
-      },
-      placeholder: {
-        true: 'text-muted-foreground',
-        false: '',
+      icon: { true: "", false: "" },
+      danger: {
+        true: "border-destructive/30 text-destructive",
+        false: "border-border text-foreground",
       },
     },
     compoundVariants: [
-      // Icons opacity for default mode
-      {
-        variant: 'ghost',
-        mode: 'default',
-        className: '[&_svg:not([role=img]):not([class*=text-])]:opacity-60',
-      },
-      {
-        variant: 'outline',
-        mode: 'default',
-        className: '[&_svg:not([role=img]):not([class*=text-])]:opacity-60',
-      },
-      {
-        variant: 'dashed',
-        mode: 'default',
-        className: '[&_svg:not([role=img]):not([class*=text-])]:opacity-60',
-      },
-      {
-        variant: 'secondary',
-        mode: 'default',
-        className: '[&_svg:not([role=img]):not([class*=text-])]:opacity-60',
-      },
-
-      // Icons opacity for default mode
-      {
-        variant: 'outline',
-        mode: 'input',
-        className: '[&_svg:not([role=img]):not([class*=text-])]:opacity-60',
-      },
-      {
-        variant: 'outline',
-        mode: 'icon',
-        className: '[&_svg:not([role=img]):not([class*=text-])]:opacity-60',
-      },
-
-      // Auto height
-      {
-        size: 'md',
-        autoHeight: true,
-        className: 'h-auto min-h-8.5',
-      },
-      {
-        size: 'sm',
-        autoHeight: true,
-        className: 'h-auto min-h-7',
-      },
-      {
-        size: 'lg',
-        autoHeight: true,
-        className: 'h-auto min-h-10',
-      },
-
-      // Shadow support
-      {
-        variant: 'primary',
-        mode: 'default',
-        appearance: 'default',
-        className: 'shadow-xs shadow-black/5',
-      },
-      {
-        variant: 'mono',
-        mode: 'default',
-        appearance: 'default',
-        className: 'shadow-xs shadow-black/5',
-      },
-      {
-        variant: 'secondary',
-        mode: 'default',
-        appearance: 'default',
-        className: 'shadow-xs shadow-black/5',
-      },
-      {
-        variant: 'outline',
-        mode: 'default',
-        appearance: 'default',
-        className: 'shadow-xs shadow-black/5',
-      },
-      {
-        variant: 'dashed',
-        mode: 'default',
-        appearance: 'default',
-        className: 'shadow-xs shadow-black/5',
-      },
-      {
-        variant: 'destructive',
-        mode: 'default',
-        appearance: 'default',
-        className: 'shadow-xs shadow-black/5',
-      },
-
-      // Shadow support
-      {
-        variant: 'primary',
-        mode: 'icon',
-        appearance: 'default',
-        className: 'shadow-xs shadow-black/5',
-      },
-      {
-        variant: 'mono',
-        mode: 'icon',
-        appearance: 'default',
-        className: 'shadow-xs shadow-black/5',
-      },
-      {
-        variant: 'secondary',
-        mode: 'icon',
-        appearance: 'default',
-        className: 'shadow-xs shadow-black/5',
-      },
-      {
-        variant: 'outline',
-        mode: 'icon',
-        appearance: 'default',
-        className: 'shadow-xs shadow-black/5',
-      },
-      {
-        variant: 'dashed',
-        mode: 'icon',
-        appearance: 'default',
-        className: 'shadow-xs shadow-black/5',
-      },
-      {
-        variant: 'destructive',
-        mode: 'icon',
-        appearance: 'default',
-        className: 'shadow-xs shadow-black/5',
-      },
-
-      // Link
-      {
-        variant: 'primary',
-        mode: 'link',
-        underline: 'solid',
-        className:
-          'font-medium text-primary hover:text-primary/90 [&_svg:not([role=img]):not([class*=text-])]:opacity-60 hover:underline hover:underline-offset-4 hover:decoration-solid',
-      },
-      {
-        variant: 'primary',
-        mode: 'link',
-        underline: 'dashed',
-        className:
-          'font-medium text-primary hover:text-primary/90 [&_svg:not([role=img]):not([class*=text-])]:opacity-60 hover:underline hover:underline-offset-4 hover:decoration-dashed decoration-1',
-      },
-      {
-        variant: 'primary',
-        mode: 'link',
-        underlined: 'solid',
-        className:
-          'font-medium text-primary hover:text-primary/90 [&_svg:not([role=img]):not([class*=text-])]:opacity-60 underline underline-offset-4 decoration-solid',
-      },
-      {
-        variant: 'primary',
-        mode: 'link',
-        underlined: 'dashed',
-        className:
-          'font-medium text-primary hover:text-primary/90 [&_svg]:opacity-60 underline underline-offset-4 decoration-dashed decoration-1',
-      },
-
-      {
-        variant: 'inverse',
-        mode: 'link',
-        underline: 'solid',
-        className:
-          'font-medium text-inherit [&_svg:not([role=img]):not([class*=text-])]:opacity-60 hover:underline hover:underline-offset-4 hover:decoration-solid',
-      },
-      {
-        variant: 'inverse',
-        mode: 'link',
-        underline: 'dashed',
-        className:
-          'font-medium text-inherit [&_svg:not([role=img]):not([class*=text-])]:opacity-60 hover:underline hover:underline-offset-4 hover:decoration-dashed decoration-1',
-      },
-      {
-        variant: 'inverse',
-        mode: 'link',
-        underlined: 'solid',
-        className:
-          'font-medium text-inherit [&_svg:not([role=img]):not([class*=text-])]:opacity-60 underline underline-offset-4 decoration-solid',
-      },
-      {
-        variant: 'inverse',
-        mode: 'link',
-        underlined: 'dashed',
-        className:
-          'font-medium text-inherit [&_svg:not([role=img]):not([class*=text-])]:opacity-60 underline underline-offset-4 decoration-dashed decoration-1',
-      },
-
-      {
-        variant: 'foreground',
-        mode: 'link',
-        underline: 'solid',
-        className:
-          'font-medium text-foreground [&_svg:not([role=img]):not([class*=text-])]:opacity-60 hover:underline hover:underline-offset-4 hover:decoration-solid',
-      },
-      {
-        variant: 'foreground',
-        mode: 'link',
-        underline: 'dashed',
-        className:
-          'font-medium text-foreground [&_svg:not([role=img]):not([class*=text-])]:opacity-60 hover:underline hover:underline-offset-4 hover:decoration-dashed decoration-1',
-      },
-      {
-        variant: 'foreground',
-        mode: 'link',
-        underlined: 'solid',
-        className:
-          'font-medium text-foreground [&_svg:not([role=img]):not([class*=text-])]:opacity-60 underline underline-offset-4 decoration-solid',
-      },
-      {
-        variant: 'foreground',
-        mode: 'link',
-        underlined: 'dashed',
-        className:
-          'font-medium text-foreground [&_svg:not([role=img]):not([class*=text-])]:opacity-60 underline underline-offset-4 decoration-dashed decoration-1',
-      },
-
-      // Ghost
-      {
-        variant: 'primary',
-        appearance: 'ghost',
-        className:
-          'bg-transparent text-primary/90 hover:bg-primary/5 data-[state=open]:bg-primary/5',
-      },
-      {
-        variant: 'destructive',
-        appearance: 'ghost',
-        className:
-          'bg-transparent text-destructive/90 hover:bg-destructive/5 data-[state=open]:bg-destructive/5',
-      },
-      {
-        variant: 'ghost',
-        mode: 'icon',
-        className: 'text-muted-foreground',
-      },
-
-      // Size
-      {
-        size: 'sm',
-        mode: 'icon',
-        className: 'w-7 h-7 p-0 [&_svg:not([class*=size-])]:size-3.5',
-      },
-      {
-        size: 'md',
-        mode: 'icon',
-        className: 'w-8.5 h-8.5 p-0 [&_svg:not([class*=size-])]:size-4',
-      },
-      {
-        size: 'lg',
-        mode: 'icon',
-        className: 'w-10 h-10 p-0 [&_svg:not([class*=size-])]:size-4',
-      },
-
-      // Input mode
-      {
-        mode: 'input',
-        placeholder: true,
-        variant: 'outline',
-        className: 'font-normal text-muted-foreground',
-      },
-      {
-        mode: 'input',
-        variant: 'outline',
-        size: 'sm',
-        className: 'gap-1.25',
-      },
-      {
-        mode: 'input',
-        variant: 'outline',
-        size: 'md',
-        className: 'gap-1.5',
-      },
-      {
-        mode: 'input',
-        variant: 'outline',
-        size: 'lg',
-        className: 'gap-1.5',
-      },
+      // Room for the dot on the left, and for the overlay's arrow overall.
+      { icon: false, size: "sm", className: "ps-5 pe-4" },
+      { icon: false, size: "md", className: "ps-6 pe-4" },
+      { icon: false, size: "lg", className: "ps-7 pe-5" },
+      { icon: true, size: "sm", className: "size-8" },
+      { icon: true, size: "md", className: "size-9" },
+      { icon: true, size: "lg", className: "size-10" },
     ],
-    defaultVariants: {
-      variant: 'primary',
-      mode: 'default',
-      size: 'md',
-      shape: 'default',
-      appearance: 'default',
-    },
   },
 );
 
+const SLIDE = "transition-all duration-300 motion-reduce:transition-none";
+
+// The fill grows from the dot (or, for an icon, from nothing in the middle).
+const DOT_AT = {
+  sm: "left-2.5 size-1.5",
+  md: "left-3 size-2",
+  lg: "left-3.5 size-2",
+};
+
 function Button({
   className,
-  selected,
-  variant,
-  shape,
-  appearance,
-  mode,
-  size,
-  autoHeight,
-  underlined,
-  underline,
-  asChild = false,
-  placeholder = false,
+  variant = "primary",
+  size = "md",
+  mode = "default",
+  selected = false,
+  type = "button",
+  children,
   ...props
-}: React.ComponentProps<'button'> &
-  VariantProps<typeof buttonVariants> & {
-    selected?: boolean;
-    asChild?: boolean;
-  }) {
-  const Comp = asChild ? Slot : 'button';
+}: React.ComponentProps<"button"> & {
+  variant?: Variant;
+  size?: Size;
+  mode?: "default" | "icon";
+  // A toggle that is on: shown filled, as on hover.
+  selected?: boolean;
+}) {
+  const icon = mode === "icon";
+  const danger = variant === "destructive";
+  const fill = danger ? "bg-destructive" : "bg-primary";
+  const onFill = danger ? "text-destructive-foreground" : "text-primary-foreground";
+  // Spelled out in full: Tailwind finds classes by reading the source.
+  const onFillWhenFilled = danger
+    ? "group-hover:text-destructive-foreground group-data-[state=open]:text-destructive-foreground"
+    : "group-hover:text-primary-foreground group-data-[state=open]:text-primary-foreground";
   return (
-    <Comp
+    <button
       data-slot="button"
-      className={cn(
-        buttonVariants({
-          variant,
-          size,
-          shape,
-          appearance,
-          mode,
-          autoHeight,
-          placeholder,
-          underlined,
-          underline,
-          className,
-        }),
-        asChild && props.disabled && 'pointer-events-none opacity-50',
+      type={type}
+      className={cn(pill({ size, icon, danger }), className)}
+      {...(selected && { "data-state": "open" })}
+      {...props}
+    >
+      {icon ? (
+        <>
+          <span
+            aria-hidden
+            className={cn(
+              "absolute left-1/2 top-1/2 size-0 -translate-x-1/2 -translate-y-1/2 rounded-full",
+              fill,
+              SLIDE,
+              "group-hover:size-full group-hover:scale-[1.8] group-data-[state=open]:size-full group-data-[state=open]:scale-[1.8]",
+            )}
+          />
+          <span
+            className={cn(
+              "relative z-10 inline-flex items-center justify-center",
+              SLIDE,
+              onFillWhenFilled,
+            )}
+          >
+            {children}
+          </span>
+        </>
+      ) : (
+        <>
+          <span
+            className={cn(
+              "inline-flex translate-x-1 items-center gap-1.5",
+              SLIDE,
+              "group-hover:translate-x-12 group-hover:opacity-0",
+              "group-data-[state=open]:translate-x-12 group-data-[state=open]:opacity-0",
+            )}
+          >
+            {children}
+          </span>
+          <span
+            aria-hidden
+            className={cn(
+              "absolute inset-0 z-10 flex translate-x-12 items-center justify-center gap-1.5 opacity-0",
+              onFill,
+              SLIDE,
+              "group-hover:translate-x-0 group-hover:opacity-100",
+              "group-data-[state=open]:translate-x-0 group-data-[state=open]:opacity-100",
+            )}
+          >
+            {children}
+            <ArrowRight />
+          </span>
+          <span
+            aria-hidden
+            className={cn(
+              "absolute top-1/2 -translate-y-1/2 rounded-lg",
+              DOT_AT[size],
+              fill,
+              SLIDE,
+              "group-hover:left-0 group-hover:top-0 group-hover:h-full group-hover:w-full group-hover:translate-y-0 group-hover:scale-[1.8]",
+              "group-data-[state=open]:left-0 group-data-[state=open]:top-0 group-data-[state=open]:h-full " +
+                "group-data-[state=open]:w-full group-data-[state=open]:translate-y-0 group-data-[state=open]:scale-[1.8]",
+            )}
+          />
+        </>
       )}
-      {...(selected && { 'data-state': 'open' })}
-      {...props}
-    />
+    </button>
   );
 }
 
-interface ButtonArrowProps extends React.SVGProps<SVGSVGElement> {
-  icon?: LucideIcon; // Allows passing any Lucide icon
-}
-
-function ButtonArrow({
-  icon: Icon = ChevronDown,
-  className,
-  ...props
-}: ButtonArrowProps) {
-  return (
-    <Icon
-      data-slot="button-arrow"
-      className={cn('ms-auto -me-1', className)}
-      {...props}
-    />
-  );
-}
-
-export { Button, ButtonArrow, buttonVariants };
+export { Button };

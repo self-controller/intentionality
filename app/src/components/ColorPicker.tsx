@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 type Rgb = [number, number, number];
 
@@ -78,13 +79,13 @@ export default function ColorPicker({
                 aria-label={`${name} channel`}
                 onChange={(e) => setChannel(i, Number(e.target.value))}
               />
-              <input
+              <Input
                 type="number"
                 min={0}
                 max={255}
                 value={rgb[i]}
                 disabled={busy}
-                className="w-[3.75rem] flex-none"
+                className="h-7 w-[3.75rem] flex-none px-2 font-mono text-xs"
                 aria-label={`${name} value`}
                 onChange={(e) => setChannel(i, Number(e.target.value))}
               />
@@ -93,8 +94,8 @@ export default function ColorPicker({
         </div>
       </div>
       <div className="mt-2.5 flex flex-wrap items-center gap-2">
-        <input
-          className="w-[6.5rem] font-mono"
+        <Input
+          className="h-8 w-[6.5rem] font-mono"
           value={draft}
           disabled={busy}
           aria-label="Hex colour"

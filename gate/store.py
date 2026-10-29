@@ -8,7 +8,7 @@ from pathlib import Path
 from . import config
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 14
 
 # Statuses that mean "still open" — what the debrief asks about and the
 # close paths carry into the backlog.
@@ -85,6 +85,15 @@ def init(conn: sqlite3.Connection) -> None:
     if version < 11:
         _backup(conn, suffix=".pre-v11.bak")
         _migrate_v10_to_v11(conn)
+    if version < 12:
+        _backup(conn, suffix=".pre-v12.bak")
+        _migrate_v11_to_v12(conn)
+    if version < 13:
+        _backup(conn, suffix=".pre-v13.bak")
+        _migrate_v12_to_v13(conn)
+    if version < 14:
+        _backup(conn, suffix=".pre-v14.bak")
+        _migrate_v13_to_v14(conn)
 
 
 def _backup(conn: sqlite3.Connection, suffix: str) -> None:
@@ -680,6 +689,82 @@ def _migrate_v10_to_v11(conn: sqlite3.Connection) -> None:
         conn.isolation_level = saved_isolation
 
 
+
+def _migrate_v11_to_v12(conn: sqlite3.Connection) -> None:
+    """v11 -> v12: risk_app, the apps and websites flagged as at risk.
+
+    A new table and nothing else, so the _migrate_v9_to_v10 idiom. Only the
+    desktop app reads or writes it.
+    """
+    saved_isolation = conn.isolation_level
+    conn.isolation_level = None  # autocommit: we manage the transaction
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "CREATE TABLE risk_app (id INTEGER PRIMARY KEY,"
+            " name TEXT NOT NULL COLLATE NOCASE UNIQUE, created_at TEXT NOT NULL)"
+        )
+        conn.execute("UPDATE meta SET value = '12' WHERE key = 'schema_version'")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = saved_isolation
+
+
+def _migrate_v12_to_v13(conn: sqlite3.Connection) -> None:
+    """v12 -> v13: relevance, the cache of Jev's page-vs-task verdicts.
+
+    A new table and its unique index, nothing else: the _migrate_v11_to_v12
+    idiom. Only the desktop app reads or writes it, and it is a cache -- a
+    store that lost every row would merely ask the model again.
+    """
+    saved_isolation = conn.isolation_level
+    conn.isolation_level = None  # autocommit: we manage the transaction
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "CREATE TABLE relevance (id INTEGER PRIMARY KEY,"
+            " app TEXT NOT NULL, page TEXT NOT NULL, title TEXT NOT NULL,"
+            " task_text TEXT NOT NULL, task_title TEXT NOT NULL,"
+            " probability REAL NOT NULL,"
+            " source TEXT NOT NULL CHECK (source IN ('model', 'appeal')),"
+            " argument TEXT, model TEXT NOT NULL, created_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX relevance_page_task ON relevance (app, page, task_text)"
+        )
+        conn.execute("UPDATE meta SET value = '13' WHERE key = 'schema_version'")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = saved_isolation
+
+
+def _migrate_v13_to_v14(conn: sqlite3.Connection) -> None:
+    """v13 -> v14: analysis.judged_json, what Jev judged for a check.
+
+    One nullable column, no CHECK, so ALTER TABLE ADD COLUMN is the whole
+    migration -- the _migrate_v7_to_v8 idiom. Every existing row was written
+    by the Claude-era analysis and keeps NULL, which is how the app tells the
+    two apart. Only the desktop app reads or writes it.
+    """
+    saved_isolation = conn.isolation_level
+    conn.isolation_level = None  # autocommit: we manage the transaction
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("ALTER TABLE analysis ADD COLUMN judged_json TEXT")
+        conn.execute("UPDATE meta SET value = '14' WHERE key = 'schema_version'")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = saved_isolation
+
 def commit_draft(
     conn: sqlite3.Connection,
     statement: str,
@@ -840,6 +925,23 @@ def labels_by_task(conn: sqlite3.Connection) -> dict[int, list[str]]:
     ):
         out.setdefault(row["task_id"], []).append(row["name"])
     return out
+
+
+def label_examples(conn: sqlite3.Connection, per_label: int = 6) -> dict[str, tuple[str, ...]]:
+    """What each label means in practice: up to `per_label` titles filed
+    under it, newest first, each wording once whatever its case and however
+    often it was carried. A label nothing wears is absent. The app's
+    db::label_candidates is the same query, for the board's new cards."""
+    out: dict[str, list[str]] = {}
+    for row in conn.execute(
+        "SELECT l.name, t.title, MAX(t.id) AS newest FROM label l"
+        " JOIN task_label tl ON tl.label_id = l.id JOIN task t ON t.id = tl.task_id"
+        " GROUP BY l.id, lower(trim(t.title)) ORDER BY l.name, newest DESC"
+    ):
+        titles = out.setdefault(row["name"], [])
+        if len(titles) < per_label:
+            titles.append(row["title"].strip())
+    return {name: tuple(titles) for name, titles in out.items()}
 
 
 def create_session(

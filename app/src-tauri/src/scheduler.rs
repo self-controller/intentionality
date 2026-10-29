@@ -2,6 +2,10 @@
 //! and the time-up checkpoint. All live only while a session is open; all
 //! stop themselves the moment the store says the session closed elsewhere.
 //!
+//! The analysis timer also listens to the at-risk timer: when the clock has
+//! shown "Not relevant to any task" for `drift_check_minutes` since the last
+//! check, a check runs early instead of waiting out the draw.
+//!
 //! Both timers tick every minute against a wall-clock target instead of one
 //! long sleep: CLOCK_MONOTONIC pauses during suspend, so a single 60-minute
 //! sleep silently stretches by however long the lid was closed.
@@ -11,7 +15,8 @@
 //! was down fire on the next start instead of being lost.
 
 use crate::state::AppState;
-use crate::{analysis, db, notify};
+use crate::analysis::{self, Trigger};
+use crate::{db, notify};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rand::Rng;
 use std::time::{Duration, Instant};
@@ -131,33 +136,62 @@ fn mean_minutes(app: &AppHandle) -> f64 {
 async fn analysis_loop(app: AppHandle) {
     let mut next_fire = draw_next(mean_minutes(&app));
     loop {
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        if Utc::now() < next_fire {
-            continue;
-        }
         let state = app.state::<AppState>();
+        let trigger = tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                if Utc::now() < next_fire {
+                    continue;
+                }
+                Trigger::Scheduled
+            }
+            _ = state.drift_check.notified() => {
+                // A permit can outlive the drift that set it: the timer keeps
+                // poking while a check runs, and that check resets the count.
+                if !drift_due(state.drift_seconds(), drift_minutes(&app)) {
+                    continue;
+                }
+                Trigger::Drift
+            }
+        };
         if state.session_id().is_none() {
             next_fire = draw_next(mean_minutes(&app));
             continue;
         }
-        match analysis::run(&app).await {
+        match analysis::run(&app, trigger).await {
             Ok(Some(id)) => {
                 let _ = app.emit("analysis:new", id);
-                // Scheduled checks notify; the manual "Run a check now" button
-                // does not — you are already looking at the tab that answers it.
-                notify_check(&app, id);
+                // Scheduled and early checks notify; the manual "Run a check
+                // now" button does not — you are already looking at the tab
+                // that answers it.
+                notify_check(&app, id, trigger);
             }
             Ok(None) => {} // quiet window — skipped, redrawn below
-            Err(err) => eprintln!("analysis skipped: {err}"), // a log line, never a dialog
+            Err(err) => eprintln!("analysis: {err}"), // a log line, never a dialog
+        }
+        // Whatever came of it, the drift that asked has been answered: a check
+        // that could not run must not be retried every second.
+        if trigger == Trigger::Drift {
+            state.reset_drift();
         }
         next_fire = draw_next(mean_minutes(&app));
     }
 }
 
+fn drift_minutes(app: &AppHandle) -> f64 {
+    let state = app.state::<AppState>();
+    let conn = state.conn.lock().unwrap();
+    db::drift_check_minutes(&conn)
+}
+
+/// Enough unexcused at-risk time for an early check. 0 minutes = never.
+pub fn drift_due(seconds: f64, minutes: f64) -> bool {
+    minutes > 0.0 && seconds >= minutes * 60.0
+}
+
 /// Reads the row back rather than threading the text out of analysis::run:
 /// one round trip, and the notification then says exactly what the Analyses
 /// tab will say.
-fn notify_check(app: &AppHandle, id: i64) {
+fn notify_check(app: &AppHandle, id: i64, trigger: Trigger) {
     let state = app.state::<AppState>();
     let row = {
         let conn = state.conn.lock().unwrap();
@@ -170,10 +204,15 @@ fn notify_check(app: &AppHandle, id: i64) {
             Some(_) => "off track",
             None => "not judged",
         };
+        let early = if trigger == Trigger::Drift {
+            format!("Early check — {:.0} min on pages no task needed · ", drift_minutes(app))
+        } else {
+            String::new()
+        };
         notify::send(
             app,
             &a.headline,
-            &notify::clip(&format!("{band} · {}", a.body), 160),
+            &notify::clip(&format!("{early}{band} · {}", a.body), 160),
         );
     }
 }
@@ -196,5 +235,17 @@ async fn checkpoint_loop(app: AppHandle) {
         if let Err(err) = analysis::run_checkpoint(&app).await {
             eprintln!("checkpoint failed: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drift_is_due_at_the_threshold_and_never_when_off() {
+        assert!(!drift_due(599.0, 10.0));
+        assert!(drift_due(600.0, 10.0));
+        assert!(!drift_due(10_000.0, 0.0));
     }
 }

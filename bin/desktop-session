@@ -23,6 +23,11 @@ mkdir -p (dirname $log)
 set -q DBUS_SESSION_BUS_ADDRESS
 or set -x DBUS_SESSION_BUS_ADDRESS unix:path=$XDG_RUNTIME_DIR/bus
 
+# GDM sets this from gnome.desktop's DesktopNames; a tty launch has to do it
+# itself. Without it xdg-desktop-portal skips GNOME's backends (no Secret,
+# ScreenCast or Screenshot portals) and apps can't tell they're on GNOME.
+set -x XDG_CURRENT_DESKTOP GNOME
+
 set -l envfile $XDG_RUNTIME_DIR/intentionality/session-env
 if set -q XDG_SESSION_ID
     mkdir -p (dirname $envfile)

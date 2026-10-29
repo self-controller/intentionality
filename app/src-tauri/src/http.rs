@@ -1,7 +1,7 @@
 //! The HTTP clients, built once and shared. A reqwest::Client owns a
 //! connection pool and its TLS setup; building one per request threw both
-//! away every time -- a fresh handshake per transcription chunk, per model
-//! call, per ActivityWatch query.
+//! away every time -- a fresh handshake per model call, per ActivityWatch
+//! query.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -20,9 +20,7 @@ fn cached(
     Ok(cell.get_or_init(|| client))
 }
 
-/// The Anthropic and OpenAI APIs. Callers set the overall timeout per
-/// request, because the spread is real: a two-sentence check is done in
-/// seconds, summarizing an hour of transcript is not.
+/// The Anthropic API. Callers set the overall timeout per request.
 pub fn remote() -> Result<&'static reqwest::Client, reqwest::Error> {
     cached(&REMOTE, reqwest::Client::builder().connect_timeout(Duration::from_secs(3)))
 }

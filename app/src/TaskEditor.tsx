@@ -1,8 +1,20 @@
-import { useEffect, useRef, useState } from "react";
-import { CalendarDays, Check, Trash2, X } from "lucide-react";
+import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
+import { CalendarDays, Check, List, Trash2, X } from "lucide-react";
 import ColorPicker from "@/components/ColorPicker";
 import MonthCalendar from "@/components/MonthCalendar";
 import { Button } from "@/components/ui/button";
+import {
+  Field,
+  FieldDescription,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+  FieldLegend,
+  FieldSet,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import * as api from "./api";
 import { addDays, ISO_DAY, localDate } from "./format";
@@ -18,35 +30,34 @@ export interface TaskFields {
   labels: Label[];
 }
 
-export const blankTask = (title: string): TaskFields => ({
+export const blankTask = (title: string, label: Label | null = null): TaskFields => ({
   title,
   notes: "",
   due_date: null,
   priority: "medium",
-  labels: [],
+  labels: label ? [label] : [],
 });
 
-// High first, as the board orders them. The colour matches the card's footer;
-// `on` is the chosen segment's text and the bar along its bottom, as the
-// active tab has.
-const PRIORITIES: { value: Priority; label: string; dot: string; on: string }[] = [
-  { value: "high", label: "High", dot: "bg-destructive", on: "text-destructive after:bg-destructive" },
-  { value: "medium", label: "Medium", dot: "bg-warn", on: "text-warn after:bg-warn" },
-  { value: "low", label: "Low", dot: "bg-muted-foreground", on: "text-foreground after:bg-muted-foreground" },
+// High first, as the board orders them. The dot's colour matches the card's
+// footer.
+export const PRIORITIES: { value: Priority; label: string; dot: string }[] = [
+  { value: "high", label: "High", dot: "bg-destructive" },
+  { value: "medium", label: "Medium", dot: "bg-warn" },
+  { value: "low", label: "Low", dot: "bg-muted-foreground" },
 ];
-
-// A field's caption: the app's mono eyebrow.
-const FIELD = "eyebrow mb-2 mt-5 block";
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
+const isSave = (e: { key: string; ctrlKey: boolean; metaKey: boolean }) => e.key === "Enter" && (e.ctrlKey || e.metaKey);
+
 /**
  * The whole card, editable — an existing one, or a new one before it exists.
- * Just the fields: the board lays it over the card it has flown up to face
+ * Just the fields: the board lays it over the card it has opened in front of
  * you (CardEditor3D), rather than expanding the card in place, which would
  * make the lane jump under the cursor you were about to drag with.
  *
- * Everything is saved in one call, so Cancel really discards.
+ * Everything is saved in one call, so Cancel really discards. Ctrl+Enter
+ * saves from anywhere in it.
  */
 export function TaskForm({
   initial,
@@ -99,6 +110,9 @@ export function TaskForm({
   // is not part of Save: the colour is the label's, on every card at once.
   const [picking, setPicking] = useState<LabelSummary | null>(null);
   const [busy, setBusy] = useState(false);
+  // The same, for the key handler: state set in this event isn't read until
+  // the next render, and a second Ctrl+Enter must not save twice.
+  const busyRef = useRef(false);
   // The Delete button was pressed and is waiting on its inline confirm.
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -109,13 +123,45 @@ export function TaskForm({
     titleRef.current?.focus();
   }, []);
 
-  // Esc cancels, like every other overlay in the app -- the colour picker
-  // first, if one is open, then the card.
+  const startBusy = (on: boolean) => {
+    busyRef.current = on;
+    setBusy(on);
+  };
+
+  const submit = () => {
+    if (busyRef.current || !title.trim()) return;
+    // The grid and the two buttons only ever produce this shape, so anything
+    // else was typed into the field, and is better refused here than in a
+    // round trip: db::check_due accepts the canonical form and nothing else.
+    if (due && !ISO_DAY.test(due)) {
+      setError("The due date has to be a date, like 2026-09-18.");
+      return;
+    }
+    startBusy(true);
+    setError(null);
+    // Whatever is half-typed in the label box counts as meant.
+    const all = draft.trim() && !has(draft.trim()) ? [...labels, draft.trim()] : labels;
+    save(title.trim(), notes, due || null, priority, all).catch((e) => {
+      setError(String(e));
+      startBusy(false);
+    });
+  };
+  const submitRef = useRef(submit);
+  submitRef.current = submit;
+
+  // Ctrl+Enter saves from any field. Esc cancels, like every other overlay in
+  // the app -- the priority menu or the colour picker first, if one is open,
+  // then the card. The menu handles its own Esc and marks it handled.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      if (picking) setPicking(null);
-      else onClose();
+      if (e.defaultPrevented) return;
+      if (isSave(e)) {
+        e.preventDefault();
+        submitRef.current();
+      } else if (e.key === "Escape") {
+        if (picking) setPicking(null);
+        else onClose();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -182,311 +228,428 @@ export function TaskForm({
       .catch((e) => setError(String(e)));
   };
 
-  const submit = () => {
-    if (!title.trim()) return;
-    // The grid and the two buttons only ever produce this shape, so anything
-    // else was typed into the field, and is better refused here than in a
-    // round trip: db::check_due accepts the canonical form and nothing else.
-    if (due && !ISO_DAY.test(due)) {
-      setError("The due date has to be a date, like 2026-09-18.");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    // Whatever is half-typed in the label box counts as meant.
-    const all = draft.trim() && !has(draft.trim()) ? [...labels, draft.trim()] : labels;
-    save(title.trim(), notes, due || null, priority, all).catch((e) => {
-      setError(String(e));
-      setBusy(false);
-    });
-  };
-
   return (
-    <section role="dialog" aria-modal="true" aria-label={heading ?? "Edit task"}>
-      {heading && <p className="eyebrow mb-3">{heading}</p>}
-      <input
-        ref={titleRef}
-        className="h-10 text-base font-medium tracking-[-0.01em]"
-        value={title}
-        placeholder="Title"
-        disabled={busy}
-        onChange={(e) => setTitle(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && submit()}
-      />
+    <FieldSet role="dialog" aria-modal="true" aria-label={heading ?? "Edit task"} disabled={busy}>
+      <FieldLegend>{heading ?? "Edit task"}</FieldLegend>
+      <FieldDescription>Saved together when you press Save · Ctrl+Enter saves · Esc cancels</FieldDescription>
+      <FieldGroup className="gap-5">
+        <Field>
+          <FieldLabel htmlFor="task-title">Title</FieldLabel>
+          <Input
+            id="task-title"
+            ref={titleRef}
+            className="h-10 text-base font-medium tracking-[-0.01em]"
+            value={title}
+            placeholder="What needs doing"
+            onChange={(e) => setTitle(e.target.value)}
+            // Plain Enter saves too; Ctrl+Enter is the window's.
+            onKeyDown={(e) => e.key === "Enter" && !isSave(e) && submit()}
+          />
+        </Field>
 
-      <p className={FIELD} id="task-priority">
-        Priority
-      </p>
-      {/* The board orders every column by this, high first. Joined segments
-          in the tab style; the chosen one carries its colour. */}
-      <div className="flex" role="radiogroup" aria-labelledby="task-priority">
-        {PRIORITIES.map((p) => {
-          const on = priority === p.value;
-          return (
-            <button
-              key={p.value}
-              role="radio"
-              aria-checked={on}
-              disabled={busy}
-              className={cn(
-                "relative -ms-px inline-flex items-center gap-1.5 overflow-hidden border border-border px-3 py-1.5 " +
-                  "text-[13px] font-medium text-muted-foreground transition-colors first:ms-0 first:rounded-s-md " +
-                  "last:rounded-e-md hover:text-foreground disabled:cursor-default " +
-                  "after:pointer-events-none after:absolute after:inset-x-0 after:bottom-0 after:h-0.5",
-                on && "bg-muted " + p.on,
-              )}
-              onClick={() => setPriority(p.value)}
-            >
-              <span className={cn("size-1.5 rounded-full", p.dot)} />
-              {p.label}
-            </button>
-          );
-        })}
-      </div>
+        <div className="grid grid-cols-2 gap-4">
+          {/* The board orders every column by this, high first. */}
+          <Field>
+            <FieldLabel htmlFor="task-priority">Priority</FieldLabel>
+            <Select value={priority} onValueChange={(v) => setPriority(v as Priority)}>
+              <SelectTrigger id="task-priority" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PRIORITIES.map((p) => (
+                  <SelectItem key={p.value} value={p.value}>
+                    <span className={cn("size-1.5 rounded-full", p.dot)} />
+                    {p.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
 
-      <label className={FIELD} htmlFor="task-due">
-        Due
-      </label>
-      {/* Typed, not <input type="date">. WebKitGTK answers that one with a
-          native GTK popup, and under GNOME/Wayland the popup takes an input
-          grab the page never gets back: the calendar could only be escaped
-          by alt-tabbing out of the app and back. Esc looked broken for the
-          same reason -- the handler below is a window keydown listener, and
-          a native popup is nowhere near the page's event system. The grid
-          is ours and in flow, which is what the gate already does.
-          The buttons are the two days that come up most, one click each. */}
-      <div className="flex flex-wrap items-center gap-2">
-        <input
-          id="task-due"
-          className="w-[9rem] font-mono"
-          value={due}
-          placeholder="YYYY-MM-DD"
-          disabled={busy}
-          onChange={(e) => setDue(e.target.value)}
-        />
-        <Button variant="outline" size="sm" disabled={busy} onClick={() => setDue(localDate(new Date()))}>
-          Today
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={busy}
-          onClick={() => setDue(localDate(addDays(new Date(), 1)))}
-        >
-          Tomorrow
-        </Button>
-        {due && (
-          <Button variant="ghost" size="sm" disabled={busy} onClick={() => setDue("")}>
-            Clear
-          </Button>
-        )}
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={busy}
-          selected={cal}
-          aria-pressed={cal}
-          onClick={() => setCal(!cal)}
-        >
-          <CalendarDays />
-          Calendar
-        </Button>
-      </div>
-      {cal && (
-        <MonthCalendar
-          value={due}
-          onPick={(d) => {
-            setDue(d);
-            setCal(false);
-          }}
-        />
-      )}
-
-      <label className={FIELD} htmlFor="task-notes">
-        Notes
-      </label>
-      <textarea
-        id="task-notes"
-        className="min-h-[84px] resize-y leading-relaxed"
-        rows={3}
-        value={notes}
-        placeholder="Anything you want to remember about this one…"
-        disabled={busy}
-        onChange={(e) => setNotes(e.target.value)}
-      />
-
-      <label className={FIELD} htmlFor="task-label-input">
-        Labels
-      </label>
-      {/* Every label is a chip to click; the tick, not the shading, is what
-          says it is on. */}
-      {offered.length ? (
-        <ul className="flex flex-wrap gap-1.5">
-          {offered.map((name) => {
-            const on = has(name);
-            const color = colorOf(name);
-            const stored = known.find((l) => same(l.name, name));
-            return (
-              <li key={name.toLowerCase()} className="flex max-w-full items-stretch">
-                {/* A stored label's colour is a button of its own: it opens
-                    the picker. A name typed here has no colour until saved. */}
-                {stored && (
-                  <button
-                    className={cn(
-                      "flex flex-none items-center rounded-s-md border border-e-0 border-border px-2 " +
-                        "transition-colors hover:bg-accent disabled:cursor-default",
-                      picking && same(picking.name, name) && "bg-accent",
-                    )}
-                    title={`Change the colour of ${stored.name}`}
-                    aria-label={`Change the colour of ${stored.name}`}
-                    disabled={busy}
-                    onClick={() => {
-                      setConfirming(null);
-                      setPicking(picking && same(picking.name, name) ? null : stored);
-                    }}
-                  >
-                    <span className="size-2.5 rounded-full" style={{ background: stored.color }} />
-                  </button>
-                )}
+          {/* Typed, not <input type="date">. WebKitGTK answers that one with a
+              native GTK popup, and under GNOME/Wayland the popup takes an input
+              grab the page never gets back: the calendar could only be escaped
+              by alt-tabbing out of the app and back. Esc looked broken for the
+              same reason -- the handler above is a window keydown listener, and
+              a native popup is nowhere near the page's event system. The grid
+              is ours and in flow, which is what the gate already does.
+              The buttons are the two days that come up most, one click each. */}
+          <Field>
+            <FieldLabel htmlFor="task-due">Due date</FieldLabel>
+            <div className="relative">
+              <Input
+                id="task-due"
+                className="pe-9 font-mono"
+                value={due}
+                placeholder="YYYY-MM-DD"
+                onChange={(e) => setDue(e.target.value)}
+              />
+              {due && (
                 <button
-                  className={cn(
-                    "flex min-w-0 items-center gap-1.5 border border-border py-1 ps-2 text-xs " +
-                      "transition-colors duration-150 disabled:cursor-default",
-                    stored ? "border-e-0 pe-2" : "rounded-md pe-2.5",
-                    // The tick is what says it is on; the fill only reinforces it.
-                    on ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground",
-                  )}
-                  aria-pressed={on}
-                  title={on ? `Take ${name} off` : `Tag with ${name}`}
-                  disabled={busy}
-                  onClick={() => toggle(name)}
+                  type="button"
+                  className="absolute end-2 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
+                  title="No due date"
+                  aria-label="Clear the due date"
+                  onClick={() => setDue("")}
                 >
-                  <span className="flex w-3 flex-none justify-center">{on && <Check className="size-3" />}</span>
-                  {!stored && (
-                    <span
-                      className={cn(
-                        "size-2 flex-none rounded-full",
-                        // A name typed here that no label wears yet: no colour until saved.
-                        !color && "border border-muted-foreground",
-                      )}
-                      style={color ? { background: color } : undefined}
-                    />
-                  )}
-                  <span className="overflow-hidden text-ellipsis whitespace-nowrap">{name}</span>
+                  <X className="size-3.5" />
                 </button>
-                {/* Only a stored label can be deleted; a name typed here and
-                    not saved yet just gets unticked. */}
-                {stored && (
-                  <button
-                    className="flex items-center rounded-e-md border border-s-0 border-border px-1.5 text-muted-foreground transition-colors hover:text-destructive disabled:cursor-default"
-                    title={`Delete ${stored.name} from every task`}
-                    aria-label={`Delete ${stored.name} from every task`}
-                    disabled={busy}
-                    onClick={() => {
-                      setPicking(null);
-                      if (stored.uses) setConfirming(stored);
-                      else removeLabel(stored.name);
-                    }}
-                  >
-                    <X className="size-3" />
-                  </button>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      ) : (
-        <p className="text-xs text-muted-foreground">No labels yet. Type one below to make it.</p>
-      )}
-      {picking && (
-        <ColorPicker
-          // Remounted per label, so it starts from that label's colour.
-          key={picking.name.toLowerCase()}
-          title={`Colour of “${picking.name}”, on every card that wears it`}
-          value={picking.color}
-          busy={busy}
-          onApply={(hex) => recolor(picking.name, hex)}
-          onCancel={() => setPicking(null)}
-        />
-      )}
-      {confirming && (
-        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          <span className="basis-full text-xs text-warn">
-            “{confirming.name}” is on {confirming.uses} task{confirming.uses === 1 ? "" : "s"}.
-            Deleting it takes it off {confirming.uses === 1 ? "that one" : "all of them"} now, even if you cancel here.
-          </span>
-          <Button variant="destructive" size="sm" disabled={busy} onClick={() => removeLabel(confirming.name)}>
-            Delete label
-          </Button>
-          <Button variant="outline" size="sm" disabled={busy} onClick={() => setConfirming(null)}>
-            Keep it
-          </Button>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => setDue(localDate(new Date()))}>
+                Today
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => setDue(localDate(addDays(new Date(), 1)))}>
+                Tomorrow
+              </Button>
+              <Button variant="outline" size="sm" selected={cal} aria-pressed={cal} onClick={() => setCal(!cal)}>
+                <CalendarDays />
+                Calendar
+              </Button>
+            </div>
+          </Field>
         </div>
-      )}
-      <input
-        id="task-label-input"
-        className="mt-2"
-        value={draft}
-        placeholder="New label…"
-        disabled={busy}
-        onChange={(e) => {
-          // A comma commits, so pasting "a, b" works as typing it does.
-          if (e.target.value.endsWith(",")) addLabel(e.target.value);
-          else setDraft(e.target.value);
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            addLabel(draft);
-          } else if (e.key === "Backspace" && !draft && labels.length) {
-            setLabels(labels.slice(0, -1));
-          }
-        }}
-      />
+        {cal && (
+          <MonthCalendar
+            value={due}
+            onPick={(d) => {
+              setDue(d);
+              setCal(false);
+            }}
+          />
+        )}
 
-      {error && <p className="mt-3 text-xs text-destructive">{error}</p>}
+        <NotesField value={notes} disabled={busy} onChange={setNotes} />
 
-      <div className="mt-6 flex items-center gap-2">
-        <Button disabled={busy || !title.trim()} onClick={submit}>
+        <Field>
+          <FieldLabel htmlFor="task-label-input">Labels</FieldLabel>
+          {/* Every label is a chip to click; the tick, not the shading, is what
+              says it is on. */}
+          {offered.length ? (
+            <ul className="flex flex-wrap gap-1.5">
+              {offered.map((name) => {
+                const on = has(name);
+                const color = colorOf(name);
+                const stored = known.find((l) => same(l.name, name));
+                return (
+                  <li key={name.toLowerCase()} className="flex max-w-full items-stretch">
+                    {/* A stored label's colour is a button of its own: it opens
+                        the picker. A name typed here has no colour until saved. */}
+                    {stored && (
+                      <button
+                        type="button"
+                        className={cn(
+                          "flex flex-none items-center rounded-s-full border border-e-0 border-border ps-2.5 pe-2 " +
+                            "transition-colors hover:bg-accent disabled:cursor-default",
+                          picking && same(picking.name, name) && "bg-accent",
+                        )}
+                        title={`Change the colour of ${stored.name}`}
+                        aria-label={`Change the colour of ${stored.name}`}
+                        onClick={() => {
+                          setConfirming(null);
+                          setPicking(picking && same(picking.name, name) ? null : stored);
+                        }}
+                      >
+                        <span className="size-2.5 rounded-full" style={{ background: stored.color }} />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className={cn(
+                        "flex min-w-0 items-center gap-1.5 border border-border py-1 ps-2 text-xs " +
+                          "transition-colors duration-150 disabled:cursor-default",
+                        stored ? "border-e-0 pe-2" : "rounded-full pe-2.5",
+                        // The tick is what says it is on; the fill only reinforces it.
+                        on ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground",
+                      )}
+                      aria-pressed={on}
+                      title={on ? `Take ${name} off` : `Tag with ${name}`}
+                      onClick={() => toggle(name)}
+                    >
+                      <span className="flex w-3 flex-none justify-center">{on && <Check className="size-3" />}</span>
+                      {!stored && (
+                        <span
+                          className={cn(
+                            "size-2 flex-none rounded-full",
+                            // A name typed here that no label wears yet: no colour until saved.
+                            !color && "border border-muted-foreground",
+                          )}
+                          style={color ? { background: color } : undefined}
+                        />
+                      )}
+                      <span className="overflow-hidden text-ellipsis whitespace-nowrap">{name}</span>
+                    </button>
+                    {/* Only a stored label can be deleted; a name typed here and
+                        not saved yet just gets unticked. */}
+                    {stored && (
+                      <button
+                        type="button"
+                        className="flex items-center rounded-e-full border border-s-0 border-border ps-1.5 pe-2 text-muted-foreground transition-colors hover:text-destructive disabled:cursor-default"
+                        title={`Delete ${stored.name} from every task`}
+                        aria-label={`Delete ${stored.name} from every task`}
+                        onClick={() => {
+                          setPicking(null);
+                          if (stored.uses) setConfirming(stored);
+                          else removeLabel(stored.name);
+                        }}
+                      >
+                        <X className="size-3" />
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          ) : null}
+          {picking && (
+            <ColorPicker
+              // Remounted per label, so it starts from that label's colour.
+              key={picking.name.toLowerCase()}
+              title={`Colour of “${picking.name}”, on every card that wears it`}
+              value={picking.color}
+              busy={busy}
+              onApply={(hex) => recolor(picking.name, hex)}
+              onCancel={() => setPicking(null)}
+            />
+          )}
+          {confirming && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="basis-full text-sm text-warn">
+                “{confirming.name}” is on {confirming.uses} task{confirming.uses === 1 ? "" : "s"}.
+                Deleting it takes it off {confirming.uses === 1 ? "that one" : "all of them"} now, even if you cancel here.
+              </span>
+              <Button variant="destructive" size="sm" onClick={() => removeLabel(confirming.name)}>
+                Delete label
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => setConfirming(null)}>
+                Keep it
+              </Button>
+            </div>
+          )}
+          <Input
+            id="task-label-input"
+            value={draft}
+            placeholder="New label…"
+            onChange={(e) => {
+              // A comma commits, so pasting "a, b" works as typing it does.
+              if (e.target.value.endsWith(",")) addLabel(e.target.value);
+              else setDraft(e.target.value);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !isSave(e)) {
+                e.preventDefault();
+                addLabel(draft);
+              } else if (e.key === "Backspace" && !draft && labels.length) {
+                setLabels(labels.slice(0, -1));
+              }
+            }}
+          />
+          <FieldDescription>
+            {offered.length ? "Click one to tag this card. Enter or a comma adds a new one." : "No labels yet. Type one to make it."}
+          </FieldDescription>
+        </Field>
+      </FieldGroup>
+
+      <FieldError>{error}</FieldError>
+
+      <div className="flex items-center gap-2">
+        <Button disabled={!title.trim()} onClick={submit}>
           {saveText}
         </Button>
-        <Button variant="outline" disabled={busy} onClick={onClose}>
+        <Button variant="outline" onClick={onClose}>
           Cancel
         </Button>
         <span className="flex-1" />
         {onDelete && !deleting && (
-          <Button variant="destructive" appearance="ghost" disabled={busy} onClick={() => setDeleting(true)}>
+          <Button variant="destructive" onClick={() => setDeleting(true)}>
             <Trash2 />
             Delete
           </Button>
         )}
       </div>
       {onDelete && deleting && (
-        <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5">
-          <span className="basis-full text-right text-xs text-warn">
+        <div className="-mt-3 flex flex-wrap items-center justify-end gap-2">
+          <span className="basis-full text-right text-sm text-warn">
             Delete this task for good? It can't be brought back.
           </span>
           <Button
             variant="destructive"
             size="sm"
-            disabled={busy}
             onClick={() => {
-              setBusy(true);
+              startBusy(true);
               setError(null);
               onDelete().catch((e) => {
                 setError(String(e));
-                setBusy(false);
+                startBusy(false);
                 setDeleting(false);
               });
             }}
           >
             Delete for good
           </Button>
-          <Button variant="outline" size="sm" disabled={busy} onClick={() => setDeleting(false)}>
+          <Button variant="outline" size="sm" onClick={() => setDeleting(false)}>
             Keep it
           </Button>
         </div>
       )}
-    </section>
+    </FieldSet>
+  );
+}
+
+// A bullet is a line starting "• " after its indent. Notes stay plain text, so
+// this is all a list is: the gate and the analysis prompt read it as it is.
+const BULLET_LINE = /^(\s*)• (.*)$/;
+const INDENT = "  ";
+
+// [start, end) of the line `pos` sits on.
+function lineAt(text: string, pos: number): [number, number] {
+  const start = text.lastIndexOf("\n", pos - 1) + 1;
+  const end = text.indexOf("\n", pos);
+  return [start, end < 0 ? text.length : end];
+}
+
+// The whole lines a selection touches. A selection ending just after a
+// newline doesn't take the line below it.
+function linesOf(text: string, from: number, to: number): [number, number] {
+  const last = to > from && text[to - 1] === "\n" ? to - 1 : to;
+  return [lineAt(text, from)[0], lineAt(text, last)[1]];
+}
+
+/**
+ * The notes box, with bullets: a toolbar toggle for the selected lines, and
+ * the keys a list editor has -- Enter continues a list (and ends it on an
+ * empty bullet), "- " or "* " at the start of a line becomes a bullet, Tab
+ * and Shift+Tab indent and outdent one.
+ */
+function NotesField({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: string;
+  disabled: boolean;
+  onChange: (notes: string) => void;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  // [from, to) becomes `text`, then the selection is set. Through
+  // execCommand where the webview has it, so Ctrl+Z undoes a bullet like any
+  // typing; its input event reaches onChange the usual way.
+  const replace = (from: number, to: number, text: string, selStart: number, selEnd = selStart) => {
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(from, to);
+    if (!document.execCommand("insertText", false, text)) {
+      el.setRangeText(text, from, to);
+      onChange(el.value);
+    }
+    el.setSelectionRange(selStart, selEnd);
+  };
+
+  // All the touched lines bulleted already: unbullet them. Otherwise bullet
+  // every one that isn't, leaving blank lines in a longer selection alone.
+  const toggleBullets = () => {
+    const el = ref.current;
+    if (!el) return;
+    const { selectionStart: s0, selectionEnd: s1 } = el;
+    const [from, to] = linesOf(value, s0, s1);
+    const lines = value.slice(from, to).split("\n");
+    const off = lines.every((l) => BULLET_LINE.test(l) || (lines.length > 1 && !l.trim()));
+    const next = lines.map((l) => {
+      const m = l.match(BULLET_LINE);
+      if (off) return m ? m[1] + m[2] : l;
+      if (m || (lines.length > 1 && !l.trim())) return l;
+      const indent = l.match(/^\s*/)![0];
+      return indent + "• " + l.slice(indent.length);
+    });
+    const block = next.join("\n");
+    if (s0 === s1) {
+      // The caret keeps its place in the text it was in.
+      const caret = Math.max(from, s0 + block.length - (to - from));
+      replace(from, to, block, caret);
+    } else {
+      replace(from, to, block, from, from + block.length);
+    }
+  };
+
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing || e.ctrlKey || e.metaKey || e.altKey) return;
+    const el = e.currentTarget;
+    const { selectionStart: s0, selectionEnd: s1 } = el;
+    const [start, end] = lineAt(value, s0);
+    const line = value.slice(start, end);
+    const m = line.match(BULLET_LINE);
+
+    if (e.key === "Enter" && !e.shiftKey && s0 === s1 && m) {
+      // In the indent, before the bullet: an ordinary newline.
+      if (s0 - start < m[1].length + 2) return;
+      e.preventDefault();
+      if (!m[2].trim()) {
+        // An empty bullet ends the list -- one level at a time if indented.
+        const ended = m[1].length >= INDENT.length ? m[1].slice(INDENT.length) + "• " : "";
+        replace(start, end, ended, start + ended.length);
+      } else {
+        const lead = "\n" + m[1] + "• ";
+        replace(s0, s1, lead, s0 + lead.length);
+      }
+      return;
+    }
+
+    if (e.key === " " && s0 === s1 && /^\s*[-*]$/.test(value.slice(start, s0))) {
+      e.preventDefault();
+      replace(s0 - 1, s0, "• ", s0 + 1);
+      return;
+    }
+
+    if (e.key === "Tab") {
+      const [from, to] = linesOf(value, s0, s1);
+      const lines = value.slice(from, to).split("\n");
+      // Off a list, Tab moves focus as it always has.
+      if (!lines.some((l) => BULLET_LINE.test(l))) return;
+      e.preventDefault();
+      let first = 0; // how far the caret's own line moved
+      const next = lines.map((l, i) => {
+        if (!BULLET_LINE.test(l)) return l;
+        const moved = e.shiftKey ? l.replace(/^ {1,2}/, "") : INDENT + l;
+        if (i === 0) first = moved.length - l.length;
+        return moved;
+      });
+      const block = next.join("\n");
+      if (s0 === s1) replace(from, to, block, Math.max(from, s0 + first));
+      else replace(from, to, block, from, from + block.length);
+    }
+  };
+
+  return (
+    <Field>
+      <div className="flex items-center justify-between">
+        <FieldLabel htmlFor="task-notes">Notes</FieldLabel>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={disabled}
+          title="Bulleted list (or start a line with “- ”)"
+          // Keeps the selection the toggle is about.
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={toggleBullets}
+        >
+          <List />
+          Bullets
+        </Button>
+      </div>
+      <Textarea
+        ref={ref}
+        id="task-notes"
+        className="min-h-[84px] resize-y leading-relaxed"
+        rows={3}
+        value={value}
+        placeholder="Anything you want to remember about this one…"
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={onKeyDown}
+      />
+    </Field>
   );
 }

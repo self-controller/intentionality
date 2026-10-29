@@ -2,27 +2,29 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod analysis;
-mod attach;
-mod audio;
+mod autolabel;
 mod aw;
 mod build_info;
-mod claude;
+mod check;
 mod commands;
 mod db;
 mod error;
-mod gain;
+mod folder;
 mod http;
-mod level;
-mod meeting;
+mod jev;
 mod models;
 mod notify;
 mod observed;
+mod overlay;
+mod places;
 mod recommendations;
-mod record;
+mod relevance;
 mod resume_units;
 mod scheduler;
+mod screen_time;
 mod state;
-mod transcribe;
+mod subject;
+mod today;
 
 use state::AppState;
 
@@ -46,19 +48,25 @@ fn boot_time() -> Option<i64> {
 ///
 /// 1. INTENTIONALITY_SESSION_ID — but only if that session is still open.
 ///    The systemd user environment persists across logins, so a stale id
-///    from yesterday can outlive its session.
+///    from yesterday can outlive its session. "Open" is session_is_open's
+///    test, not ended_at alone: a session recovered before its first
+///    heartbeat keeps ended_at NULL, and trusting that pinned the app to it
+///    for good — every later poll came back here and never reached step 2.
 /// 2. The latest open session — but only if it started after this boot.
 ///    After a crash plus a plain GDM login, adopting an older orphan would
 ///    mean heartbeating a session that isn't running.
 /// 3. Neither: no-session mode (backlog + history only, no heartbeats).
 pub(crate) fn adopt_session(conn: &rusqlite::Connection) -> Option<i64> {
-    if let Ok(raw) = std::env::var("INTENTIONALITY_SESSION_ID") {
-        if let Ok(id) = raw.parse::<i64>() {
-            if let Ok(Some(session)) = db::get_session(conn, id) {
-                if session.ended_at.is_none() {
-                    return Some(id);
-                }
-            }
+    let env_id = std::env::var("INTENTIONALITY_SESSION_ID")
+        .ok()
+        .and_then(|raw| raw.parse::<i64>().ok());
+    adopt_session_from(conn, env_id)
+}
+
+fn adopt_session_from(conn: &rusqlite::Connection, env_id: Option<i64>) -> Option<i64> {
+    if let Some(id) = env_id {
+        if db::session_is_open(conn, id).unwrap_or(false) {
+            return Some(id);
         }
     }
     let session = db::latest_open_session(conn).ok().flatten()?;
@@ -114,34 +122,15 @@ fn main() {
     // renders the migrate hint. A dead autostart app is invisible; a rendered
     // error screen is not.
     let session_id = match db::check_schema(&conn) {
-        Ok(()) => {
-            // A meeting still marked 'recording' means the app died mid-meeting:
-            // the microphone is long gone, but everything transcribed up to that
-            // point is in the store and should be readable rather than stuck
-            // behind a recording indicator that will never clear.
-            match db::sweep_orphan_meetings(&conn) {
-                Ok(n) if n > 0 => eprintln!("intentionality: closed {n} interrupted meeting(s)"),
-                Err(err) => eprintln!("intentionality: meeting sweep failed: {err}"),
-                _ => {}
-            }
-            // The other half of that: a copy staged for an attachment that
-            // never got its row, or a whole directory whose meeting has since
-            // been deleted. Only ever under the directory this app owns.
-            let swept = attach::sweep_orphans(&conn);
-            if swept > 0 {
-                eprintln!("intentionality: removed {swept} orphaned attachment file(s)");
-            }
-            adopt_session(&conn)
-        }
+        Ok(()) => adopt_session(&conn),
         Err(_) => None,
     };
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new(conn, session_id))
         .setup(|app| {
             scheduler::spawn(app.handle().clone());
+            screen_time::spawn(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -162,28 +151,55 @@ fn main() {
             commands::get_session_tasks,
             commands::get_observed,
             commands::list_recent_analyses,
-            commands::get_analysis_observed,
+            commands::get_analysis_detail,
             commands::mark_analysis_seen,
             commands::run_analysis_now,
             commands::pending_checkpoint,
             commands::extend_checkpoint,
             commands::run_checkpoint_now,
-            commands::list_audio_sources,
-            commands::start_meeting,
-            commands::resume_meeting,
-            commands::stop_meeting,
-            commands::recording_meeting,
-            commands::list_meetings,
-            commands::get_meeting,
-            commands::approve_actions,
-            commands::set_meeting_notes,
-            commands::set_meeting_transcript,
-            commands::set_meeting_summary,
-            commands::rerun_meeting_notes,
-            commands::attach_meeting_files,
-            commands::remove_meeting_file,
-            commands::delete_meeting,
+            commands::risk_today,
+            commands::add_risk_app,
+            commands::remove_risk_app,
+            commands::page_judgement,
+            commands::appeal,
+            commands::forget_relevance,
+            commands::today_time,
+            commands::judge_today,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_session(conn: &rusqlite::Connection) -> i64 {
+        conn.execute(
+            "INSERT INTO session (started_at, mode) VALUES (?1, 'manual')",
+            [db::now()],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn the_env_session_is_kept_while_open() {
+        let conn = db::tests::store();
+        let pinned = open_session(&conn);
+        open_session(&conn);
+        assert_eq!(adopt_session_from(&conn, Some(pinned)), Some(pinned));
+    }
+
+    /// The lid closed before the first heartbeat, so the resume gate's
+    /// recovery left ended_at NULL; GNOME's environment still named it.
+    #[test]
+    fn an_env_session_recovered_without_a_heartbeat_gives_way_to_its_successor() {
+        let conn = db::tests::store();
+        let old = open_session(&conn);
+        conn.execute("UPDATE session SET close_reason = 'recovered' WHERE id = ?1", [old])
+            .unwrap();
+        let new = open_session(&conn);
+        assert_eq!(adopt_session_from(&conn, Some(old)), Some(new));
+    }
 }

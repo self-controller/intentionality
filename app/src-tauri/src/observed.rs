@@ -14,6 +14,15 @@ use std::collections::BTreeMap;
 
 const MAX_TITLES_PER_APP: usize = 15;
 
+/// How long a stretch with no keyboard or mouse input still counts as
+/// present. The AFK watcher calls you away after 3 min without input and
+/// dates the span back to the last input, so reading a long page or watching
+/// Claude work used to vanish from every total -- and took the at-risk clock
+/// down with it. GNOME blanks the screen at 5 min (`org.gnome.desktop.session
+/// idle-delay`, 300 here); until then someone may well be looking, after it
+/// nobody is. So the first IDLE_GRACE of every AFK span is not away time.
+pub const IDLE_GRACE_SECS: i64 = 300;
+
 pub fn parse_ts(s: &str) -> Result<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Ok(dt.with_timezone(&Utc));
@@ -24,7 +33,7 @@ pub fn parse_ts(s: &str) -> Result<DateTime<Utc>> {
         .map_err(|_| AppError::BadTimestamp(s.to_string()))
 }
 
-fn dur(ev: &aw::AwEvent) -> Duration {
+pub(crate) fn dur(ev: &aw::AwEvent) -> Duration {
     Duration::milliseconds((ev.duration.unwrap_or(0.0) * 1000.0) as i64)
 }
 
@@ -64,8 +73,8 @@ fn cap_titles(titles: BTreeMap<String, f64>, keep: usize) -> BTreeMap<String, f6
 /// ActivityWatch's raw events for one span, fetched once so several windows
 /// inside it can be summarized without asking AW again.
 pub struct Events {
-    afk: Vec<aw::AwEvent>,
-    window: Vec<aw::AwEvent>,
+    pub(crate) afk: Vec<aw::AwEvent>,
+    pub(crate) window: Vec<aw::AwEvent>,
 }
 
 pub async fn fetch(start_iso: &str, end_iso: &str) -> Result<Events> {
@@ -84,28 +93,44 @@ pub async fn observed(start_iso: &str, end_iso: &str) -> Result<Observed> {
     summarize(&fetch(start_iso, end_iso).await?, start_iso, end_iso)
 }
 
-/// Everything in `events` clipped to [start, end]. The span may be any part
-/// of what was fetched: clipping is what makes a sub-window exact.
-pub fn summarize(events: &Events, start_iso: &str, end_iso: &str) -> Result<Observed> {
-    let start = parse_ts(start_iso)?;
-    let end = parse_ts(end_iso)?;
+/// One window event's share of a span: how long it was focused inside the
+/// span with the user not away. `app`/`title` are as the watcher wrote them,
+/// possibly empty.
+pub struct Active<'a> {
+    pub app: &'a str,
+    pub title: &'a str,
+    pub seconds: f64,
+}
 
-    let mut afk_spans = Vec::new();
+/// The AFK spans in [start, end], each less its first IDLE_GRACE_SECS,
+/// clipped and merged, so overlapping ones count once.
+fn afk_spans(
+    events: &Events,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<(DateTime<Utc>, DateTime<Utc>)>> {
+    let mut spans = Vec::new();
     for ev in &events.afk {
         if ev.data.get("status").and_then(|v| v.as_str()) == Some("afk") {
-            let s = parse_ts(&ev.timestamp)?;
-            let e = s + dur(ev);
+            let idle = parse_ts(&ev.timestamp)?;
+            let e = idle + dur(ev);
+            let s = idle + Duration::seconds(IDLE_GRACE_SECS);
             let (s, e) = (s.max(start), e.min(end));
             if e > s {
-                afk_spans.push((s, e));
+                spans.push((s, e));
             }
         }
     }
-    let afk_spans = merge_spans(afk_spans);
-    let afk_seconds: f64 = afk_spans.iter().map(|(s, e)| secs(*e - *s)).sum();
+    Ok(merge_spans(spans))
+}
 
-    let mut per_app: BTreeMap<String, f64> = BTreeMap::new();
-    let mut per_title: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+fn active_with<'a>(
+    events: &'a Events,
+    afk_spans: &[(DateTime<Utc>, DateTime<Utc>)],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<Active<'a>>> {
+    let mut out = Vec::new();
     for ev in &events.window {
         let ev_start = parse_ts(&ev.timestamp)?;
         let ev_end = ev_start + dur(ev);
@@ -113,40 +138,90 @@ pub fn summarize(events: &Events, start_iso: &str, end_iso: &str) -> Result<Obse
         if ce <= cs {
             continue;
         }
-        let mut active = secs(ce - cs);
-        for (a_start, a_end) in &afk_spans {
+        let mut seconds = secs(ce - cs);
+        for (a_start, a_end) in afk_spans {
             let overlap = secs(ce.min(*a_end) - cs.max(*a_start));
             if overlap > 0.0 {
-                active -= overlap;
+                seconds -= overlap;
             }
         }
-        if active > 0.0 {
-            let app = ev
-                .data
-                .get("app")
-                .and_then(|v| v.as_str())
-                .filter(|a| !a.is_empty())
-                .unwrap_or("unknown");
-            let title = ev
-                .data
-                .get("title")
-                .and_then(|v| v.as_str())
-                .filter(|t| !t.is_empty())
-                .unwrap_or("unknown");
-            *per_app.entry(app.to_string()).or_insert(0.0) += active;
-            *per_title
-                .entry(app.to_string())
-                .or_default()
-                .entry(title.to_string())
-                .or_insert(0.0) += active;
+        if seconds > 0.0 {
+            let field = |k: &str| ev.data.get(k).and_then(|v| v.as_str()).unwrap_or("");
+            out.push(Active { app: field("app"), title: field("title"), seconds });
         }
+    }
+    Ok(out)
+}
+
+/// Every window event's active time in [start, end]. The one place AFK time
+/// (past IDLE_GRACE_SECS) is subtracted: summarize below and the at-risk totals (screen_time.rs)
+/// both build on it, so the dashboard and the timer can never disagree about
+/// what counted.
+pub fn active<'a>(events: &'a Events, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Vec<Active<'a>>> {
+    active_with(events, &afk_spans(events, start, end)?, start, end)
+}
+
+/// Everything in `events` clipped to [start, end]. The span may be any part
+/// of what was fetched: clipping is what makes a sub-window exact.
+pub fn summarize(events: &Events, start_iso: &str, end_iso: &str) -> Result<Observed> {
+    summarize_with(events, start_iso, end_iso, MAX_TITLES_PER_APP)
+}
+
+/// `summarize`, keeping up to `keep` titles per app before the rest rolls
+/// into "(other)". `usize::MAX` keeps every title, for a caller that judges
+/// each page and would otherwise see a browser's long tail as one lump.
+pub fn summarize_with(events: &Events, start_iso: &str, end_iso: &str, keep: usize) -> Result<Observed> {
+    let start = parse_ts(start_iso)?;
+    let end = parse_ts(end_iso)?;
+
+    let afk_spans = afk_spans(events, start, end)?;
+    let afk_seconds: f64 = afk_spans.iter().map(|(s, e)| secs(*e - *s)).sum();
+
+    let mut per_app: BTreeMap<String, f64> = BTreeMap::new();
+    let mut per_title: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    for a in active_with(events, &afk_spans, start, end)? {
+        let app = if a.app.is_empty() { "unknown" } else { a.app };
+        let title = if a.title.is_empty() { "unknown" } else { a.title };
+        *per_app.entry(app.to_string()).or_insert(0.0) += a.seconds;
+        *per_title
+            .entry(app.to_string())
+            .or_default()
+            .entry(title.to_string())
+            .or_insert(0.0) += a.seconds;
     }
 
     let per_title = per_title
         .into_iter()
-        .map(|(app, titles)| (app, cap_titles(titles, MAX_TITLES_PER_APP)))
+        .map(|(app, titles)| (app, cap_titles(titles, keep)))
         .collect();
 
     let active_seconds = per_app.values().sum();
     Ok(Observed { per_app, per_title, active_seconds, afk_seconds })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ev(timestamp: &str, duration: f64, data: serde_json::Value) -> aw::AwEvent {
+        aw::AwEvent { timestamp: timestamp.into(), duration: Some(duration), data }
+    }
+
+    /// A short stretch without input is reading, not away; a long one is
+    /// away only past the grace.
+    #[test]
+    fn the_first_minutes_without_input_still_count() {
+        let events = Events {
+            window: vec![ev("2026-10-28T09:00:00+00:00", 3600.0, json!({"app": "zen", "title": "a"}))],
+            afk: vec![
+                ev("2026-10-28T09:10:00+00:00", 240.0, json!({"status": "afk"})),
+                ev("2026-10-28T09:30:00+00:00", 900.0, json!({"status": "afk"})),
+                ev("2026-10-28T09:00:00+00:00", 600.0, json!({"status": "not-afk"})),
+            ],
+        };
+        let o = summarize(&events, "2026-10-28T09:00:00+00:00", "2026-10-28T10:00:00+00:00").unwrap();
+        assert_eq!(o.afk_seconds, 600.0);
+        assert_eq!(o.active_seconds, 3000.0);
+    }
 }

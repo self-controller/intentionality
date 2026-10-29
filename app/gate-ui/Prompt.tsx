@@ -27,7 +27,7 @@ function Log({ text }: { text: string }) {
 
 function Frame({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex h-full items-center justify-center">
+    <div className="flex flex-1 items-center justify-center">
       <div className="gate-rise flex w-[40rem] max-w-[calc(100%-4rem)] flex-col gap-[1.2rem]">
         {children}
       </div>

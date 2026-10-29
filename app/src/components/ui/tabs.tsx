@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 //
 // Radix renders only the active TabsContent (no forceMount), so switching tabs
 // unmounts the others -- which is the behaviour the screens rely on: Board
-// refetches when it comes back, Meetings flushes its drafts when it leaves.
+// refetches when it comes back.
 
 const Tabs = TabsPrimitive.Root;
 

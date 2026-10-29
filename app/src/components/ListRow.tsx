@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils";
 
-/** A row in a sidebar list (Analyses, Meetings, Dashboard). Quiet until it is
+/** A row in a sidebar list (Analyses, Dashboard). Quiet until it is
  *  hovered; the selected one gets the faint fill and a bar down its left edge,
  *  the same bar the active tab has along its bottom. */
 export default function ListRow({

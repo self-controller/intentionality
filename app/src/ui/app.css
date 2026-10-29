@@ -100,9 +100,17 @@
 
 @layer base {
   * { border-color: var(--border); }
-  html { background: var(--background); }
-  body {
+  /* The window is transparent and frameless; #root paints it, rounded. It is
+     the scroller rather than the body, so the corners stay on the window's
+     and the sticky nav sticks inside it. */
+  html, body { background: transparent; overflow: hidden; }
+  #root {
+    height: 100vh;
+    overflow-y: auto;
     background: var(--background);
+    border-radius: var(--radius-xl);
+  }
+  body {
     color: var(--foreground);
     font-size: 0.875rem;
     line-height: 1.5;
@@ -112,7 +120,7 @@
 
   /* git.cafe's headings: medium weight, pulled tight. h3 is the section
      eyebrow -- small mono capitals -- which is what every h3 in the app
-     labels ("Observed", "Recommended", "Transcript", a day in a list). */
+     labels ("Observed", "Recommended", a day in a list). */
   h1 { font-size: 1.875rem; font-weight: 500; letter-spacing: -0.045em; line-height: 1.1; }
   h2 { font-size: 1.5rem; font-weight: 500; letter-spacing: -0.035em; line-height: 1.2; }
   h3 {
@@ -231,126 +239,4 @@
   .nb-mark::before,
   .nb-mark::after { background: var(--foreground); }
   .nb-check input:focus-visible + .nb-mark { outline-color: var(--ring); }
-}
-
-/* ------------------------------------------------------------------------
-   What stays CSS.
-
-   None of this is markup this codebase authors, so none of it can be
-   utilities: react-markdown decides the .md subtree, rehype-highlight emits
-   the hljs-* classes, KaTeX ships its own stylesheet, and LevelBars.tsx
-   writes bar heights straight to the DOM at >10 Hz.
-   ------------------------------------------------------------------------ */
-
-@layer components {
-  /* The capture meter. Thin rounded bars that grow and shrink in place with
-     the measured raw input; LevelBars.tsx eases each bar's height toward the
-     latest 100 ms measurement (and snaps under reduced motion). Height rather
-     than a scaleY transform, because scaling squashes the rounded caps into
-     flat ellipses. `height` below must match BAR_MAX_PX in LevelBars.tsx, and
-     .level-bar's width/height must match BAR_MIN_PX. */
-  .level-meter { display: flex; flex-direction: column; gap: 4px; }
-  .level-bars {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    height: 32px;
-  }
-  .level-bar {
-    flex: none;
-    width: 3px;
-    height: 3px;
-    border-radius: 999px;
-    background: var(--foreground);
-  }
-
-  /* The recording indicator is deliberately loud and always on screen while
-     the microphone is open: this is the one feature that can capture other
-     people. */
-  .rec-dot {
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    background: var(--destructive);
-    animation: rec-pulse 1.4s ease-in-out infinite;
-  }
-  @keyframes rec-pulse { 50% { opacity: 0.25; } }
-  @media (prefers-reduced-motion: reduce) {
-    .rec-dot { animation: none; }
-  }
-
-  /* The write-up, rendered from markdown. Prose stays capped like the rest of
-     the pane; code and maths are the things allowed to be wider, and they
-     scroll inside their own box rather than pushing the column out.
-
-     Not @tailwindcss/typography: the model's '## Key points' headings are
-     sections of this pane like any other, so they take the pane's
-     eyebrow look rather than a document's h2 -- which is the opposite of
-     what `prose` would do. */
-  .md { max-width: 68ch; line-height: 1.6; }
-  .md > :first-child { margin-top: 0; }
-  .md p { margin: 0 0 10px; max-width: none; }
-  .md h1, .md h2, .md h3, .md h4 {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: var(--muted-foreground);
-    margin: 22px 0 8px;
-    font-weight: 500;
-    line-height: 1.5;
-  }
-  .md ul, .md ol { margin: 0 0 10px; padding-left: 18px; list-style: revert; }
-  .md li { margin-bottom: 4px; }
-  .md li::marker { color: var(--muted-foreground); }
-  /* Nested bullets are supporting detail, so they read as smaller than the
-     point they hang under. */
-  .md li ul, .md li ol { margin: 4px 0 6px; }
-  .md li li { color: var(--foreground); font-size: 13px; margin-bottom: 2px; }
-  .md strong { font-weight: 600; color: var(--foreground); }
-  .md code {
-    font-family: var(--font-mono);
-    font-size: 12.5px;
-    background: var(--secondary);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 1px 5px;
-  }
-  .md pre {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    padding: 12px 14px;
-    overflow-x: auto;
-    margin: 0 0 10px;
-  }
-  .md pre code { background: none; border: none; padding: 0; line-height: 1.5; }
-  .md blockquote {
-    margin: 0 0 10px;
-    padding-left: 12px;
-    border-left: 2px solid var(--border);
-    color: var(--muted-foreground);
-  }
-  .md table { border-collapse: collapse; margin: 0 0 10px; font-size: 13px; }
-  .md th, .md td { border: 1px solid var(--border); padding: 5px 9px; text-align: left; }
-  .md th { color: var(--muted-foreground); font-weight: 500; }
-  .md hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
-  /* Links are inert here (see Markdown.tsx), and dotted says so. */
-  .md a { color: var(--foreground); text-decoration: underline dotted; text-underline-offset: 3px; cursor: default; }
-  .md .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; margin: 0 0 10px; }
-  .md .katex { font-size: 1.05em; }
-
-  /* Syntax colours for the fenced blocks, instead of shipping a highlight.js
-     theme. rehype-highlight emits the hljs-* classes; anything not listed
-     inherits the text colour. */
-  .hljs-comment, .hljs-quote { color: var(--muted-foreground); font-style: italic; }
-  .hljs-keyword, .hljs-selector-tag, .hljs-meta, .hljs-doctag { color: var(--violet); }
-  .hljs-string, .hljs-regexp, .hljs-addition, .hljs-template-tag { color: var(--good); }
-  .hljs-number, .hljs-literal, .hljs-symbol, .hljs-bullet { color: var(--warn); }
-  .hljs-title, .hljs-title.function_, .hljs-section, .hljs-name { color: var(--foreground); font-weight: 500; }
-  .hljs-title.class_, .hljs-type, .hljs-built_in { color: var(--info); }
-  .hljs-attr, .hljs-attribute, .hljs-variable, .hljs-params, .hljs-property { color: var(--warn); }
-  .hljs-deletion { color: var(--destructive); }
-  .hljs-emphasis { font-style: italic; }
-  .hljs-strong { font-weight: 600; }
 }

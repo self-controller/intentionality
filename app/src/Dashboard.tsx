@@ -1,178 +1,236 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Circle, CircleCheck, CircleDot, CircleX, type LucideIcon } from "lucide-react";
-import { BarGroup, BarMore, BarRow, Bars } from "@/components/Bars";
-import ListRow from "@/components/ListRow";
+import { ChevronRight, Loader, Sparkles } from "lucide-react";
+import { BarRow, Bars } from "@/components/Bars";
+import { Pie, type PieSlice } from "@/components/Pie";
+import RiskPanel from "@/components/RiskPanel";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import * as api from "./api";
-import { fmt, hhmm, rankTitles, sessionLabel } from "./format";
-import type { Observed, Session, Task } from "./types";
+import { fmt } from "./format";
+import Sessions from "./Sessions";
+import type { TodayTime } from "./types";
 
-// The icon carries the meaning; colour reinforces it. Literal utility
-// strings, so Tailwind's scanner sees them: the status is chosen at runtime.
-const MARK: Record<string, { icon: LucideIcon; cls: string; label: string }> = {
-  done: { icon: CircleCheck, cls: "text-good", label: "done" },
-  dropped: { icon: CircleX, cls: "text-destructive", label: "dropped" },
-  planned: { icon: Circle, cls: "text-muted-foreground", label: "not started" },
-  doing: { icon: CircleDot, cls: "text-warn", label: "in progress" },
-};
+/** A full day of ActivityWatch events per look, read against the cache. */
+const POLL_MS = 60_000;
 
-const TOP_TITLES = 3;
+// Radix remounts a tab each time it is chosen; the fold should stay as it
+// was left (the pattern Board uses for its label filter).
+let sessionsOpen = false;
 
-export default function Dashboard() {
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [selected, setSelected] = useState<number | null>(null);
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [observed, setObserved] = useState<Observed | null>(null);
-  const [awError, setAwError] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+/** One headline number. Proportional figures: it stands alone, not in a column. */
+function Kpi({ label, value, note }: { label: string; value: string; note: string }) {
+  return (
+    <div className="surface px-5 py-4">
+      <p className="text-[13px] text-muted-foreground">{label}</p>
+      <p className="mt-1 text-[40px] font-semibold leading-none tracking-[-0.03em] text-foreground">{value}</p>
+      <p className="mt-2 text-xs text-muted-foreground">{note}</p>
+    </div>
+  );
+}
 
-  // Fetched again when a session opens or closes, so one the resume gate
-  // starts appears without leaving the tab. The selection stays put once there
-  // is one: a session opening must not yank the pane out from under a read.
-  const loadSessions = useCallback(() => {
+/**
+ * Today, since local midnight: time active and away, how much of the active
+ * time went to pages some task needed (the at-risk timer's own rule, from
+ * Jev's cached verdicts), the at-risk apps, and -- folded away -- the
+ * session history this tab used to open on.
+ */
+export default function Dashboard({ build }: { build: React.ReactNode }) {
+  const [today, setToday] = useState<TodayTime | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [judging, setJudging] = useState(false);
+  // What the last Judge press could not do, kept past the next poll (whose
+  // answer, from the cache alone, carries no error).
+  const [judgeNote, setJudgeNote] = useState<string | null>(null);
+  const [open, setOpen] = useState(sessionsOpen);
+  // Only the newest request's answer is shown; a Judge answer outranks any
+  // poll that was in flight while it ran.
+  const latest = useRef(0);
+
+  const load = useCallback(() => {
+    const ask = ++latest.current;
     api
-      .listSessions(15)
-      .then((list) => {
-        setSessions(list);
-        if (list.length > 0) setSelected((cur) => cur ?? list[0].id);
+      .todayTime()
+      .then((t) => {
+        if (ask !== latest.current) return;
+        setToday(t);
+        setError(null);
       })
-      .catch(() => {});
+      .catch((e) => ask === latest.current && setError(String(e)));
   }, []);
 
   useEffect(() => {
-    loadSessions();
-    const unlistenOpened = listen("session:opened", loadSessions);
-    const unlistenClosed = listen("session:closed", loadSessions);
+    load();
+    const id = window.setInterval(load, POLL_MS);
+    // A session opening or closing changes which tasks a page answers to.
+    const unlistenOpened = listen("session:opened", load);
+    const unlistenClosed = listen("session:closed", load);
     return () => {
+      window.clearInterval(id);
       unlistenOpened.then((f) => f());
       unlistenClosed.then((f) => f());
     };
-  }, [loadSessions]);
+  }, [load]);
 
-  useEffect(() => {
-    if (selected == null) return;
-    setObserved(null);
-    setAwError(null);
-    setExpanded(new Set());
-    // Clicking through sessions quickly leaves earlier answers in flight;
-    // only the current selection's may land.
-    let current = true;
+  const judge = () => {
+    setJudging(true);
+    setJudgeNote(null);
     api
-      .getSessionTasks(selected)
-      .then((list) => current && setTasks(list))
-      .catch(() => current && setTasks([]));
-    api
-      .getObserved(selected)
-      .then((o) => current && setObserved(o))
-      .catch((e) => current && setAwError(String(e)));
-    return () => {
-      current = false;
-    };
-  }, [selected]);
+      .judgeToday()
+      .then((t) => {
+        latest.current++;
+        setToday(t);
+        setError(null);
+        if (t.error) setJudgeNote(`Some pages could not be judged — ${t.error}`);
+      })
+      .catch((e) => setJudgeNote(String(e)))
+      .finally(() => setJudging(false));
+  };
 
-  const session = sessions.find((s) => s.id === selected);
-  const apps = observed
-    ? Object.entries(observed.per_app).sort((a, b) => b[1] - a[1]).slice(0, 8)
-    : [];
-  const max = apps.length > 0 ? apps[0][1] : 1;
+  const toggle = () => {
+    sessionsOpen = !open;
+    setOpen(sessionsOpen);
+  };
 
-  const titlesFor = (app: string) => rankTitles(observed, app);
-
-  const toggle = (app: string) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (!next.delete(app)) next.add(app);
-      return next;
-    });
+  const date = new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
 
   return (
-    <div className="flex items-start gap-8 px-6 py-6">
-      <aside className="flex max-h-[calc(100vh-104px)] w-[280px] flex-none flex-col gap-0.5 overflow-y-auto">
-        <h3 className="mb-1.5 px-3">Recent sessions</h3>
-        {sessions.map((s) => (
-          <ListRow
-            key={s.id}
-            selected={s.id === selected}
-            className="flex items-center gap-2"
-            onClick={() => setSelected(s.id)}
-          >
-            <span className="flex-none font-mono text-[11px] text-muted-foreground">#{s.id}</span>
-            <span className="min-w-0 flex-1 truncate">{sessionLabel(s)}</span>
-            <span
-              className={
-                "flex-none font-mono text-[11px] " + (s.close_reason ? "text-muted-foreground" : "text-good")
-              }
-            >
-              {s.close_reason ?? "open"}
-            </span>
-          </ListRow>
-        ))}
-      </aside>
-      <section className="min-w-0 max-w-[760px] flex-1">
-        {session && (
-          <>
-            <p className="eyebrow">
-              Session #{session.id} · {session.ended_at == null ? "not closed" : session.close_reason ?? "closed"}
-            </p>
-            <h2 className="mt-2">{sessionLabel(session)}</h2>
-            <p className="mt-1.5 font-mono text-xs text-muted-foreground">
-              {new Date(session.started_at).toLocaleDateString()} {hhmm(session.started_at)}
-              {session.ended_at && `–${hhmm(session.ended_at)}`} ·{" "}
-              {session.intended_minutes != null ? `intended ${session.intended_minutes} min` : "open-ended"}
-            </p>
-            <ul className="surface mt-6 list-none divide-y divide-border p-0">
-              {tasks.map((t) => {
-                const mark = MARK[t.status];
-                const Icon = mark.icon;
-                return (
-                  <li key={t.id} className="flex items-center gap-3 px-4 py-2.5">
-                    <Icon className={"size-4 flex-none " + mark.cls} aria-label={mark.label} />
-                    <span className={t.status === "dropped" ? "text-muted-foreground line-through" : ""}>
-                      {t.title}
-                    </span>
-                  </li>
-                );
-              })}
-              {tasks.length === 0 && <li className="px-4 py-2.5 text-muted-foreground">No tasks.</li>}
-            </ul>
-            <div className="surface mt-6 px-5 py-4">
-              <div className="mb-4 flex items-baseline justify-between gap-4">
-                <h3>Observed</h3>
-                {observed && (
-                  <p className="font-mono text-xs text-muted-foreground">
-                    {fmt(observed.active_seconds)} active · {fmt(observed.afk_seconds)} away
-                  </p>
-                )}
-              </div>
-              {awError && <p className="text-muted-foreground">unavailable — {awError}</p>}
-              {observed && (
-                <>
-                  <Bars>
-                    {apps.map(([app, secs]) => {
-                      const titles = titlesFor(app);
-                      const open = expanded.has(app);
-                      const shown = open ? titles : titles.slice(0, TOP_TITLES);
-                      return (
-                        <BarGroup key={app}>
-                          <BarRow label={app} value={fmt(secs)} pct={(secs / max) * 100} />
-                          {shown.map(([t, tsecs]) => (
-                            <BarRow key={t} label={t} value={fmt(tsecs)} pct={(tsecs / max) * 100} sub />
-                          ))}
-                          {titles.length > TOP_TITLES && (
-                            <BarMore onClick={() => toggle(app)}>
-                              {open ? "▾ show less" : `▸ +${titles.length - TOP_TITLES} more`}
-                            </BarMore>
-                          )}
-                        </BarGroup>
-                      );
-                    })}
-                  </Bars>
-                </>
-              )}
-            </div>
-          </>
+    <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-6 px-6 py-6">
+      <p className="eyebrow">Today · {date}</p>
+
+      <div className="grid grid-cols-2 gap-4">
+        <Kpi
+          label="Time active"
+          value={today ? fmt(today.active_seconds) : "—"}
+          note="Since midnight, at the keyboard"
+        />
+        <Kpi
+          label="Time away"
+          value={today ? fmt(today.afk_seconds) : "—"}
+          note="Since midnight, idle or locked"
+        />
+      </div>
+
+      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
+        <section className="surface px-5 py-4" aria-label="Relevant to your tasks">
+          <div className="mb-4 flex items-baseline justify-between gap-4">
+            <h3>Relevant to your tasks</h3>
+            {today && (
+              <p className="font-mono text-xs text-muted-foreground">
+                relevant at {Math.round(today.threshold * 100)}%
+              </p>
+            )}
+          </div>
+          {error ? (
+            <p className="text-muted-foreground">unavailable — {error}</p>
+          ) : !today ? (
+            <p className="text-muted-foreground">…</p>
+          ) : (
+            <Relevance today={today} judging={judging} judgeNote={judgeNote} onJudge={judge} />
+          )}
+        </section>
+        <RiskPanel onForget={load} />
+      </div>
+
+      <section>
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={toggle}
+          className="flex items-center gap-1.5 rounded-md py-1 pe-2 text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <ChevronRight className={cn("size-4 flex-none transition-transform", open && "rotate-90")} />
+          <h3 className="text-inherit">Recent sessions</h3>
+        </button>
+        {open && (
+          <div className="mt-4">
+            <Sessions />
+          </div>
         )}
       </section>
+
+      <p className="font-mono text-[11px] text-muted-foreground">{build}</p>
     </div>
+  );
+}
+
+function Relevance({
+  today,
+  judging,
+  judgeNote,
+  onJudge,
+}: {
+  today: TodayTime;
+  judging: boolean;
+  judgeNote: string | null;
+  onJudge: () => void;
+}) {
+  const outside = today.outside_seconds >= 60 ? ` Includes ${fmt(today.outside_seconds)} outside any session.` : "";
+  const slices: PieSlice[] = [
+    { key: "aligned", label: "Relevant to a task", seconds: today.aligned_seconds, tone: "primary" },
+    { key: "off", label: "Not relevant", seconds: today.off_seconds, tone: "warn" },
+    {
+      key: "unjudged",
+      label: "Not judged",
+      seconds: today.unjudged_seconds,
+      tone: "muted",
+      hint: `Pages Jev has no verdict on for every task, this app's own window, and windows with no title.${outside}`,
+    },
+  ];
+  const active = today.active_seconds;
+  const relevant = active > 0 ? Math.round((today.aligned_seconds / active) * 100) : 0;
+  const tasks = today.tasks.filter((t) => t.seconds > 0);
+  const max = Math.max(1, ...tasks.map((t) => t.seconds), today.off_seconds, today.unjudged_seconds);
+  const pages = today.askable === 1 ? "page" : "pages";
+
+  return (
+    <>
+      <Pie slices={slices} headline={`${relevant}%`} caption="relevant" empty="Nothing tracked yet today" />
+
+      {(today.askable > 0 || judging || judgeNote) && (
+        <div className="mt-5 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          {(today.askable > 0 || judging) && (
+            <Button variant="outline" size="sm" onClick={onJudge} disabled={judging}>
+              {judging ? <Loader className="animate-spin" /> : <Sparkles />}
+              {judging ? "Judging…" : `Judge ${today.askable} ${pages} with Jev`}
+            </Button>
+          )}
+          {!judging && today.askable > 0 && (
+            <span className="text-xs text-muted-foreground">
+              The busiest unjudged pages · sends their titles to TypeSafe · billed
+            </span>
+          )}
+          {judgeNote && <span className="w-full text-xs text-warn">{judgeNote}</span>}
+        </div>
+      )}
+
+      {tasks.length > 0 && (
+        <div className="mt-6 border-t border-border pt-4">
+          <h3 className="mb-3">By task</h3>
+          <Bars>
+            {tasks.map((t) => (
+              <BarRow key={t.title} label={t.title} value={fmt(t.seconds)} pct={(t.seconds / max) * 100} />
+            ))}
+            {today.off_seconds > 0 && (
+              <BarRow
+                label="Not relevant"
+                value={fmt(today.off_seconds)}
+                pct={(today.off_seconds / max) * 100}
+                tone="warn"
+              />
+            )}
+            {today.unjudged_seconds > 0 && (
+              <BarRow
+                label="Not judged"
+                hint={slices[2].hint}
+                value={fmt(today.unjudged_seconds)}
+                pct={(today.unjudged_seconds / max) * 100}
+                tone="muted"
+              />
+            )}
+          </Bars>
+        </div>
+      )}
+    </>
   );
 }

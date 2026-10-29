@@ -126,7 +126,8 @@ class TestDetails(unittest.TestCase):
         rows = WelcomeList([CARRIED])
         for bad in ("2026-9-1", "20260901", "2026-02-30", "soon"):
             with self.subTest(bad=bad):
-                self.assertEqual(rows.set_details(0, Details(due_date=bad)), ui.BAD_DUE)
+                # Refused silently: "" is a refusal, None is success.
+                self.assertEqual(rows.set_details(0, Details(due_date=bad)), "")
         self.assertEqual(rows.rows[0].details, Details())
 
     def test_typed_rows_take_details_along(self):
@@ -193,6 +194,13 @@ class TerminalCase(unittest.TestCase):
         self.addCleanup(setattr, ui, "_input", ui._input)
         self.addCleanup(setattr, ui, "backend", None)
         ui.backend = None
+        # A typed task is shown to Jev when labels exist; never from a test.
+        self.sorts = []
+        sort = mock.patch.object(
+            ui.autolabel, "ask", lambda title, notes, cands: self.sorts.append(title)
+        )
+        sort.start()
+        self.addCleanup(sort.stop)
         self.out = io.StringIO()
         printed = contextlib.redirect_stdout(self.out)
         printed.__enter__()
@@ -228,7 +236,6 @@ class TestTerminalWelcome(TerminalCase):
         self.assertEqual(p, ui.Plan([1], [], [], [], None))
         out = self.out.getvalue()
         self.assertIn("e N = due date, notes, labels", out)
-        self.assertEqual(out.count(ui.EMPTY_HINT), 1)
         self.assertIn("  1. [ ] carried  [delete]", out)
         # The recovery sweep printed the notes; the terminal doesn't repeat them.
         self.assertNotIn("already printed", out)
@@ -269,7 +276,6 @@ class TestTerminalWelcome(TerminalCase):
         self.assertEqual(p.edits, {3: Details()})
         self.assertEqual(p.new, [NewTask("new one", Details("", "2026-10-01", ("school",)))])
         out = self.out.getvalue()
-        self.assertIn(ui.BAD_DUE, out)
         self.assertIn(ui.MARKED, out)
         self.assertIn("Labels there are: school, urgent.", out)
         self.assertIn("due tomorrow · school, Errands · notes", out)
@@ -277,6 +283,21 @@ class TestTerminalWelcome(TerminalCase):
         self.assertIn("[2026-09-13]", prompts)
         self.assertIn("[old notes]", prompts)
         self.assertIn("[school, urgent]", prompts)
+
+    def test_a_typed_task_is_filed_under_jevs_label(self):
+        labels = [ui.Label("school", "#7aa2f7", ("HW 6",)), ui.Label("home", "#9ece6a")]
+        asked = []
+
+        def ask(title, notes, candidates):
+            asked.append((title, notes, candidates))
+            return "school" if "HW" in title else None
+
+        self.script("HW 7", "nap", "", "")
+        with mock.patch.object(ui.autolabel, "ask", ask):
+            p = ui.welcome([], labels=labels)
+        self.assertEqual(p.new, [NewTask("HW 7", Details(labels=("school",))), NewTask("nap")])
+        self.assertEqual(asked[0][2][0], ui.autolabel.Candidate("school", ("HW 6",)))
+        self.assertIn("filed under school", self.out.getvalue())
 
     def test_details_without_labels_yet(self):
         self.script("e 1", "", "a note that runs on well past forty characters", "", "",

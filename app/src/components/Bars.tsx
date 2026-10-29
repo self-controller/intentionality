@@ -1,54 +1,57 @@
-/** The observed-time chart, shared by the Dashboard and the Analyses pane.
- *
- *  It was duplicated markup in both, down to the 160px/144px label widths
- *  that keep an app row's track aligned with its title rows'. One component
- *  now, so they cannot drift. */
+/** The observed-time chart, shared by the Dashboard and the Analyses pane:
+ *  one bar per activity (a window or page, see format.ts `activities`). One
+ *  component, so the two cannot drift. */
+
+// Whole class names, so Tailwind's scanner sees each one.
+const TONE = {
+  primary: "bg-primary",
+  warn: "bg-warn",
+  muted: "bg-muted-foreground/50",
+};
 
 export function Bars({ children }: { children: React.ReactNode }) {
-  return <div className="flex max-w-[560px] flex-col gap-2.5">{children}</div>;
-}
-
-export function BarGroup({ children }: { children: React.ReactNode }) {
-  return <div className="flex flex-col gap-1">{children}</div>;
+  return <div className="flex max-w-[640px] flex-col gap-2">{children}</div>;
 }
 
 export function BarRow({
   label,
   value,
   pct,
-  sub = false,
+  hint,
   /** Past the model's cut: shown because the record should be complete, but
    *  quieter, because the model never saw it. */
   unsent = false,
+  /** What the bar's colour says: time on task, time no task needed, time
+   *  nobody judged. Words in the label carry the meaning; this reinforces. */
+  tone = "primary",
 }: {
   label: string;
   value: string;
   pct: number;
-  sub?: boolean;
+  /** Hover text, when the label is a shortened form of something longer. */
+  hint?: string;
   unsent?: boolean;
+  tone?: keyof typeof TONE;
 }) {
   const dim = unsent ? "opacity-55 italic" : "";
   return (
-    <div className={"flex items-center gap-2.5 " + (sub ? "pl-4 text-xs" : "")}>
+    <div className="flex items-center gap-2.5 text-[13px]">
       <span
         className={
-          "flex-none overflow-hidden text-ellipsis whitespace-nowrap text-right " +
-          (sub ? `w-36 text-muted-foreground ${dim}` : "w-40 text-foreground")
+          "w-56 flex-none overflow-hidden text-ellipsis whitespace-nowrap text-right " +
+          (unsent ? `text-muted-foreground ${dim}` : "text-foreground")
         }
-        title={label}
+        title={hint ?? label}
       >
         {label}
       </span>
-      <span className={"flex-1 overflow-hidden rounded-full bg-secondary " + (sub ? "h-1.5" : "h-2.5")}>
+      <span className="h-2 flex-1 overflow-hidden rounded-full bg-secondary">
         <span
-          className={
-            "block h-full rounded-full bg-primary " +
-            (unsent ? "opacity-20" : sub ? "opacity-45" : "opacity-90")
-          }
+          className={"block h-full rounded-full " + TONE[tone] + (unsent ? " opacity-20" : " opacity-90")}
           style={{ width: `${pct}%` }}
         />
       </span>
-      <span className={`w-16 flex-none font-mono text-xs tabular-nums text-muted-foreground ${sub ? dim : ""}`}>
+      <span className={`w-16 flex-none font-mono text-xs tabular-nums text-muted-foreground ${dim}`}>
         {value}
       </span>
     </div>
@@ -64,7 +67,7 @@ export function BarMore({
 }) {
   return (
     <button
-      className="self-start pl-4 text-xs text-muted-foreground transition-colors hover:text-foreground"
+      className="self-start text-xs text-muted-foreground transition-colors hover:text-foreground"
       onClick={onClick}
     >
       {children}

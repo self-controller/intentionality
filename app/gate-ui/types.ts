@@ -1,5 +1,5 @@
 /** The wire shapes. Python is the authority for every string here: the
- *  greeting, the per-row detail line, the status line and every refusal are
+ *  greeting, the per-row detail line and every refusal are
  *  computed in gate/ui.py and travel as finished text, so there is exactly
  *  one implementation of each. */
 
@@ -17,6 +17,8 @@ export interface Row {
   can_finish: boolean;
   /** Typed on this screen rather than pulled from the store. */
   typed: boolean;
+  /** The row's labels as they stand now; the screen groups rows by these. */
+  labels: string[];
 }
 
 export interface LabelOpt {
@@ -48,8 +50,12 @@ export interface Welcome {
   labels: LabelOpt[];
   panel: Panel | null;
   minutes: string;
-  status: string;
   start_enabled: boolean;
+  /** Bumped each time the add box's task lands, and only then: the box is
+   *  emptied on that, so a refused add keeps everything that was typed. */
+  added: number;
+  /** Why the add box's last task did not land ("" when silent or none). */
+  add_error: string;
 }
 
 export interface Blank {
@@ -66,8 +72,9 @@ export interface Choice {
 
 export type State = Welcome | Blank | Choice;
 
-/** The uncommitted contents of an open details panel. Lives in Welcome so
- *  Start can commit it in the same message as everything else. */
+/** The uncommitted contents of a details editor: an open row panel, or the
+ *  add box's. Lives in Welcome so Start can commit both in the same message
+ *  as everything else. */
 export interface PanelDraft {
   due: string;
   notes: string;

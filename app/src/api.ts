@@ -2,19 +2,19 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Analysis,
+  AnalysisDetail,
   Arrangement,
-  AttachOutcome,
-  AudioSource,
   Board,
   Health,
+  Judgement,
   LabelSummary,
-  Meeting,
-  MeetingDetail,
   Observed,
   Priority,
-  RecordingNow,
+  RiskApp,
+  RiskToday,
   Session,
   Task,
+  TodayTime,
 } from "./types";
 
 export const health = () => invoke<Health>("health");
@@ -50,6 +50,22 @@ export const setLabelColor = (name: string, color: string) =>
   invoke<void>("set_label_color", { name, color });
 // Takes the label off every card that wears it.
 export const deleteLabel = (name: string) => invoke<void>("delete_label", { name });
+// The at-risk apps: what is flagged, and today's time on each.
+export const riskToday = () => invoke<RiskToday>("risk_today");
+export const addRiskApp = (name: string) => invoke<RiskApp>("add_risk_app", { name });
+export const removeRiskApp = (id: number) => invoke<void>("remove_risk_app", { id });
+// A page as the relevance cache knows it; asks the model nothing.
+export const pageJudgement = (windowApp: string, title: string) =>
+  invoke<Judgement>("page_judgement", { windowApp, title });
+// The user's whole case so far, put to Jev with every task; stored.
+export const appeal = (windowApp: string, title: string, argument: string[]) =>
+  invoke<Judgement>("appeal", { windowApp, title, argument });
+// Every cached verdict gone; returns how many there were.
+export const forgetRelevance = () => invoke<number>("forget_relevance");
+// Today for the Dashboard, from the relevance cache alone: free to poll.
+export const todayTime = () => invoke<TodayTime>("today_time");
+// Jev asked about today's busiest unjudged pages (billed), then today again.
+export const judgeToday = () => invoke<TodayTime>("judge_today");
 export const deleteTask = (id: number) => invoke<void>("delete_task", { id });
 export const pullTask = (id: number) => invoke<void>("pull_task", { id });
 // A card on the current board back to the end of the backlog, unstarted.
@@ -63,50 +79,11 @@ export const getObserved = (sessionId: number) => invoke<Observed>("get_observed
 export const RECENT_ANALYSES = 50;
 export const listRecentAnalyses = (limit: number) =>
   invoke<Analysis[]>("list_recent_analyses", { limit });
-export const getAnalysisObserved = (id: number) =>
-  invoke<Observed>("get_analysis_observed", { id });
+export const getAnalysisDetail = (id: number) =>
+  invoke<AnalysisDetail>("get_analysis_detail", { id });
 export const markAnalysisSeen = (id: number) => invoke<void>("mark_analysis_seen", { id });
 export const runAnalysisNow = () => invoke<number | null>("run_analysis_now");
 export const pendingCheckpoint = () => invoke<Analysis | null>("pending_checkpoint");
 export const extendCheckpoint = (minutes: number) =>
   invoke<string>("extend_checkpoint", { minutes });
 export const runCheckpointNow = () => invoke<number | null>("run_checkpoint_now");
-
-// How far the Meetings tab's history reaches.
-export const RECENT_MEETINGS = 50;
-// Empty when PipeWire is unavailable or has nothing to offer; that is a valid
-// answer and the screen falls back to the system default rather than failing.
-export const listAudioSources = () => invoke<AudioSource[]>("list_audio_sources");
-// `target` is a PipeWire node name; undefined means the system default source.
-export const startMeeting = (target?: string) =>
-  invoke<RecordingNow>("start_meeting", { target });
-// Open the microphone again on a finished meeting. The next Stop rewrites its
-// notes from the whole transcript.
-export const resumeMeeting = (meetingId: number, target?: string) =>
-  invoke<RecordingNow>("resume_meeting", { meetingId, target });
-export const stopMeeting = () => invoke<number>("stop_meeting");
-export const recordingMeeting = () => invoke<RecordingNow | null>("recording_meeting");
-export const listMeetings = (limit: number) => invoke<Meeting[]>("list_meetings", { limit });
-export const getMeeting = (meetingId: number) =>
-  invoke<MeetingDetail>("get_meeting", { meetingId });
-export const approveActions = (meetingId: number, actionIds: number[]) =>
-  invoke<number>("approve_actions", { meetingId, actionIds });
-export const setMeetingNotes = (meetingId: number, notes: string) =>
-  invoke<void>("set_meeting_notes", { meetingId, notes });
-// The whole transcript, replaced. Refused while recording; the box is
-// read-only then anyway.
-export const setMeetingTranscript = (meetingId: number, text: string) =>
-  invoke<void>("set_meeting_transcript", { meetingId, text });
-// The write-up. Refused while the notes are being written; the editor is
-// hidden then anyway.
-export const setMeetingSummary = (meetingId: number, summary: string) =>
-  invoke<void>("set_meeting_summary", { meetingId, summary });
-export const rerunMeetingNotes = (meetingId: number) =>
-  invoke<void>("rerun_meeting_notes", { meetingId });
-// No paths in either direction: the picker opens on the Rust side and only
-// metadata comes back.
-export const attachMeetingFiles = (meetingId: number) =>
-  invoke<AttachOutcome>("attach_meeting_files", { meetingId });
-export const removeMeetingFile = (meetingId: number, fileId: number) =>
-  invoke<void>("remove_meeting_file", { meetingId, fileId });
-export const deleteMeeting = (meetingId: number) => invoke<void>("delete_meeting", { meetingId });

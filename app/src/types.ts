@@ -107,6 +107,144 @@ export interface Health {
   // Set when the resume gate's systemd units are missing or differ from the
   // repo copies — the install is a sudo step, easy to leave undone unnoticed.
   resume_gate: string | null;
+  // Set when the GNOME Shell extension that draws the at-risk timer is
+  // missing or older than this build.
+  overlay: string | null;
+  // Set when ActivityWatch cannot see Wayland windows (Focused Window D-Bus
+  // is off), which blinds the timer and every observation.
+  window_tracking: string | null;
+  // Set when pages cannot be judged for relevance (no TypeSafe key): the
+  // timer then shows for every flagged page, captioned as unchecked.
+  relevance: string | null;
+}
+
+// An app or website flagged as at risk, by the name the user typed.
+export interface RiskApp {
+  id: number;
+  name: string;
+}
+
+export interface RiskTotal extends RiskApp {
+  seconds: number;
+}
+
+// Today on the at-risk apps. `total` counts a moment once however many flags
+// matched it; `error` says why no time could be read (the flags are still
+// listed, at zero).
+export interface RiskToday {
+  apps: RiskTotal[];
+  total: number;
+  // Rows in the relevance cache: pages × tasks Jev has judged.
+  judged: number;
+  error: string | null;
+}
+
+// Today since local midnight, across sessions: the Dashboard's lead. A page
+// is relevant when some task of the session it fell in clears the bar, the
+// timer's own rule. unjudged includes outside (active time in no session).
+export interface TodayTime {
+  active_seconds: number;
+  afk_seconds: number;
+  aligned_seconds: number;
+  off_seconds: number;
+  unjudged_seconds: number;
+  outside_seconds: number;
+  // Relevant time by task, most first; carried copies are one row.
+  tasks: TaskTime[];
+  // Unjudged pages a "Judge" press would ask Jev about (up to 30).
+  askable: number;
+  threshold: number;
+  // Why the last judge pass could not judge some pages.
+  error: string | null;
+}
+
+// Jev's verdict on one page for one task on the board. `probability` is null
+// while the task has not been judged against this page.
+export interface Verdict {
+  task_id: number;
+  task_title: string;
+  probability: number | null;
+  source: "model" | "appeal" | null;
+  model: string | null;
+  created_at: string | null;
+}
+
+// A page judged against the session's unfinished tasks, in board order.
+// `relevant` indexes the verdict that excuses the page, if one does.
+export interface Judgement {
+  app: string;
+  page: string;
+  title: string;
+  verdicts: Verdict[];
+  relevant: number | null;
+  threshold: number;
+  no_tasks: boolean;
+  error: string | null;
+}
+
+// What the clock's arrow was clicked over: the flag, and the window as the
+// shell saw it. The payload of the `risk:appeal` event. `from` is the
+// frontend's own: "check" when the Analyses tab opened the appeal instead.
+export interface PageRef {
+  label: string;
+  app: string;
+  title: string;
+  from?: "timer" | "check";
+}
+
+// What Jev judged for one check: analysis.judged_json, a snapshot taken when
+// the row was written. Null on every row from before v14 (Claude wrote
+// those), which the tab shows the old way.
+export interface Judged {
+  models: string[];
+  threshold: number;
+  trigger: "scheduled" | "manual" | "drift" | "checkpoint";
+  tasks: TaskTime[];
+  pages: JudgedPage[];
+  aligned_seconds: number;
+  off_seconds: number;
+  unjudged_seconds: number;
+  risk: RiskTime[];
+  pick: Pick | null;
+}
+
+export interface TaskTime {
+  task_id: number;
+  title: string;
+  seconds: number;
+}
+
+export interface JudgedPage {
+  app: string;
+  title: string; // as recorded: what an appeal is opened for
+  name: string; // as shown: unread count and browser name off
+  page: string;
+  seconds: number;
+  verdict: "excused" | "no_task" | "unjudged";
+  // The excusing verdict, or else the closest one.
+  task_id: number | null;
+  task_title: string | null;
+  probability: number | null;
+  source: "model" | "appeal" | null;
+}
+
+export interface RiskTime {
+  name: string;
+  seconds: number;
+  excused_seconds: number;
+  no_task_seconds: number;
+  unjudged_seconds: number;
+}
+
+export interface Pick {
+  id: string;
+  probabilities: Record<string, number>;
+  confidence: number;
+}
+
+export interface AnalysisDetail {
+  observed: Observed;
+  judged: Judged | null;
 }
 
 export interface Arrangement {
@@ -114,111 +252,4 @@ export interface Arrangement {
   doing: number[];
   done: number[];
   dropped: number[];
-}
-
-/// A PipeWire capture node. `target` is what the backend hands pw-record —
-/// the node name, which survives a device reconnect; `label` is only ever
-/// shown to a person.
-export interface AudioSource {
-  target: string;
-  label: string;
-}
-
-/// One 100 ms window from the capture meter, as `meeting:level` carries it.
-/// Input is measured before the automatic gain and output after it, so a
-/// healthy `output_rms_dbfs` over a floor-level `input_rms_dbfs` reads as what
-/// it is: amplification, not a microphone that can hear the room.
-export interface Level {
-  input_rms_dbfs: number;
-  output_rms_dbfs: number;
-  output_peak_dbfs: number;
-  gain_db: number;
-}
-
-// 'recording' lasts until the tail chunk has landed, a moment past Stop.
-// 'done' with no summary means stopped and waiting for Write notes.
-// ('cleaning' may still sit on a row an older build left behind; the startup
-// sweep fails it, so the UI never needs to render it.)
-export type MeetingState =
-  | "recording"
-  | "cleaning"
-  | "summarizing"
-  | "done"
-  | "failed";
-
-// A file attached as context. No path and no extracted text: the webview does
-// not learn where the copy lives, and never gets the contents back out.
-export interface MeetingFile {
-  id: number;
-  position: number;
-  name: string;
-  kind: "text" | "pdf" | "image" | "office";
-  bytes: number;
-  added_at: string;
-}
-
-export interface Meeting {
-  id: number;
-  session_id: number | null; // null = recorded between sessions
-  started_at: string;
-  ended_at: string | null;
-  title: string;
-  state: MeetingState;
-  error: string | null;
-  segment_count: number;
-  // Whether notes have been written; the list says "no notes yet" without it.
-  has_summary: boolean;
-}
-
-// The microphone is open on this meeting, and has been since `since`. Not the
-// meeting's started_at: a meeting picked back up a day later has been
-// recording for minutes, not a day.
-export interface RecordingNow {
-  meeting_id: number;
-  since: string;
-}
-
-export interface MeetingSegment {
-  id: number;
-  seq: number;
-  started_at: string;
-  text: string; // "" when that chunk's transcription failed
-}
-
-export interface MeetingAction {
-  id: number;
-  position: number;
-  text: string;
-  // null until approved; a number is the backlog task it became, which is why
-  // an already-approved item can be shown as done rather than offered again.
-  task_id: number | null;
-}
-
-// What attaching returned: the meeting's full chip list, plus one readable
-// line per file that was refused. Partial success is the normal outcome.
-export interface AttachOutcome {
-  files: MeetingFile[];
-  rejected: string[];
-}
-
-export interface MeetingDetail {
-  meeting: Meeting;
-  segments: MeetingSegment[];
-  actions: MeetingAction[];
-  // What the user typed. Never model output.
-  notes: string;
-  // The write-up: one markdown document, the model's draft until the user
-  // edits it. null until the model has run.
-  summary: string | null;
-  // When the user last saved an edit to `summary`; null while it is as the
-  // model wrote it. Re-run asks before overwriting an edited document.
-  summary_edited_at: string | null;
-  // The segments above stitched into one text, a paragraph each: what the
-  // editor shows once the meeting has stopped, and what the model is given.
-  transcript: string;
-  // When the transcript was last edited (or grew on a resume); null while it
-  // is as the write-up saw it. Non-null means the write-up was made from an
-  // older transcript — what the stale marker says, and what Re-run notes fixes.
-  transcript_edited_at: string | null;
-  files: MeetingFile[];
 }

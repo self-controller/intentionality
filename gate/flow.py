@@ -11,7 +11,7 @@ from collections.abc import Sequence
 
 from . import store, ui
 
-EMPTY = ui.EMPTY_HINT
+EMPTY = ""
 VANISHED = "Those tasks changed while you were here — add one to start."
 
 
@@ -35,7 +35,11 @@ def run(conn, notes: Sequence[str] = ()) -> int:
             for task in store.get_backlog(conn)
             if task["status"] in store.UNFINISHED
         ]
-        known = [ui.Label(row["name"], row["color"]) for row in store.list_labels(conn)]
+        examples = store.label_examples(conn)
+        known = [
+            ui.Label(row["name"], row["color"], examples.get(row["name"], ()))
+            for row in store.list_labels(conn)
+        ]
         plan = ui.welcome(active, notes, error, known)
 
         # The front ends refuse an empty list already; this is the rule's
