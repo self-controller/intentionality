@@ -37,15 +37,15 @@ export default function Calendar({
     setCursor(new Date(cursor.getFullYear(), cursor.getMonth() + by, 1));
 
   return (
-    <div className="mt-[0.6em] w-[15em] rounded-[0.5em] border border-line bg-surface p-[0.6em]">
+    <div className="mt-[0.6em] w-[15em] rounded-[0.7em] border border-line bg-surface p-[0.6em]">
       <div className="mb-[0.4em] flex items-center justify-between">
-        <Button className="!px-[0.55em]" onClick={() => shift(-1)} aria-label="Previous month">
+        <Button size="sm" tone="ghost" className="!px-[0.55em]" onClick={() => shift(-1)} aria-label="Previous month">
           &lsaquo;
         </Button>
         <span className="text-[0.8em] text-muted">
           {cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" })}
         </span>
-        <Button className="!px-[0.55em]" onClick={() => shift(1)} aria-label="Next month">
+        <Button size="sm" tone="ghost" className="!px-[0.55em]" onClick={() => shift(1)} aria-label="Next month">
           &rsaquo;
         </Button>
       </div>

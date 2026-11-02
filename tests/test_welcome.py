@@ -98,6 +98,59 @@ class TestWelcomeList(unittest.TestCase):
         self.assertEqual((p.today, p.done, p.delete), ([1], [2], [3]))
 
 
+class TestDoing(unittest.TestCase):
+    """Starting a task in Doing instead of To Do. Doing is a way of doing it
+    today, so it ticks the row; anything that takes a row out of today takes
+    Doing with it."""
+
+    def test_doing_ticks_a_backlog_row_and_lands_in_the_plan(self):
+        rows = WelcomeList([CARRIED, LOOSE])
+        rows.toggle_doing(1)
+        self.assertTrue(rows.rows[1].today)
+        p = rows.plan(None)
+        self.assertEqual((p.today, p.doing), ([2], [2]))
+        rows.toggle_doing(1)  # again: To Do, still today
+        p = rows.plan(None)
+        self.assertEqual((p.today, p.doing), ([2], []))
+
+    def test_doing_takes_a_mark_off(self):
+        rows = WelcomeList([CARRIED])
+        rows.toggle(0, DELETE)
+        rows.toggle_doing(0)
+        self.assertEqual(rows.plan(None), ui.Plan([1], [], [], [], None, doing=[1]))
+
+    def test_unticking_or_marking_clears_doing(self):
+        rows = WelcomeList([CARRIED, LOOSE])
+        rows.toggle_doing(0)
+        rows.toggle_doing(1)
+        rows.toggle_today(0)
+        self.assertIsNone(rows.toggle(1, DELETE))
+        self.assertEqual([row.doing for row in rows.rows], [False, False])
+        # Ticked again, a row comes back in To Do, not in Doing.
+        rows.toggle_today(0)
+        self.assertEqual(rows.plan(None).doing, [])
+
+    def test_typed_rows_carry_doing_on_themselves(self):
+        rows = WelcomeList([])
+        rows.add("now")
+        rows.add("next")
+        rows.add("later")
+        rows.toggle_doing(0)
+        rows.toggle_doing(2)
+        rows.toggle_today(2)  # unticked: to the backlog, and never in Doing
+        p = rows.plan(None)
+        self.assertEqual(p.new, [NewTask("now", doing=True), NewTask("next")])
+        self.assertEqual(p.new_backlog, [NewTask("later")])
+        self.assertEqual(p.doing, [])
+
+    def test_deleting_a_typed_doing_row_removes_it(self):
+        rows = WelcomeList([])
+        rows.add("typo")
+        rows.toggle_doing(0)
+        rows.toggle(0, DELETE)
+        self.assertEqual(rows.plan(None).new, [])
+
+
 class TestDetails(unittest.TestCase):
     def test_only_changed_rows_are_edits(self):
         rows = WelcomeList([CARRIED, DETAILED])
@@ -248,6 +301,15 @@ class TestTerminalWelcome(TerminalCase):
         self.assertEqual(out.count("whole number above zero"), 2)
         self.assertIn("  1. [ ] carried  [done]", out)
         self.assertIn("  3. [x] write report", out)
+
+    def test_g_starts_a_task_in_doing(self):
+        self.script("write report", "g 1", "g 2", "G2", "g2", "", "")
+        p = ui.welcome([CARRIED])
+        self.assertEqual(p, ui.Plan([1], [], [], [NewTask("write report", doing=True)], None, doing=[1]))
+        out = self.out.getvalue()
+        self.assertIn("g N = start it in Doing", out)
+        self.assertIn("  1. [x] carried  [doing]", out)
+        self.assertIn("  2. [x] write report  [doing]", out)
 
     def test_bad_numbers_and_refusals_are_said(self):
         self.script("x 9", "d 1", "t 1", "", "")

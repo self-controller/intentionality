@@ -8,14 +8,15 @@
 #
 # VT9 because logind's NAutoVTs=6 autospawns gettys on VT1-6 only: VT7-12 are
 # free, and Ctrl+Alt+F2..F6 stay untouched as escape hatches. Ctrl+Alt+F1
-# returns to GNOME at any point, including out of a half-answered gate.
+# returns to GNOME from the text gate at any point; the graphical gate keeps
+# the keyboard until it is answered (srvrkeys:none in bin/gate-sway.conf.in).
 #
 # PAMName= gives the run a logind session of its own (the stack is
 # systemd/pam.d/intentionality-gate: account + session, no auth, no password).
 # The text gate never needed one. The graphical gate does: a compositor can
 # only open the GPU and the input devices through logind, and logind only
 # hands them to the active session on that VT. It also supplies
-# XDG_RUNTIME_DIR, which cage requires. A session on tty9 ends when this unit
+# XDG_RUNTIME_DIR, which sway requires. A session on tty9 ends when this unit
 # does and never touches GNOME's session on tty1 beyond the pause/resume any
 # VT switch already causes.
 #

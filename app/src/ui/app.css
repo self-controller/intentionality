@@ -48,6 +48,18 @@
   --info: #54a2ff;
   --violet: #c27aff;
 
+  /* One colour per task in the Dashboard's pie and bars, in board order: the
+     dataviz skill's dark categorical steps, yellow and orange left out so no
+     task reads as the amber "Not relevant". Checked with its
+     validate_palette.js on #0c0c0c in ring order (grey, tasks, amber, grey):
+     every count from 1 to 5 clears the colour-blind (worst ΔE 9.4) and
+     normal-vision floors. A sixth task folds into "Other tasks". */
+  --series-1: #3987e5;
+  --series-2: #d55181;
+  --series-3: #008300;
+  --series-4: #9085e9;
+  --series-5: #199e70;
+
   --board-panel: #121212;
   --board-card: #1c1c1c;
   --board-edge: #0a0a0a;
@@ -85,6 +97,11 @@
   --color-warn: var(--warn);
   --color-info: var(--info);
   --color-violet: var(--violet);
+  --color-series-1: var(--series-1);
+  --color-series-2: var(--series-2);
+  --color-series-3: var(--series-3);
+  --color-series-4: var(--series-4);
+  --color-series-5: var(--series-5);
 
   /* The gate's names that mean nothing here. Unset, so a class the migration
      missed renders as nothing at all instead of quietly in the old greys. */

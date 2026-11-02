@@ -11,8 +11,18 @@ export interface Row {
   mark: Mark;
   /** Ticked for today: goes to To Do on Start. Unticked stays in the backlog. */
   today: boolean;
+  /** Starts in Doing instead of To Do. Python keeps it on ticked, unmarked
+   *  rows only: turning it on ticks the row, unticking or marking clears it.
+   *  Absent from a gate older than this bundle, which reads as To Do. */
+  doing?: boolean;
   /** ui.row_detail(), or the mark's word when the row is marked. */
   detail: string;
+  /** The due date alone, in ui.due_label's words ("due today", "overdue, was
+   *  due Sep 18"); "" when there is none or the row is marked. The screen lays
+   *  it out itself, in colour when the words say overdue or today. */
+  due: string;
+  /** Whether the task carries notes. */
+  notes: boolean;
   /** Only a task carried from an earlier session can be marked done. */
   can_finish: boolean;
   /** Typed on this screen rather than pulled from the store. */
@@ -56,6 +66,9 @@ export interface Welcome {
   added: number;
   /** Why the add box's last task did not land ("" when silent or none). */
   add_error: string;
+  /** Shortcuts changed in the app's Settings, action id -> combo
+   *  (app/src/keybinds.ts). Absent from a gate older than this bundle. */
+  keys?: Record<string, string>;
 }
 
 export interface Blank {

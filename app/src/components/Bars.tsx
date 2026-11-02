@@ -7,6 +7,12 @@ const TONE = {
   primary: "bg-primary",
   warn: "bg-warn",
   muted: "bg-muted-foreground/50",
+  // One task each, matching its slice in the Dashboard's pie.
+  series1: "bg-series-1",
+  series2: "bg-series-2",
+  series3: "bg-series-3",
+  series4: "bg-series-4",
+  series5: "bg-series-5",
 };
 
 export function Bars({ children }: { children: React.ReactNode }) {
@@ -21,8 +27,9 @@ export function BarRow({
   /** Past the model's cut: shown because the record should be complete, but
    *  quieter, because the model never saw it. */
   unsent = false,
-  /** What the bar's colour says: time on task, time no task needed, time
-   *  nobody judged. Words in the label carry the meaning; this reinforces. */
+  /** What the bar's colour says: time on task (series1-5: which task, as in
+   *  the Dashboard's pie), time no task needed, time nobody judged. Words in
+   *  the label carry the meaning; this reinforces. */
   tone = "primary",
 }: {
   label: string;

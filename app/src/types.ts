@@ -118,44 +118,77 @@ export interface Health {
   relevance: string | null;
 }
 
-// An app or website flagged as at risk, by the name the user typed.
-export interface RiskApp {
-  id: number;
+// An app or website that is never judged (ignore.rs): no Jev request, no
+// timer, its time "Not judged". An app is matched by its window classes, a
+// site by its host and every part of it ("google.com" covers docs.google.com).
+export type IgnoreKind = "app" | "site";
+
+export interface IgnoreRule {
+  kind: IgnoreKind;
+  // An app: its desktop id or window class, lowercased. A site: its host.
+  value: string;
   name: string;
+  // An app's window classes, lowercased. Empty for a site.
+  classes: string[];
 }
 
-export interface RiskTotal extends RiskApp {
+// An app or site seen today, as the ignore menu offers it.
+export interface IgnoreChoice extends IgnoreRule {
+  seconds: number;
+  ignored: boolean;
+}
+
+// An installed app, from its .desktop file.
+export interface InstalledApp {
+  id: string;
+  name: string;
+  classes: string[];
+}
+
+// One row of the culprits chart: a site, a tool and project ("Claude Code:
+// Pager"), or an app, and today's not-relevant time on it.
+export interface Culprit {
+  name: string;
   seconds: number;
 }
 
-// Today on the at-risk apps. `total` counts a moment once however many flags
-// matched it; `error` says why no time could be read (the flags are still
-// listed, at zero).
-export interface RiskToday {
-  apps: RiskTotal[];
-  total: number;
-  // Rows in the relevance cache: pages × tasks Jev has judged.
-  judged: number;
-  error: string | null;
-}
-
-// Today since local midnight, across sessions: the Dashboard's lead. A page
-// is relevant when some task of the session it fell in clears the bar, the
-// timer's own rule. unjudged includes outside (active time in no session).
-export interface TodayTime {
+// One day across sessions, as the Dashboard shows it: today so far or a past
+// day whole, from the day-start hour (Settings, 4 am by default) to the next.
+// A page is relevant when a task it is judged against clears the bar -- the
+// timer's own rule -- and is that likeliest task's time. Today that is Doing
+// now; a past day, each session's Doing as it was left; either way plus the
+// tasks finished that day. unjudged includes outside (active time in no
+// session).
+export interface DayTime {
+  // The day shown and today, "YYYY-MM-DD", each named by the date it began on.
+  day: string;
+  today: string;
+  // The hour (0-23) days start at.
+  start_hour: number;
+  // The window read: the day's start, and now or the next day's start.
+  start: string;
+  end: string;
   active_seconds: number;
   afk_seconds: number;
   aligned_seconds: number;
   off_seconds: number;
   unjudged_seconds: number;
   outside_seconds: number;
-  // Relevant time by task, most first; carried copies are one row.
+  // Relevant time by task in board order (Doing, then finished that day), not
+  // by size: the Dashboard colours each task by its place. Carried copies
+  // are one row.
   tasks: TaskTime[];
   // Unjudged pages a "Judge" press would ask Jev about (up to 30).
   askable: number;
   threshold: number;
   // Why the last judge pass could not judge some pages.
   error: string | null;
+  // Where the not-relevant time went, busiest first.
+  culprits: Culprit[];
+  // Every app and site seen that day, busiest first: the ignore menu's list.
+  seen: IgnoreChoice[];
+  // Rows in the relevance cache: pages × tasks Jev has judged.
+  judged: number;
 }
 
 // Jev's verdict on one page for one task on the board. `probability` is null

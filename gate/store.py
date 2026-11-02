@@ -798,6 +798,8 @@ def commit_plan(
     edits: dict | None = None,
     backlog_titles: list[str] = (),
     backlog_details: list = (),
+    doing_ids: list[int] = (),
+    new_doing: list[bool] = (),
 ) -> int:
     """Start a session from the welcome screen: finish, delete, pull, add.
 
@@ -813,6 +815,11 @@ def commit_plan(
     notes, due_date and labels (ui.Details). An edit to a task the app took
     meanwhile is dropped with it. `backlog_titles`/`backlog_details` are
     typed rows left unticked: they are created in the backlog.
+
+    `doing_ids` are tasks from `today_ids` that start in Doing rather than
+    To Do; `new_doing` runs alongside `titles` and says the same of each
+    typed task. One the app took meanwhile is not in this session, so it is
+    left alone with the rest of it.
     """
     with conn:
         for task_id in done_ids:
@@ -829,6 +836,10 @@ def commit_plan(
         new_ids = add_tasks(conn, session_id, titles)
         for task_id, details in zip(new_ids, new_details):
             _set_details(conn, task_id, session_id, details)
+        _start_doing(
+            conn, session_id,
+            [*doing_ids, *(task_id for task_id, doing in zip(new_ids, new_doing) if doing)],
+        )
         later_ids = add_tasks(conn, None, list(backlog_titles))
         for task_id, details in zip(later_ids, backlog_details):
             _set_details(conn, task_id, None, details)
@@ -837,6 +848,20 @@ def commit_plan(
         ).fetchone() is None:
             raise EmptyPlan("a session needs at least one task")
     return session_id
+
+
+def _start_doing(conn, session_id: int, task_ids) -> None:
+    """Move tasks of this session from To Do to Doing, the way the board's
+    drag does (db.rs apply_board): started_at records the FIRST entry into
+    doing. Guarded on session_id, so only a task this session really holds
+    is touched."""
+    ts = now()
+    for task_id in task_ids:
+        conn.execute(
+            "UPDATE task SET status = 'doing', started_at = COALESCE(started_at, ?)"
+            " WHERE id = ? AND session_id = ? AND status = 'planned'",
+            (ts, task_id, session_id),
+        )
 
 
 def _delete_backlog_task(conn, task_id: int) -> None:

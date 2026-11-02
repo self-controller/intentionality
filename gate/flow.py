@@ -40,7 +40,10 @@ def run(conn, notes: Sequence[str] = ()) -> int:
             ui.Label(row["name"], row["color"], examples.get(row["name"], ()))
             for row in store.list_labels(conn)
         ]
-        plan = ui.welcome(active, notes, error, known)
+        # The shortcuts changed in the app's Settings, as stored. The page
+        # knows what they mean (app/src/keybinds.ts); this only carries them.
+        keybinds = store.get_setting(conn, "keybinds", "{}") or "{}"
+        plan = ui.welcome(active, notes, error, known, keybinds)
 
         # The front ends refuse an empty list already; this is the rule's
         # authority, so a front end that slips can't start an empty session.
@@ -58,6 +61,7 @@ def run(conn, notes: Sequence[str] = ()) -> int:
                 new_details=[task.details for task in plan.new], edits=plan.edits,
                 backlog_titles=[task.title for task in plan.new_backlog],
                 backlog_details=[task.details for task in plan.new_backlog],
+                doing_ids=plan.doing, new_doing=[task.doing for task in plan.new],
             )
         except store.EmptyPlan:
             # Every task ticked for today left the backlog while the screen

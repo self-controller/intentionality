@@ -1,3 +1,5 @@
+import { ChevronRight } from "lucide-react";
+import { cn } from "../src/lib/utils";
 import type { LabelOpt, Row } from "./types";
 
 /** The key of the group for rows that wear no label. Cannot collide with a
@@ -46,26 +48,9 @@ export function groupRows(rows: Row[], labels: LabelOpt[]): Group[] {
   return other.rows.length ? [...sorted, other] : sorted;
 }
 
-/** The groups dealt into `cols` stacks, masonry style: each in turn goes to
- *  the lightest stack so far (the leftmost on a tie), so the cards in a stack
- *  sit straight under one another and a short card leaves no hole beside a
- *  tall one. Weighed by row count, never by measured height, so folding a
- *  card or opening a Details panel cannot move anything to the other stack;
- *  only a task arriving or leaving can. */
-export function stack(groups: Group[], cols: number): Group[][] {
-  const stacks: Group[][] = Array.from({ length: Math.max(1, cols) }, () => []);
-  const weight = stacks.map(() => 0);
-  for (const group of groups) {
-    const i = weight.indexOf(Math.min(...weight));
-    stacks[i].push(group);
-    weight[i] += 1 + group.rows.length;
-  }
-  return stacks;
-}
-
-/** One label's card: a header that folds the rows under it away. Cards are
- *  stacked in columns (stack()), so a card that grows (an open Details panel)
- *  pushes down only the cards under it, never the ones beside it. */
+/** One label's section of the backlog: a header that folds the rows under
+ *  it away. Flat, hairline-separated sections rather than cards -- the
+ *  backlog is the quiet half of the screen. */
 export default function LabelGroup({
   group,
   open,
@@ -78,40 +63,30 @@ export default function LabelGroup({
   children: React.ReactNode;
 }) {
   return (
-    <section className="min-w-0 rounded-[0.7rem] border border-line bg-surface">
+    <section className="border-b border-line last:border-0">
       <button
         type="button"
         aria-expanded={open}
         onClick={onToggle}
-        className="group flex w-full items-center gap-[0.6rem] rounded-[0.7rem] px-[0.9rem] py-[0.5rem]
-                   text-left text-[0.95rem] text-text outline-none
-                   focus-visible:ring-2 focus-visible:ring-accent"
+        className="group flex w-full items-center gap-[0.6rem] rounded-[0.5rem] py-[0.7rem] pr-[0.3rem] text-left
+                   outline-none focus-visible:ring-2 focus-visible:ring-text/50"
       >
-        <svg
-          viewBox="0 0 16 16"
+        <ChevronRight
           aria-hidden="true"
-          className={
-            "h-[0.85em] w-[0.85em] flex-none text-muted transition-transform duration-200 " +
-            "group-hover:text-text " +
-            (open ? "rotate-90" : "")
-          }
-        >
-          <path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor"
-                strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+          className={cn(
+            "size-[0.9rem] flex-none text-muted transition-transform duration-200 group-hover:text-text",
+            open && "rotate-90",
+          )}
+        />
         <span
-          className={"h-[0.55em] w-[0.55em] flex-none rounded-full " + (group.color ? "" : "border border-muted")}
+          className={cn("size-[0.5rem] flex-none rounded-full", !group.color && "border border-muted")}
           style={group.color ? { background: group.color } : undefined}
         />
-        <span className="min-w-0 truncate font-medium">{group.name}</span>
+        <span className="min-w-0 truncate text-[0.84rem] font-medium text-text">{group.name}</span>
         <span className="flex-1" />
-        <span className="flex-none text-[0.8em] tabular-nums text-muted">{group.rows.length}</span>
+        <span className="font-mono text-[0.72rem] tabular-nums text-muted">{group.rows.length}</span>
       </button>
-      {open && (
-        <ul className="gate-rise border-t border-line px-[0.9rem] pb-[0.4rem] pt-[0.25rem]">
-          {children}
-        </ul>
-      )}
+      {open && <ul className="gate-rise pb-[0.4rem] pl-[1.5rem]">{children}</ul>}
     </section>
   );
 }

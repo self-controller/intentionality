@@ -27,6 +27,15 @@ def screen(tasks=None, notes=(), error="", labels=()):
 
 
 class TestState(unittest.TestCase):
+    def test_shortcuts_travel_and_junk_is_none(self):
+        self.assertEqual(screen().state()["keys"], {})
+        given = '{"gate.focusAdd": "Ctrl+KeyK", "gate.start": ""}'
+        keys = webstate.WelcomeScreen([], [], "", [], now=NOW, keybinds=given).state()["keys"]
+        self.assertEqual(keys, {"gate.focusAdd": "Ctrl+KeyK", "gate.start": ""})
+        for junk in ("not json", "[1]", "null", '{"gate.start": 3}'):
+            keys = webstate.WelcomeScreen([], [], "", [], now=NOW, keybinds=junk).state()["keys"]
+            self.assertEqual(keys, {}, junk)
+
     def test_greeting_and_date_come_from_ui(self):
         s = screen().state()
         self.assertEqual(s["greeting"], "Good evening")
@@ -39,6 +48,26 @@ class TestState(unittest.TestCase):
         self.assertEqual(row["index"], 0)
         self.assertFalse(row["typed"])
         self.assertTrue(row["can_finish"])
+
+    def test_due_and_notes_also_travel_as_fields(self):
+        # The front end lays the detail line out itself (chips, colour on an
+        # overdue date), so the parts come separately; `detail` stays whole.
+        t = task(1, "HW2", details=ui.Details("read ch. 4", "2026-09-18", ("school",)))
+        s = screen([t])
+        row = s.state()["rows"][0]
+        self.assertEqual(row["detail"], "overdue, was due Sep 18 · school · notes")
+        self.assertEqual(row["due"], "overdue, was due Sep 18")
+        self.assertTrue(row["notes"])
+        # No date, no notes: blank and False, not missing.
+        self.assertEqual(
+            (screen([task(2, "b")]).state()["rows"][0]["due"],
+             screen([task(2, "b")]).state()["rows"][0]["notes"]),
+            ("", False),
+        )
+        # A marked row's line is the mark's word, so its due words go quiet.
+        s.handle({"op": "mark", "index": 0, "mark": "delete"})
+        row = s.state()["rows"][0]
+        self.assertEqual((row["detail"], row["due"], row["notes"]), ("will be deleted", "", True))
 
     def test_typed_rows_say_new(self):
         s = screen()
@@ -213,6 +242,45 @@ class TestDetails(unittest.TestCase):
         self.assertEqual([l["name"] for l in offered], ["school", "invented"])
         self.assertTrue(offered[0]["exists"])
         self.assertFalse(offered[1]["exists"])
+
+
+class TestDoing(unittest.TestCase):
+    """The row's start-in-Doing toggle and the add box's Doing switch."""
+
+    def test_doing_travels_and_ticks_the_row(self):
+        s = screen([task(1, "a")])
+        self.assertFalse(s.state()["rows"][0]["doing"])
+        s.handle({"op": "doing", "index": 0})
+        row = s.state()["rows"][0]
+        self.assertEqual((row["doing"], row["today"]), (True, True))
+        self.assertTrue(s.state()["start_enabled"])
+        s.handle({"op": "today", "index": 0})
+        row = s.state()["rows"][0]
+        self.assertEqual((row["doing"], row["today"]), (False, False))
+
+    def test_a_junk_index_is_ignored(self):
+        s = screen([task(1, "a")])
+        for index in (5, -1, "0", None):
+            s.handle({"op": "doing", "index": index})
+        self.assertFalse(s.state()["rows"][0]["doing"])
+
+    def test_the_add_box_switch_lands_the_task_in_doing(self):
+        s = screen()
+        s.handle({"op": "add", "title": "now", "doing": True})
+        s.handle({"op": "add", "title": "next"})
+        # Only a real true: a bundle sending anything else gets To Do.
+        s.handle({"op": "add", "title": "odd", "doing": "yes"})
+        self.assertEqual([r["doing"] for r in s.state()["rows"]], [True, False, False])
+
+    def test_start_takes_the_box_switch_and_the_rows(self):
+        s = screen([task(1, "a"), task(2, "b")])
+        s.handle({"op": "doing", "index": 1})
+        s.handle({"op": "today", "index": 0})
+        s.handle({"op": "submit", "add_text": "last", "minutes": "", "details": None,
+                  "add_details": None, "add_doing": True})
+        self.assertIsNotNone(s.plan)
+        self.assertEqual((s.plan.today, s.plan.doing), ([1, 2], [2]))
+        self.assertEqual([(t.title, t.doing) for t in s.plan.new], [("last", True)])
 
 
 class TestAddWithDetails(unittest.TestCase):

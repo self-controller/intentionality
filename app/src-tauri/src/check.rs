@@ -12,7 +12,7 @@ use crate::models::{
 };
 use crate::{recommendations, relevance, screen_time, subject};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// How many pages one check asks about. The busiest pages carry nearly all
 /// of a stretch; the rest is reported as not judged rather than paid for.
@@ -107,6 +107,22 @@ pub struct Tally {
 /// task's verdict clears `min` -- ties go to the task higher on the board --
 /// no task when every task was judged and none did, and unjudged otherwise.
 pub fn tally(pages: &Pages, judgements: &[Option<Judgement>], tasks: &[Task], min: f64) -> Tally {
+    tally_with(pages, judgements, tasks, min, &HashSet::new())
+}
+
+/// `tally`, where the tasks in `optional` may claim a page but are never
+/// waited for: a page with no verdict for one of them is still judged by the
+/// rest. Today's tasks finished earlier are these -- the time a verdict
+/// already gives them stays theirs, and a page nobody asked about them is
+/// not left unjudged for it. With only optional tasks, a page is judged
+/// (nothing in Doing: off task unless one of them excuses it).
+pub fn tally_with(
+    pages: &Pages,
+    judgements: &[Option<Judgement>],
+    tasks: &[Task],
+    min: f64,
+    optional: &HashSet<i64>,
+) -> Tally {
     let mut credit: Vec<f64> = vec![0.0; tasks.len()];
     let index: HashMap<i64, usize> = tasks.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
     let mut out = Vec::new();
@@ -155,7 +171,11 @@ pub fn tally(pages: &Pages, judgements: &[Option<Judgement>], tasks: &[Task], mi
         // Nothing in Doing: nothing for the page to be relevant to, so it is
         // not, the timer's rule. (A check never tallies without tasks.)
         let all_judged = j.no_tasks
-            || (!j.verdicts.is_empty() && j.verdicts.iter().all(|v| v.probability.is_some()));
+            || (!j.verdicts.is_empty()
+                && j.verdicts
+                    .iter()
+                    .filter(|v| !optional.contains(&v.task_id))
+                    .all(|v| v.probability.is_some()));
         if let Some(i) = excused {
             row.verdict = "excused".into();
             aligned += page.seconds;
@@ -564,6 +584,48 @@ mod tests {
         let t = tally(&p, &js, &[], 0.7);
         assert_eq!(t.pages.iter().map(|x| x.verdict.as_str()).collect::<Vec<_>>(), ["no_task"; 3]);
         assert_eq!((t.aligned, t.off, t.unjudged), (0.0, 2100.0, 0.0));
+    }
+
+    /// Today's tasks finished earlier (Today's `optional`): they claim what a
+    /// verdict gives them and are never waited for.
+    #[test]
+    fn a_finished_task_claims_its_verdicts_and_is_never_waited_for() {
+        let p = three_pages(); // main.rs, feed | linkedin, docs
+        let tasks = [task(1, "Ship it", "doing"), task(2, "Essay", "done")];
+        let done = HashSet::from([2]);
+        let js = vec![
+            // The finished task was the likelier: the page is its time.
+            Some(judgement(&[(1, "Ship it", Some(0.75)), (2, "Essay", Some(0.95))])),
+            // Never asked about the finished task: judged by Doing alone.
+            Some(judgement(&[(1, "Ship it", Some(0.1)), (2, "Essay", None)])),
+            // A Doing task unasked still leaves the page unjudged.
+            Some(judgement(&[(1, "Ship it", None), (2, "Essay", Some(0.2))])),
+        ];
+        let t = tally_with(&p, &js, &tasks, 0.7, &done);
+        assert_eq!(t.pages.iter().map(|x| x.verdict.as_str()).collect::<Vec<_>>(), ["excused", "no_task", "unjudged"]);
+        assert_eq!(t.pages[0].task_id, Some(2));
+        assert_eq!((t.tasks[0].seconds, t.tasks[1].seconds), (0.0, 1200.0));
+        assert_eq!((t.aligned, t.off, t.unjudged), (1200.0, 600.0, 300.0));
+        // With none optional, the unasked finished task holds the page back.
+        let plain = tally(&p, &js, &tasks, 0.7);
+        assert_eq!(plain.pages[1].verdict, "unjudged");
+        assert_eq!(tally_with(&p, &js, &tasks, 0.7, &HashSet::new()), plain);
+    }
+
+    /// Nothing in Doing but a task finished earlier: off task, as the timer
+    /// says, unless that task's verdict excuses the page.
+    #[test]
+    fn with_only_finished_tasks_a_page_is_theirs_or_off_task() {
+        let p = three_pages();
+        let tasks = [task(2, "Essay", "done")];
+        let js = vec![
+            Some(judgement(&[(2, "Essay", Some(0.8))])),
+            Some(judgement(&[(2, "Essay", Some(0.3))])),
+            Some(judgement(&[(2, "Essay", None)])),
+        ];
+        let t = tally_with(&p, &js, &tasks, 0.7, &HashSet::from([2]));
+        assert_eq!(t.pages.iter().map(|x| x.verdict.as_str()).collect::<Vec<_>>(), ["excused", "no_task", "no_task"]);
+        assert_eq!((t.aligned, t.off, t.unjudged), (1200.0, 900.0, 0.0));
     }
 
     #[test]

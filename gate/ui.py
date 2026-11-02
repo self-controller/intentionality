@@ -108,6 +108,8 @@ class NewTask:
 
     title: str
     details: Details = field(default_factory=Details)
+    # Starts in this session's Doing instead of its To Do.
+    doing: bool = False
 
 
 @dataclass
@@ -127,6 +129,9 @@ class Plan:
     # or not): the desktop app may be editing the same backlog, and writing
     # back what was merely loaded would undo its edit.
     edits: dict[int, Details] = field(default_factory=dict)
+    # Backlog tasks from `today` that start in Doing instead of To Do. A typed
+    # task says so on itself (NewTask.doing).
+    doing: list[int] = field(default_factory=list)
 
 
 DONE, DELETE = "done", "delete"
@@ -143,6 +148,9 @@ class Row:
     # the backlog. A typed row starts ticked -- it was typed for today -- and
     # a backlog task starts unticked.
     today: bool | None = None
+    # Starts in Doing rather than To Do. Only ever true on a ticked, unmarked
+    # row: WelcomeList keeps it so, and plan() reads it only there.
+    doing: bool = False
 
     def __post_init__(self):
         if self.details is None:
@@ -178,6 +186,7 @@ class WelcomeList:
         row.mark = None if row.mark == mark else mark
         if row.mark:
             row.today = False
+            row.doing = False
         return None
 
     def toggle_today(self, index: int) -> None:
@@ -186,6 +195,17 @@ class WelcomeList:
         row = self.rows[index]
         row.today = not row.today
         if row.today:
+            row.mark = None
+        else:
+            row.doing = False
+
+    def toggle_doing(self, index: int) -> None:
+        """Start a row in Doing instead of To Do, or put it back. Doing is a
+        way of doing it today, so it ticks the row and takes any mark off."""
+        row = self.rows[index]
+        row.doing = not row.doing
+        if row.doing:
+            row.today = True
             row.mark = None
 
     def set_details(self, index: int, details: Details) -> str | None:
@@ -210,7 +230,7 @@ class WelcomeList:
             today=[row.task.id for row in live if row.today],
             done=[row.task.id for row in carried if row.mark == DONE],
             delete=[row.task.id for row in carried if row.mark == DELETE],
-            new=[NewTask(row.title, row.details) for row in typed if row.today],
+            new=[NewTask(row.title, row.details, row.doing) for row in typed if row.today],
             new_backlog=[NewTask(row.title, row.details) for row in typed if not row.today],
             intended_minutes=intended_minutes,
             edits={
@@ -218,6 +238,7 @@ class WelcomeList:
                 for row in live
                 if not row.details.same_as(row.task.details)
             },
+            doing=[row.task.id for row in live if row.today and row.doing],
         )
 
 
@@ -226,6 +247,7 @@ def welcome(
     notes: Sequence[str] = (),
     error: str = "",
     labels: Sequence[Label] = (),
+    keybinds: str = "{}",
 ) -> Plan:
     """The whole gate conversation: the tasks there are, edited into the
     tasks this session starts with.
@@ -234,9 +256,11 @@ def welcome(
     and ignores it here; a graphical front end shows it under the greeting.
     `error` is why the last answer was not accepted. `labels` are the ones
     that exist, to tag a task with; a new one can always be typed.
+    `keybinds` is the meta `keybinds` JSON, the shortcuts changed in the
+    app's Settings; only a graphical front end has shortcuts to change.
     """
     if backend is not None:
-        return backend.welcome(list(tasks), list(notes), error, list(labels))
+        return backend.welcome(list(tasks), list(notes), error, list(labels), keybinds)
     return _terminal_welcome(tasks, error, list(labels))
 
 
@@ -341,11 +365,12 @@ def ask_minutes() -> int | None:
 
 
 _HELP = (
-    "Type a task to add it (it is for today) · t N = today / backlog · d N = done"
+    "Type a task to add it (it is for today) · t N = today / backlog"
+    " · g N = start it in Doing (again for To Do) · d N = done"
     " · x N = delete (again to undo) · e N = due date, notes, labels"
     " · blank line to start"
 )
-_COMMAND = re.compile(r"([tdxe])\s*(\d+)", re.IGNORECASE)
+_COMMAND = re.compile(r"([tdxeg])\s*(\d+)", re.IGNORECASE)
 
 
 def _terminal_welcome(tasks: list[ActiveTask], error: str, labels: list[Label]) -> Plan:
@@ -382,6 +407,8 @@ def _terminal_welcome(tasks: list[ActiveTask], error: str, labels: list[Label]) 
             message = _terminal_details(rows, number - 1, labels)
         elif letter == "t":
             rows.toggle_today(number - 1)
+        elif letter == "g":
+            rows.toggle_doing(number - 1)
         else:
             mark = DONE if letter == "d" else DELETE
             message = rows.toggle(number - 1, mark) or ""
@@ -440,6 +467,6 @@ def _print_rows(rows: WelcomeList) -> None:
     for number, row in enumerate(rows.rows, start=1):
         detail = row_detail(row, today)
         detail = f"  ({detail})" if detail else ""
-        mark = f"  [{row.mark}]" if row.mark else ""
+        mark = f"  [{row.mark}]" if row.mark else "  [doing]" if row.doing else ""
         box = "[x]" if row.today else "[ ]"
         print(f"  {number}. {box} {row.title}{detail}{mark}")

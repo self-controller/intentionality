@@ -18,8 +18,18 @@
 //! names the folder alone. folder.rs finds the rest on the machine, so Jev
 //! is shown the folder and the project, and one verdict covers every
 //! terminal and every file of that project.
+//!
+//! Each subject also says what it is part of, for the Dashboard's culprits
+//! chart (`source`): a tab its site ("linkedin.com", the feed and every
+//! profile alike), a terminal its tool and project ("Claude Code:
+//! intentionality", "Terminal: Pager"), an editor its project, any other
+//! app the app ("Discord", every channel alike).
+//!
+//! An app or site on the ignore list (ignore.rs) is never judged: `of` has
+//! nothing to say about it, as about this app's own window.
 
 use crate::folder::{self, Lookup, Project};
+use crate::ignore::{self, Rule};
 use crate::places::Place;
 use crate::screen_time::is_browser;
 use std::path::Path;
@@ -49,14 +59,25 @@ pub struct Subject {
     /// when that page is part of the key, so what Jev sees of it is what the
     /// verdict is cached under.
     pub place: Option<Place>,
+    /// What the Dashboard's culprits chart counts it under: a tab's site,
+    /// "Claude Code: <project>" / "Terminal: <project>", "VS Code:
+    /// <project>", or the app's name.
+    pub source: String,
+    /// A tab's site, whenever the browser's history knows the title (unlike
+    /// `place`, which is only kept when the page above says more).
+    pub site: Option<String>,
 }
+
+/// What every Claude Code session outside a project is counted under: one
+/// bar for all the one-off chats, not one each.
+pub const CLAUDE_ELSEWHERE: &str = "Claude Code: other";
 
 /// Longest label the clock shows before cutting it with "…".
 const LABEL_CHARS: usize = 32;
 
 /// Windows that are never judged: this app's own (where an appeal is
 /// argued) and the file dialogs a browser or editor opens for a moment.
-const NEVER: &[&str] = &["intentionality", "xdg-desktop-portal-gtk", "xdg-desktop-portal-gnome"];
+pub(crate) const NEVER: &[&str] = &["intentionality", "xdg-desktop-portal-gtk", "xdg-desktop-portal-gnome"];
 
 /// Code editors whose titles end "<file> - <folder> - <name>": (window
 /// class, the name its titles end with, what the clock calls it).
@@ -86,17 +107,38 @@ const BROWSER_NAMES: &[&str] = &[
 ];
 
 /// What the window (AW's or the shell's `app` and `title`) is about, or None
-/// for a window that is never judged.
+/// for a window that is never judged: this app's own, a file dialog, or
+/// anything on the ignore list.
 pub fn of(app: &str, title: &str) -> Option<Subject> {
-    of_in(app, title, folder::machine())
+    of_with(app, title, folder::machine(), &ignore::current())
 }
 
-/// `of`, with what the machine says about folders given.
+/// `of`, with what the machine says about folders given, ignoring nothing.
 pub fn of_in(app: &str, title: &str, look: &dyn Lookup) -> Option<Subject> {
+    of_with(app, title, look, &[])
+}
+
+/// `of`, with the machine and the ignore list given.
+pub fn of_with(app: &str, title: &str, look: &dyn Lookup, ignored: &[Rule]) -> Option<Subject> {
     let class = app.trim().to_lowercase();
-    if class.is_empty() || NEVER.contains(&class.as_str()) {
+    if class.is_empty() || NEVER.contains(&class.as_str()) || ignore::hides_app(ignored, &class) {
         return None;
     }
+    let subject = judged(app, title, class, look)?;
+    if subject.kind == "browser tab" && !ignored.is_empty() {
+        let hidden = match &subject.site {
+            Some(site) => ignore::hides_site(ignored, site),
+            None => ignore::hides_title(ignored, &clean(app, title)),
+        };
+        if hidden {
+            return None;
+        }
+    }
+    Some(subject)
+}
+
+/// What a window is about, the ignore list aside.
+fn judged(app: &str, title: &str, class: String, look: &dyn Lookup) -> Option<Subject> {
     if let Some(subject) = editor(&class, title, look) {
         return Some(subject);
     }
@@ -107,12 +149,16 @@ pub fn of_in(app: &str, title: &str, look: &dyn Lookup) -> Option<Subject> {
     let mut name = if shown.is_empty() { short_name(app).to_string() } else { shown.clone() };
     let mut key = shown.to_lowercase();
     let browser = is_browser(app);
+    let found = (browser && !shown.is_empty()).then(|| look.place(&class, &shown)).flatten();
+    let site = found.as_ref().map(|p| p.site.clone()).filter(|s| !s.is_empty());
     // The page above, where it says what the title does not ("Files", not
     // "Assignments: 2026FA - APOCALYPSE NOW 01:840:305:90").
-    let place = (browser && !shown.is_empty())
-        .then(|| look.place(&class, &shown))
-        .flatten()
-        .filter(|p| p.part_of.as_deref().is_some_and(|above| adds_to(&shown, above)));
+    let place = found.filter(|p| p.part_of.as_deref().is_some_and(|above| adds_to(&shown, above)));
+    let source = if browser {
+        site.clone().unwrap_or_else(|| title_site(&name))
+    } else {
+        look.app_name(&class).unwrap_or_else(|| short_name(app).to_string())
+    };
     if let Some(above) = place.as_ref().and_then(|p| p.part_of.as_deref()) {
         key = format!("{key} · {}", above.to_lowercase());
         name = format!("{name} · {above}");
@@ -125,6 +171,8 @@ pub fn of_in(app: &str, title: &str, look: &dyn Lookup) -> Option<Subject> {
         folder: None,
         project: None,
         place,
+        source,
+        site,
     })
 }
 
@@ -156,6 +204,20 @@ pub fn page_title(app: &str, title: &str) -> String {
         Some(s) => s.name,
         None => clean(app, title),
     }
+}
+
+/// A tab's site as its title gives it, for a tab the history does not know:
+/// the title's last part when it is short enough to be a site's name
+/// ("Feed | LinkedIn" -> "LinkedIn", "Untitled document - Google Docs" ->
+/// "Google Docs"), else the title.
+fn title_site(shown: &str) -> String {
+    let tail = [" | ", " — ", " – ", " - ", " · "]
+        .iter()
+        .filter_map(|sep| shown.rfind(sep).map(|at| &shown[at + sep.len()..]))
+        .min_by_key(|tail| tail.len())
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && t.split_whitespace().count() <= 3 && t.chars().count() <= 30);
+    tail.unwrap_or(shown).to_string()
 }
 
 /// The title with what changes without the page changing taken off --
@@ -243,14 +305,17 @@ fn editor(class: &str, title: &str, look: &dyn Lookup) -> Option<Subject> {
         (None, None) => folder.to_lowercase(),
     };
     let shown = project.as_ref().map_or(folder, |p| p.name.as_str());
+    let name = format!("{short}: {shown}");
     Some(Subject {
         key: (class.to_string(), key),
-        name: format!("{short}: {shown}"),
+        source: name.clone(),
+        name,
         about,
         kind: "code editor",
         folder: found.map(|dir| folder::tilde(&dir, home)),
         project,
         place: None,
+        site: None,
     })
 }
 
@@ -272,10 +337,11 @@ fn terminal(class: String, title: &str, look: &dyn Lookup) -> Option<Subject> {
     // fish's title holds until the program sets its own: "claude
     // ~/D/p/intentionality" is a session starting there.
     let path = t.rsplit(' ').next().filter(|w| w.starts_with('~') || w.starts_with('/'));
+    let claude = process.is_some_and(|p| p.split_whitespace().next() == Some("claude"));
     if let Some(dir) = path.and_then(|p| look.expand(p)) {
-        return Some(in_folder(class, &dir, None, look));
+        return Some(in_folder(class, &dir, None, claude, look));
     }
-    if process.is_some_and(|p| p.split_whitespace().next() == Some("claude")) {
+    if claude {
         return claude_session(class, t, look);
     }
     let (name, about) = if t.starts_with('~') || t.starts_with('/') {
@@ -287,14 +353,17 @@ fn terminal(class: String, title: &str, look: &dyn Lookup) -> Option<Subject> {
         let about = format!("A terminal window titled \"{t}\"");
         (t.to_string(), about)
     };
+    let shown = format!("Terminal: {name}");
     Some(Subject {
         key: (class, name.to_lowercase()),
-        name: format!("Terminal: {name}"),
+        source: shown.clone(),
+        name: shown,
         about,
         kind: "terminal",
         folder: None,
         project: None,
         place: None,
+        site: None,
     })
 }
 
@@ -305,7 +374,7 @@ fn terminal(class: String, title: &str, look: &dyn Lookup) -> Option<Subject> {
 fn claude_session(class: String, topic: &str, look: &dyn Lookup) -> Option<Subject> {
     let named = !is_untitled(topic);
     match look.claude_cwd(named.then_some(topic)) {
-        Some(dir) => Some(in_folder(class, &dir, named.then_some(topic), look)),
+        Some(dir) => Some(in_folder(class, &dir, named.then_some(topic), true, look)),
         None if named => Some(Subject {
             key: (class, topic.to_lowercase()),
             name: format!("Terminal: {topic}"),
@@ -314,6 +383,8 @@ fn claude_session(class: String, topic: &str, look: &dyn Lookup) -> Option<Subje
             folder: None,
             project: None,
             place: None,
+            source: CLAUDE_ELSEWHERE.into(),
+            site: None,
         }),
         None => None,
     }
@@ -334,19 +405,24 @@ fn claude_about(topic: &str) -> String {
 /// whatever the session or command, so one verdict holds for every terminal
 /// on that project. Outside a project it is the folder's, except that a
 /// Claude Code session there is its own -- a home folder holds sessions
-/// about anything.
-fn in_folder(class: String, dir: &Path, topic: Option<&str>, look: &dyn Lookup) -> Subject {
+/// about anything. `claude`: Claude Code is what runs in it, which the
+/// culprits chart tells apart from the shell: "Claude Code: Pager" and
+/// "Terminal: Pager" share a verdict but not a bar.
+fn in_folder(class: String, dir: &Path, topic: Option<&str>, claude: bool, look: &dyn Lookup) -> Subject {
     let home = look.home();
     let shown = folder::tilde(dir, home);
     if let Some(project) = look.project(dir) {
+        let tool = if claude { "Claude Code" } else { "Terminal" };
         return Subject {
             key: (class, folder::tilde(&project.root, home).to_lowercase()),
             name: format!("Terminal: {}", project.name),
             about: format!("A terminal working in the project \"{}\"", project.name),
             kind: "terminal",
             folder: Some(shown),
+            source: format!("{tool}: {}", project.name),
             project: Some(project),
             place: None,
+            site: None,
         };
     }
     let (key, name, about) = match topic {
@@ -361,14 +437,17 @@ fn in_folder(class: String, dir: &Path, topic: Option<&str>, look: &dyn Lookup) 
             (shown.to_lowercase(), last.unwrap_or_else(|| shown.clone()), format!("A terminal in the folder \"{shown}\""))
         }
     };
+    let name = format!("Terminal: {name}");
     Subject {
         key: (class, key),
-        name: format!("Terminal: {name}"),
+        source: if claude { CLAUDE_ELSEWHERE.into() } else { name.clone() },
+        name,
         about,
         kind: "terminal",
         folder: Some(shown),
         project: None,
         place: None,
+        site: None,
     }
 }
 
@@ -387,7 +466,7 @@ fn adds_to(title: &str, above: &str) -> bool {
 
 /// An app id's last part, for a window with no title: "org.gnome.Papers"
 /// is Papers.
-fn short_name(app: &str) -> &str {
+pub(crate) fn short_name(app: &str) -> &str {
     app.trim().rsplit('.').next().unwrap_or(app)
 }
 
@@ -569,9 +648,13 @@ mod tests {
                 about: Some("A gate that sits between login and your desktop.".into()),
             })
         }
-        /// The browser's history knows two Canvas pages.
+        /// The browser's history knows two Canvas pages, two LinkedIn ones
+        /// and a Google Doc.
         fn place(&self, _app: &str, title: &str) -> Option<Place> {
+            let site = |site: &str| Some(Place { site: site.into(), part_of: None });
             let part_of = match title {
+                "Feed | LinkedIn" | "Ada Lovelace | LinkedIn" => return site("linkedin.com"),
+                "Untitled document - Google Docs" => return site("docs.google.com"),
                 "Files" => "2026FA - INTRO DATA SCIENCE 01:198:439:09",
                 "Assignments: 2026FA - APOCALYPSE NOW 01:840:305:90" => "2026FA - APOCALYPSE NOW 01:840:305:90",
                 "Quiz 3: 2026FA - INTRO DATA SCIENCE 01:198:439:09" => "Quizzes: 2026FA - INTRO DATA SCIENCE 01:198:439:09",
@@ -579,6 +662,9 @@ mod tests {
                 _ => return None,
             };
             Some(Place { site: "rutgers.instructure.com".into(), part_of: Some(part_of.into()) })
+        }
+        fn app_name(&self, class: &str) -> Option<String> {
+            (class == "com.discordapp.discord").then(|| "Discord".into())
         }
     }
 
@@ -741,6 +827,94 @@ mod tests {
         // A folder VS Code has no record of keeps its name.
         let s = of_in("code", "calendar.ts - cereal - Visual Studio Code", &look).unwrap();
         assert_eq!((s.key.1.as_str(), s.folder), ("cereal", None));
+    }
+
+    fn source(app: &str, title: &str) -> String {
+        of_in(app, title, &Fake::new(false)).unwrap().source
+    }
+
+    /// The culprits chart's names: a site whatever the page, a tool and its
+    /// project whatever the session, an app whatever the channel.
+    #[test]
+    fn what_a_window_is_part_of() {
+        // Every LinkedIn page is linkedin.com; the history says so.
+        assert_eq!(source(ZEN, "(3) Feed | LinkedIn — Zen Browser"), "linkedin.com");
+        assert_eq!(source(ZEN, "Ada Lovelace | LinkedIn — Zen Browser"), "linkedin.com");
+        let s = of_in(ZEN, "Feed | LinkedIn — Zen Browser", &Fake::new(false)).unwrap();
+        assert_eq!((s.site.as_deref(), s.place), (Some("linkedin.com"), None));
+        assert_eq!(source(ZEN, "Untitled document - Google Docs — Zen Browser"), "docs.google.com");
+        assert_eq!(source(ZEN, "Files — Zen Browser"), "rutgers.instructure.com");
+        // The history does not know it: the title's short last part, or the title.
+        assert_eq!(source(ZEN, "Grace Hopper | LinkedIn — Zen Browser"), "LinkedIn");
+        assert_eq!(source(ZEN, "why do warheads taste fishy - Google Search — Zen Browser"), "Google Search");
+        assert_eq!(source(ZEN, "Some Long Essay - by a writer with many names — Zen Browser"), "Some Long Essay - by a writer with many names");
+        assert_eq!(source(ZEN, "Substack — Zen Browser"), "Substack");
+
+        // Claude Code and the shell in one project: one verdict, two bars.
+        let look = Fake::new(true);
+        let src = |t: &str| of_in(PTYXIS, t, &look).unwrap().source;
+        assert_eq!(src("✳ remove-wordmark-title-bar — claude "), "Claude Code: intentionality");
+        assert_eq!(src("✳ Claude Code — claude "), "Claude Code: intentionality");
+        assert_eq!(src("claude ~/D/p/intentionality — claude "), "Claude Code: intentionality");
+        assert_eq!(src("~/D/p/i/app"), "Terminal: intentionality");
+        assert_eq!(src("npm run tauri build ~/D/p/i/app — npm run tauri build "), "Terminal: intentionality");
+        assert_eq!(
+            of_in(PTYXIS, "✳ remove-wordmark-title-bar — claude ", &look).unwrap().key,
+            of_in(PTYXIS, "~/D/p/i/app", &look).unwrap().key
+        );
+        // The clock's label is unchanged.
+        assert_eq!(of_in(PTYXIS, "✳ remove-wordmark-title-bar — claude ", &look).unwrap().name, "Terminal: intentionality");
+        // Outside a project every Claude Code session is one bar; a shell is its folder.
+        assert_eq!(source(PTYXIS, "✳ Allocating more memory on Linux — claude "), CLAUDE_ELSEWHERE);
+        assert_eq!(source(PTYXIS, "✳ Rust backend rewrite — claude "), CLAUDE_ELSEWHERE);
+        assert_eq!(source(PTYXIS, "~/D/projects"), "Terminal: projects");
+        assert_eq!(source(PTYXIS, "htop"), "Terminal: htop");
+
+        assert_eq!(source("code", "main.rs - intentionality - Visual Studio Code"), "VS Code: intentionality");
+        assert_eq!(source("code", "calendar.ts - cereal - Visual Studio Code"), "VS Code: cereal");
+        // An app is the app, by its installed name when it has one.
+        assert_eq!(source("com.discordapp.Discord", "#general | fruity tartz - Discord"), "Discord");
+        assert_eq!(source("com.discordapp.Discord", "totss - Discord"), "Discord");
+        assert_eq!(source("org.gnome.Papers", "Assignment 3-1.pdf"), "Papers");
+    }
+
+    fn rule(kind: ignore::Kind, value: &str, classes: &[&str]) -> Rule {
+        ignore::normalize(Rule {
+            kind,
+            value: value.into(),
+            name: String::new(),
+            classes: classes.iter().map(|c| c.to_string()).collect(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn an_ignored_app_or_site_is_never_judged() {
+        let look = Fake::new(false);
+        let of = |app: &str, title: &str, rules: &[Rule]| of_with(app, title, &look, rules).map(|s| s.source);
+        let code = [rule(ignore::Kind::App, "com.visualstudio.code", &["Code"])];
+        assert_eq!(of("code", "main.rs - intentionality - Visual Studio Code", &code), None);
+        assert_eq!(of("Code", "main.rs - intentionality - Visual Studio Code", &code), None);
+        assert!(of(PTYXIS, "~/D/projects", &code).is_some());
+        // A browser ignored is every tab in it.
+        let zen = [rule(ignore::Kind::App, ZEN, &[])];
+        assert_eq!(of(ZEN, "Feed | LinkedIn — Zen Browser", &zen), None);
+        // A site: every page of it, by the history -- and by the title when
+        // the history does not know the page.
+        let linkedin = [rule(ignore::Kind::Site, "https://www.linkedin.com/feed", &[])];
+        assert_eq!(of(ZEN, "Feed | LinkedIn — Zen Browser", &linkedin), None);
+        assert_eq!(of(ZEN, "Grace Hopper | LinkedIn — Zen Browser", &linkedin), None);
+        assert!(of(ZEN, "Files — Zen Browser", &linkedin).is_some());
+        // Only browsers have sites: an app titled LinkedIn is not the site.
+        assert!(of("org.gnome.Papers", "LinkedIn.pdf", &linkedin).is_some());
+        // A part of a site is that part only.
+        let google = [rule(ignore::Kind::Site, "google.com", &[])];
+        assert_eq!(of(ZEN, "Untitled document - Google Docs — Zen Browser", &google), None);
+        let docs = [rule(ignore::Kind::Site, "docs.google.com", &[])];
+        assert_eq!(of(ZEN, "Untitled document - Google Docs — Zen Browser", &docs), None);
+        assert!(of(ZEN, "why do warheads taste fishy - Google Search — Zen Browser", &docs).is_some());
+        // Ignoring nothing changes nothing.
+        assert_eq!(of_with(ZEN, "Files — Zen Browser", &look, &[]), of_in(ZEN, "Files — Zen Browser", &look));
     }
 
     #[test]

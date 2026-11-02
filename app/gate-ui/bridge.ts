@@ -4,13 +4,6 @@ declare global {
   interface Window {
     webkit?: { messageHandlers: { gate: { postMessage(s: string): void } } };
     __gate?: { push: (s: State) => void };
-    /** Called by gate/gui.py, which owns scrolling at the gate: CSS px per
-     *  step, CSS px a second for a coast. See Gate.tsx. */
-    __gateScroll?: {
-      by: (dx: number, dy: number) => void;
-      fling: (vx: number, vy: number) => void;
-      stop: () => void;
-    };
   }
 }
 

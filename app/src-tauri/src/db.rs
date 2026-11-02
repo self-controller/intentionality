@@ -103,10 +103,14 @@ pub fn latest_open_session(conn: &Connection) -> Result<Option<Session>> {
     })
 }
 
-pub fn list_sessions(conn: &Connection, limit: i64) -> Result<Vec<Session>> {
-    let mut stmt =
-        conn.prepare(&format!("{SESSION_SELECT} ORDER BY s.id DESC LIMIT ?1"))?;
-    let rows = stmt.query_map([limit], row_session)?;
+/// The newest `limit` sessions begun before `before` (a `now()`-format
+/// stamp, so string order is time order), newest first: a day's sessions
+/// and the one running into it.
+pub fn sessions_started_before(conn: &Connection, before: &str, limit: i64) -> Result<Vec<Session>> {
+    let mut stmt = conn.prepare(&format!(
+        "{SESSION_SELECT} WHERE s.started_at < ?1 ORDER BY s.started_at DESC, s.id DESC LIMIT ?2"
+    ))?;
+    let rows = stmt.query_map(params![before, limit], row_session)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -332,6 +336,19 @@ pub fn doing_session_tasks(conn: &Connection, session_id: i64) -> Result<Vec<Tas
     let mut tasks = session_tasks(conn, session_id)?;
     tasks.retain(|t| t.status == "doing");
     Ok(tasks)
+}
+
+/// Every card marked Done in [from, to) (`now()`-format stamps, so string
+/// order is time order), in any session, oldest finish first. What a day's
+/// time may still be credited to once a task has left Doing. Labels are not
+/// read: nothing that judges a page looks at them.
+pub fn done_tasks_between(conn: &Connection, from: &str, to: &str) -> Result<Vec<Task>> {
+    let mut stmt = conn.prepare(&format!(
+        "{TASK_SELECT} WHERE t.status = 'done' AND t.resolved_at >= ?1 AND t.resolved_at < ?2
+         ORDER BY t.resolved_at, t.id"
+    ))?;
+    let rows = stmt.query_map([from, to], row_task)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// A cached verdict: Jev's probability that one page is relevant to one
@@ -1251,6 +1268,52 @@ pub(crate) mod tests {
         }
         let ids: Vec<i64> = doing_session_tasks(&conn, sid).unwrap().iter().map(|t| t.id).collect();
         assert_eq!(ids, [doing]);
+    }
+
+    #[test]
+    fn done_between_takes_a_days_finished_cards_in_finish_order() {
+        let conn = store();
+        let (sid, _planned) = session_with_task(&conn);
+        let mut ids = Vec::new();
+        for (title, status, resolved) in [
+            ("finished second", "done", Some("2026-10-29T15:00:00+00:00")),
+            ("finished first", "done", Some("2026-10-29T04:00:00+00:00")),
+            ("finished yesterday", "done", Some("2026-10-29T03:59:59+00:00")),
+            ("finished tomorrow", "done", Some("2026-10-30T04:00:00+00:00")),
+            ("dropped today", "dropped", Some("2026-10-29T12:00:00+00:00")),
+            ("still doing", "doing", None),
+        ] {
+            let id = add_task(&conn, Some(sid), title).unwrap();
+            conn.execute(
+                "UPDATE task SET status = ?1, resolved_at = ?2 WHERE id = ?3",
+                params![status, resolved, id],
+            )
+            .unwrap();
+            ids.push(id);
+        }
+        let got: Vec<i64> = done_tasks_between(&conn, "2026-10-29T04:00:00+00:00", "2026-10-30T04:00:00+00:00")
+            .unwrap()
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(got, [ids[1], ids[0]]);
+    }
+
+    #[test]
+    fn sessions_begun_before_a_moment_come_newest_first() {
+        let conn = store();
+        let mut ids = Vec::new();
+        for started in ["2026-10-29T09:00:00+00:00", "2026-10-30T09:00:00+00:00", "2026-10-31T09:00:00+00:00"] {
+            conn.execute("INSERT INTO session (started_at, mode) VALUES (?1, 'manual')", [started]).unwrap();
+            ids.push(conn.last_insert_rowid());
+        }
+        let got = |before: &str, limit| -> Vec<i64> {
+            sessions_started_before(&conn, before, limit).unwrap().iter().map(|s| s.id).collect()
+        };
+        assert_eq!(got("2026-10-31T04:00:00+00:00", 20), [ids[1], ids[0]]);
+        // Begun exactly at the moment: not before it.
+        assert_eq!(got("2026-10-30T09:00:00+00:00", 20), [ids[0]]);
+        assert_eq!(got("2026-11-01T00:00:00+00:00", 2), [ids[2], ids[1]]);
     }
 
     #[test]

@@ -1,0 +1,61 @@
+# The graphical gate's compositor: sway as a kiosk -- one client,
+# fullscreen, no bindings. bin/graphical-gate.fish fills in the at-signed
+# names and runs `sway -c` on the result. With -c sway reads this file and
+# nothing else -- not /etc/sway/config, not ~/.config/sway -- and sway has no
+# built-in bindings, so there is no Mod+Return, no Mod+Shift+e, no way out
+# but answering. tests/test_units.py fails if a bind* line ever appears here.
+#
+# Every line must parse. A line sway rejects is skipped, and an unclosed
+# block would swallow the exec line at the bottom and leave a black screen
+# with no gate on it; the launcher runs `sway -C` first and runs the text
+# gate instead when this file does not validate.
+
+# Nothing here needs X11, and nothing but the gate gets a window: no swaybg,
+# no swaynag bar for a config warning.
+xwayland disable
+swaybg_command -
+swaynag_command -
+default_border none
+default_floating_border none
+for_window [all] fullscreen enable
+
+# Integer 2, not GNOME's fractional scale: WebKit renders at device pixel
+# ratio 2 under a fractional scale anyway, so 2 costs nothing and keeps
+# every edge on a pixel. gate/gui.py divides its zoom by the scale it is
+# given, so one rem is still INTENTIONALITY_GATE_FONT_PX physical pixels.
+output * scale 2
+
+# sway draws the pointer itself, on the hardware cursor plane, as mutter
+# does: GTK only names a shape over cursor-shape-v1 (arrow, hand, I-beam)
+# and never hands over an image of its own. Adwaita 24 is GNOME's own.
+seat * xcursor_theme Adwaita 24
+
+# The natural-scrolling and tap-to-click choices from GNOME's settings, read
+# by the launcher. sway applies them in libinput, so WebKit scrolls the page
+# the way the desktop does, and its coast after the fingers lift goes the
+# same way.
+input type:touchpad {
+    natural_scroll @TOUCHPAD_NATURAL@
+    tap @TOUCHPAD_TAP@
+}
+input type:pointer natural_scroll @MOUSE_NATURAL@
+
+# Ctrl+Alt+F1..F12 switch consoles only because the keymap turns them into
+# XF86Switch_VT_n keysyms, which sway acts on before any binding or client
+# sees them (sway/input/keyboard.c). srvrkeys:none maps those keys back to
+# plain F-keys, so the keyboard belongs to the gate until you have answered.
+# Drop this line to get the switches back.
+input type:keyboard xkb_options srvrkeys:none
+
+# The gate. Unbuffered, so that a gate which dies mid-sentence still leaves
+# the sentence in the log: python block-buffers a stdout that is a file, and
+# the lines lost that way are exactly the ones worth reading. The desktop
+# command is blank because sway holds the GPU for as long as the gate runs:
+# the desktop is started after sway exits, if at all (`gate handoff`).
+#
+# sway does not pass on its client's exit status, so the client writes it to
+# a file the launcher removed beforehand, then ends sway: a SIGTERM to its
+# parent when that is sway (sway 1.11 forks exec'd commands once), `swaymsg
+# exit` otherwise. No status file afterwards means the gate never finished,
+# and the launcher runs the text gate.
+exec sh -c 'cd @REPO@ && INTENTIONALITY_GATE_UI=gtk INTENTIONALITY_DESKTOP_CMD= PYTHONUNBUFFERED=1 @COMMAND@; echo $? > @STATUS@; if [ "$(cat /proc/$PPID/comm 2>/dev/null)" = sway ]; then kill $PPID; else swaymsg exit; fi'

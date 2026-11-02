@@ -2,25 +2,37 @@ import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { fmt } from "../format";
 
-/** What a slice's colour says. The same three tones as the bars (Bars.tsx):
- *  time on task, time no task needed, time nobody judged. Whole class names,
- *  so Tailwind's scanner sees each one. */
+/** What a slice's colour says. The same tones as the bars (Bars.tsx): time
+ *  on task, time no task needed, time nobody judged, and series1-5 for one
+ *  task each. Whole class names, so Tailwind's scanner sees each one. */
 const STROKE = {
   primary: "stroke-primary",
   warn: "stroke-warn",
   muted: "stroke-muted-foreground/60",
+  series1: "stroke-series-1",
+  series2: "stroke-series-2",
+  series3: "stroke-series-3",
+  series4: "stroke-series-4",
+  series5: "stroke-series-5",
 };
 const SWATCH = {
   primary: "bg-primary",
   warn: "bg-warn",
   muted: "bg-muted-foreground/60",
+  series1: "bg-series-1",
+  series2: "bg-series-2",
+  series3: "bg-series-3",
+  series4: "bg-series-4",
+  series5: "bg-series-5",
 };
+
+export type PieTone = keyof typeof STROKE;
 
 export interface PieSlice {
   key: string;
   label: string;
   seconds: number;
-  tone: keyof typeof STROKE;
+  tone: PieTone;
   /** Hover text on the legend row, for what the label leaves out. */
   hint?: string;
 }

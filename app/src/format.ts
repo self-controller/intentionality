@@ -1,13 +1,4 @@
-import type { Observed, Session } from "./types";
-
-// What identifies a session now that the gate no longer asks for a statement:
-// its own words if it has them (older sessions do), otherwise its tasks. The
-// TS twin of gate/store.py::session_label.
-export function sessionLabel(s: Session): string {
-  if (s.statement) return s.statement;
-  if (!s.first_task) return "(no tasks)";
-  return s.task_count > 1 ? `${s.first_task} +${s.task_count - 1}` : s.first_task;
-}
+import type { Observed } from "./types";
 
 // The backend caps each app's titles and rolls the long tail into "(other)",
 // which can outweigh every real title — so it is pinned last rather than
@@ -127,6 +118,25 @@ export function localDate(d: Date): string {
 }
 
 export const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+// "YYYY-MM-DD" as a local Date at midnight (new Date("2026-10-31") would be
+// UTC midnight, the previous evening here).
+export function parseDay(day: string): Date {
+  const [y, m, d] = day.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+// The day `by` days from `day`, both "YYYY-MM-DD".
+export function shiftDay(day: string, by: number): string {
+  return localDate(addDays(parseDay(day), by));
+}
+
+// An hour of the clock in words: "midnight", "4 am", "noon", "3 pm".
+export function hourLabel(hour: number): string {
+  if (hour === 0) return "midnight";
+  if (hour === 12) return "noon";
+  return hour < 12 ? `${hour} am` : `${hour - 12} pm`;
+}
 
 export function addDays(d: Date, n: number): Date {
   const out = new Date(d);

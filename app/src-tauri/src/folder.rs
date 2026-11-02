@@ -45,6 +45,9 @@ pub trait Lookup: Sync {
     /// Where a browser's tab is, from the browser's history: `title` is the
     /// tab's, cleaned of counts and the browser's name.
     fn place(&self, app: &str, title: &str) -> Option<Place>;
+    /// What the installed app whose windows have this class (lowercased) is
+    /// called: "md.obsidian.obsidian" is Obsidian (desktop.rs).
+    fn app_name(&self, class: &str) -> Option<String>;
 }
 
 /// "~/Desktop/projects/intentionality": a path as Jev and the store see it,
@@ -138,6 +141,10 @@ impl Lookup for Machine {
 
     fn place(&self, app: &str, title: &str) -> Option<Place> {
         self.places.lock().unwrap().find(&self.home, app, title)
+    }
+
+    fn app_name(&self, class: &str) -> Option<String> {
+        crate::desktop::machine().of_class(class).map(|a| a.name)
     }
 }
 

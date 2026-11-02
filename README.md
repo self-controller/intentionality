@@ -70,6 +70,17 @@ backlog in the app — and you edit that list into this session's:
   unfinished work carried over from earlier sessions is never put on the board
   unless you choose it. A task you type starts ticked; unticking it saves it to
   the backlog instead.
+- **Start in Doing** (the ▶ button on a task in Today) puts it straight in the
+  board's **Doing** column instead of To Do, with its start time stamped as if
+  you had dragged it there. The at-risk clock judges what is on screen against
+  Doing tasks only (nothing in Doing means everything counts as off-task), so
+  this is how a session starts with the clock working for you rather than
+  against you. The button stays lit, and the task shows a green **Doing**,
+  while it is on; press it again for To Do. The add box has the same **Doing**
+  switch, so a task you type can land in Doing directly (it switches off again
+  after each task), and **Alt+Enter** in the add box does the same for one
+  task without touching the switch. Unticking a task or marking it done or deleted takes it out
+  of Doing too.
 - **Done** (carried tasks only) records it as done in the session it came
   from, and takes it off the list.
 - **Delete** removes it for good (struck through until you start; press it
@@ -80,6 +91,13 @@ backlog in the app — and you edit that list into this session's:
 - **Details** opens a panel under any task, carried or typed: a **due date**
   (typed, Today / Tomorrow, or a calendar), **notes**, and **labels** — click
   any label that exists to tag it, or type a new one to create it.
+- **Search** (the box above the backlog, or **Ctrl+F** from anywhere) narrows
+  the backlog to the tasks whose title or labels hold every word you type;
+  only the labels with a match are shown, opened even if you folded them.
+  **↑/↓** pick a match, **Enter** ticks it for today, **Alt+Enter** starts it
+  in Doing; the search stays, so you can pick several. **Esc** clears it, and
+  a second Esc goes back to the add box. Today is not filtered: when the only
+  matches are already there, the search says so.
 
 Nothing is written until you start, so Done and Delete are toggles with an
 Undo, and details are written only for tasks you actually changed (the app
@@ -88,7 +106,8 @@ you will be here (blank = open-ended) and start.
 **Start refuses until at least one task is ticked**: there is no quit and no way
 to a desktop without at least one task for today. On the terminal the same
 screen is text — type a task to add it (for today), `t N` to tick / untick task
-N, `d N` / `x N` to mark task N done / deleted (again to undo),
+N, `g N` to start task N in Doing (again for To Do; it shows `[doing]`),
+`d N` / `x N` to mark task N done / deleted (again to undo),
 `e N` to change task N's due date, notes (one line) and labels (blank keeps,
 `-` clears), and a blank line to start. There is no "what do you want to get done?"
 question — the list is that answer.
@@ -185,6 +204,24 @@ also logged into a graphical session. Test it by hand first: switch to a free co
 `~/Desktop/projects/intentionality/bin/gate-login`. You should get the gate
 conversation, then a real desktop, then the debrief when you log out of it.
 
+**A rehearsal while GNOME is running** (to try a change to the gate, say) must
+not start a second desktop or touch the real store. From a free console
+(`Ctrl+Alt+F3`, log in):
+
+```fish
+sqlite3 ~/.local/share/intentionality/store.db ".backup /tmp/rehearsal.db"
+env INTENTIONALITY_DESKTOP_CMD= INTENTIONALITY_STORE=/tmp/rehearsal.db \
+    ~/Desktop/projects/intentionality/bin/gate-login
+```
+
+The empty `INTENTIONALITY_DESKTOP_CMD` is what stops the desktop: the launcher
+fills the variable in only when it is unset, and an empty one counts as set.
+The `Ctrl+Alt+F` keys do nothing until you answer, which is the point, so
+finish the gate. On the copy nothing real changes, and you are back at the
+tty3 prompt with "No desktop command configured".
+`~/.local/state/intentionality/gate.log` shows what ran and, if the graphical
+gate did not, why.
+
 To make it automatic, add this to `~/.config/fish/config.fish`, **above**
 anything that prints (a `fastfetch` or greeting would otherwise sit on screen
 while the gate starts). It fires only on a tty1 *login* shell with no desktop
@@ -218,19 +255,45 @@ exactly as before. This is commitment, not security.
 
 ### The graphical gate
 
-The same conversation, in a window, on the same bare console. Install one
-package and both launchers pick it up:
+The same conversation, in a window, on the same bare console. It needs sway:
 
 ```bash
-sudo dnf install cage
+sudo dnf install sway sway-config-minimal
 ```
 
-[cage](https://github.com/cage-kiosk/cage) is a Wayland kiosk compositor: it
-runs one program fullscreen and exits when that program exits. No display
-server exists at gate time, and nothing that draws can run without one, so
-this is the smallest thing that can put a window on tty1. Under it the gate
-runs with `INTENTIONALITY_GATE_UI=gtk`, and `gate/gui.py` opens one GTK
-window whose only child is a WebKit view showing `gate/webui/index.html` —
+Without it, both launchers run the text gate. No display server exists at
+gate time, and nothing that draws can run without one, so the gate brings its
+own: **sway**, run as a kiosk that shows one program fullscreen and nothing
+else. It also sets up the touchpad the way GNOME has it (natural scrolling and
+tap to click, read from your GNOME settings) and draws the pointer itself.
+`sway-config-minimal` only satisfies the package's need for *a* config: the
+gate never reads `/etc/sway/config`, and plain `sudo dnf install sway` pulls
+in Fedora's sway desktop (waybar, swaylock, Xwayland, …) for nothing.
+
+How sway is started lives in one file, `bin/graphical-gate.fish`, which both
+launchers source, so the login gate and the wake gate cannot drift apart:
+
+1. **sway**, if it is installed. The config is `bin/gate-sway.conf.in`, filled
+   in at launch: scale 2, GNOME's natural-scrolling and tap-to-click choices
+   (read with `gsettings`, which needs no session bus; GNOME's defaults if
+   that fails), no X11, no bars, the gate fullscreen, and **no key bindings at
+   all**. `sway -c` reads that file and nothing else, and sway has no built-in
+   bindings. The config is checked first (`sway -C`, on the headless backend,
+   ~40 ms): a config sway would reject could leave a black screen with no
+   gate on it, so a failed check means the text gate instead.
+2. **The text gate**, if sway is not installed or did not run the gate to the
+   end.
+
+Sway does not return its client's exit status. So the gate's line in the
+config writes it to `$XDG_RUNTIME_DIR/intentionality/` and then ends sway, and
+the launcher reads it back. Status 0 goes on to the handoff; anything else, or
+no status at all (sway ended before the gate finished), goes to the text gate.
+What sway prints is in the gate log, and so is the line saying why the
+graphical gate did not run.
+
+Under sway the gate runs with `INTENTIONALITY_GATE_UI=gtk`, and `gate/gui.py`
+opens one GTK window whose only child is a WebKit view showing
+`gate/webui/index.html` —
 the React bundle built from `app/gate-ui/`, sharing its Tailwind theme and its
 checkbox with the desktop app, so the two halves look like one product.
 
@@ -241,8 +304,9 @@ checkbox per task, ticked to bring it into today's board — with Details and
 Delete buttons per row, Done on a task carried from an earlier session, an add
 box, and a footer holding the minutes and a Start button that stays disabled
 until a task is ticked. The details panel opens in place under the row it was
-opened from, and Start saves it first. The page itself scrolls, and the footer
-stays pinned to the bottom, so a long list or an open panel never hides Start.
+opened from, and Start saves it first. Only the backlog column scrolls, and the
+footer stays pinned to the bottom, so a long list or an open panel never hides
+Start.
 
 **The React side owns no list logic.** It posts intents; `gate/webstate.py`
 applies them to `ui.WelcomeList` and pushes back a whole screen. Every string
@@ -259,13 +323,14 @@ without a compositor.
 **Sizing.** `INTENTIONALITY_GATE_FONT_PX` (default 26) still means what it
 always did, now exactly: device pixels per `rem`. The view's zoom is set to
 `(font_px / 16) / monitor_scale`, so one rem is the same *physical* size
-under cage as it is in a window on the desktop. That matters because this
-panel is 2880×1800 and GNOME hands a client 1728×1080 at scale 1.667 while
-cage does no scaling at all — without the correction the gate renders 1.667×
-smaller in real life than in any test. `INTENTIONALITY_GATE_ZOOM` overrides
-the computed factor outright.
+under sway as it is in a window on the desktop. That matters because this
+panel is 2880×1800 and GNOME hands a client 1728×1080 at scale 1.667, while
+the gate's sway runs at scale 2 (1440×900; WebKit renders at device pixel
+ratio 2 under GNOME's fractional scale anyway): the same rule makes the zoom
+0.975 on the desktop and 0.8125 at the gate. `INTENTIONALITY_GATE_ZOOM`
+overrides the computed factor outright.
 
-It fails open, always. No `cage`, no PyGObject, no WebKitGTK, no display — and
+It fails open, always. No compositor, no PyGObject, no WebKitGTK, no display — and
 no `gate/webui/index.html`, which is why that file is committed rather than
 built at login: the gate prints one line to stderr saying which, and runs on
 the terminal exactly as before. Rebuild it with `npm run build:gate` in `app/`
@@ -285,8 +350,8 @@ catch, so the fail-open above is powerless against it. **Every resume gate
 between the webview landing and this change died that way** (`Failed to fully
 launch dbus-proxy: Child process exited with code 1`, read out of the
 coredumps) and fell through to the terminal gate on VT9, which is why the wake
-gate looked like the old one. It never happens at a login, under cage inside
-GNOME, or under a systemd user service — only in the resume unit's own
+gate looked like the old one. It never happened at a login, under a compositor
+nested inside GNOME, or under a systemd user service — only in the resume unit's own
 context, so *why* the proxy exits 1 there is still unknown. The gate needs
 nothing the sandbox contains: one committed local bundle, no network, no
 remote content, no second origin, and the only strings in it that anyone typed
@@ -294,20 +359,24 @@ go through React's escaping. Set `INTENTIONALITY_GATE_SANDBOX=1` to put the
 sandbox back for a run — with the log below, that is how to catch the proxy's
 own error message the next time the machine wakes.
 
-**Why the login launcher runs two commands.** Cage holds the GPU for as long as
-its client lives, so GNOME cannot be started from inside the gate the way the
-terminal version does it (as a child it waits on). `bin/gate-login` runs the
-conversation under cage, cage exits, and then `python3 -m gate handoff` starts
+**Why the login launcher runs two commands.** The compositor holds the GPU for
+as long as its client lives, so GNOME cannot be started from inside the gate
+the way the terminal version does it (as a child it waits on). `bin/gate-login`
+runs the conversation under sway, sway exits, and then
+`python3 -m gate handoff` starts
 the desktop for whichever session was just committed — or nothing, if the
 gate was interrupted. That is unambiguous because the recovery sweep has just closed every
 other open session.
 
-**What it locks.** Cage is started without `-s`, so `Ctrl+Alt+F2`–`F6` do
-nothing until you have answered: the keyboard belongs to the gate. On a resume
-gate that also means `Ctrl+Alt+F1` no longer returns you to GNOME
-mid-question, which is stricter than the text gate on VT9 was. What remains:
-the skip file, SSH, and the power button. Put `-s` in the `cage_opts` line of
-either launcher to get the console switches back.
+**What it locks.** `Ctrl+Alt+F2`–`F6` do nothing until you have answered: the
+keyboard belongs to the gate. Sway acts on the `XF86Switch_VT_n` keysyms that
+the keymap puts on `Ctrl+Alt+Fn` before any binding or program sees them, so
+its config sets the xkb option `srvrkeys:none`, which turns those keys back
+into plain F-keys. On a resume gate that also means `Ctrl+Alt+F1` no longer
+returns you to GNOME mid-question, which is stricter than the text gate on VT9
+was. What remains: the skip file, SSH, and the power button. To get the
+console switches back, delete the `xkb_options srvrkeys:none` line from
+`bin/gate-sway.conf.in`, which both launchers share.
 
 The window cannot be closed either. It has no title bar, a close request is
 refused (Alt+F4 included, whoever binds it), and Escape does nothing. There is
@@ -317,11 +386,11 @@ text gate — nothing is saved, and at login no desktop starts.
 
 **What you see.** Between login and the gate, and again for the second or two
 GNOME takes to draw its first frame, the console shows its own text buffer.
-`bin/gate-login` clears that buffer, hides the cursor, and sends everything cage
-and the gate print to `~/.local/state/intentionality/gate.log` instead of the
-console, so both gaps are plain black. The config.fish block has to come before
-anything in that file that prints, such as `fastfetch`. Otherwise that output
-is on screen while cage starts.
+`bin/gate-login` clears that buffer, hides the cursor, and sends everything the
+compositor and the gate print to `~/.local/state/intentionality/gate.log`
+instead of the console, so both gaps are plain black. The config.fish block has
+to come before anything in that file that prints, such as `fastfetch`.
+Otherwise that output is on screen while the compositor starts.
 
 `bin/resume-gate` does the same, into the same log — and there it is the only
 record there is. The unit's `StandardOutput=`/`StandardError=` are `/dev/tty9`,
@@ -329,6 +398,19 @@ so nothing a wake gate prints ever reaches the journal; five aborted gates went
 unnoticed for that reason. If the graphical gate does not complete, the
 fall-through line is logged with `systemd-cat` as well, so
 `journalctl -t intentionality-gate` shows it long after VT9 has gone.
+
+**Pointer and scrolling.** Sway draws the pointer. GTK only names a shape
+(`cursor-shape-v1`: arrow, hand, I-beam) and sway draws it from the Adwaita
+theme at GNOME's size 24 on the hardware cursor plane, as mutter does. Sway
+also applies your natural-scrolling and tap-to-click choices in libinput (the
+launcher copies them from GNOME), so WebKit scrolls whatever is under the
+pointer itself, coast and all, and the coast goes the right way: over the
+backlog the backlog moves, over the header nothing does. `gui.py` claims only
+Ctrl+scroll, so the page never zooms. A headless run of the real launcher
+under sway 1.11 (a virtual pointer and screencopy) showed only `set_shape`
+requests from the gate, never a `wl_pointer.set_cursor`, and after wheel and
+touchpad scrolling at the gate's zoom the row painted under the pointer was
+the row a click hit.
 
 For the resume gate, the unit needs one more piece — see the next section.
 
@@ -347,8 +429,9 @@ it has no quit: **you are not handed back to GNOME until the new session has
 at least one task.** (Before this screen, quitting a wake gate returned you to
 the desktop with no session open; that is gone.)
 
-It is also the same *screen*: `bin/resume-gate` runs the gate under cage on
-VT9 exactly as `bin/gate-login` does on tty1, so a wake shows the black
+It is also the same *screen*: `bin/resume-gate` runs the gate under sway on
+VT9 exactly as `bin/gate-login` does on tty1 — the same
+`bin/graphical-gate.fish` starts it for both — so a wake shows the black
 welcome screen too. It did not for a while — see "What it runs without, and
 why" above for the abort that sent every wake gate to the terminal fallback,
 and read `~/.local/state/intentionality/gate.log` if one ever looks like the
@@ -371,8 +454,9 @@ without it, because a compositor only gets the GPU and the input devices from
 logind, and logind gives them only to the active session on that VT. The stack
 is `account` + `session` with `pam_systemd` and nothing else — systemd never
 runs the `auth` stack for `PAMName=`, so no password is asked and none is
-granted. It also sets `XDG_RUNTIME_DIR`, which cage requires; `bin/resume-gate`
-treats its absence as "text gate", not "try anyway".
+granted. It also sets `XDG_RUNTIME_DIR`, which sway requires (and where its
+status file goes); `bin/resume-gate` treats its absence as "text
+gate", not "try anyway".
 
 `intentionality-resume.service` is pulled into `suspend.target` and ordered
 `After=systemd-suspend.service`, which is what makes a unit run on *resume*
@@ -433,8 +517,9 @@ firing.
 Escape hatches, as everywhere: `Ctrl+Alt+F1` returns to GNOME from a
 half-answered gate, `touch ~/.config/intentionality/skip` disables this along
 with the login gate, and disabling the unit reverts it entirely. There is no
-quit: the gate ends when a session with at least one task has started. (Under
-cage the `Ctrl+Alt+F1` hatch is closed too — see "What it locks".)
+quit: the gate ends when a session with at least one task has started. (In
+the graphical gate the `Ctrl+Alt+F1` hatch is closed too — see "What it
+locks".)
 
 Test it by hand before trusting it to a real lid-close. Starting the unit by
 hand still goes through `ExecCondition=`, and while the desktop app is
@@ -475,6 +560,8 @@ surfaces, all bare-bones for now:
 
 **Ctrl+Tab** / **Ctrl+Shift+Tab** step through the tabs.
 
+**Ctrl+N** makes a new task from any tab — in To Do, or in the Backlog between sessions. Once saved, the card hovers over the board: **↑ ↓** move it within its column, **← →** change column, **Enter** puts it down, **Esc** puts it back where it was made. Clicking the board puts it down too. A card made with a column's "+" lands at once, as before.
+
 - **Board** — To Do / Doing / Done lanes over the current session's tasks
   (drag to move), a dropped tray that is a fourth drop target, and the backlog
   in a sidebar: pull items into today, add new ones, delete stale ones.
@@ -494,20 +581,50 @@ surfaces, all bare-bones for now:
   Notes, labels and due dates travel with a task when the gate carries it into
   the backlog. A card saved with no labels may get one a moment later (see
   **Filed by Jev** above).
-- **Dashboard** — **today**, since local midnight. **Time active** and
+- **Dashboard** — **one day**: today so far, or any past day. A day starts
+  at **4 am** by default, so a late night stays on the day it began; change
+  the hour in **Settings → Day** (`meta` `day_start_hour`, 0–23; the clock's
+  daily total rolls over at the same hour, and due dates stay calendar
+  days). The arrows beside the date at the top step a day back or forward
+  (← and → on the keyboard too), the date opens a calendar, and **Today**
+  comes back. **Time active** and
   **Time away** lead as large figures (ActivityWatch, AFK subtracted past a
   5-minute grace — see the timer below). A pie
-  splits the active time into **Relevant to a task**, **Not relevant** and
-  **Not judged**, by the at-risk timer's own rule: each page of today against
-  the tasks in **Doing** right now, read from Jev's cached verdicts, so the
-  Dashboard and the clock never disagree about a page. While nothing is in
-  Doing, every page of the day counts as not relevant, as the clock shows it;
-  time in no session counts as not judged. Reading costs nothing; **Judge N pages with
+  splits the active time **by task**, plus **Not relevant** and **Not
+  judged**, by the at-risk timer's own rule: each page of today against the
+  tasks in **Doing** right now, read from Jev's cached verdicts, so the
+  Dashboard and the clock never disagree about a page. A past day has no
+  "right now": each session's pages are judged against that session's
+  **Doing** column as it was left, which is what the clock judged them
+  against at the time. A relevant page is the
+  time of the task Jev rates likeliest among those clearing the bar. **Tasks
+  finished that day** keep their time too: a Done card can claim a page Jev
+  already judged against it, but it is never waited for, so a page judged
+  against Doing alone stays judged. While nothing is in Doing and no finished
+  task claims a page, it counts as not relevant, as the clock shows it;
+  time in no session counts as not judged. Each task keeps one colour, in
+  board order (Doing, then finished that day); past five tasks the smaller ones
+  share **Other tasks**. Reading costs nothing; **Judge N pages with
   Jev** asks about the busiest unjudged pages (up to 30, like a check), which
-  is billed and sends those titles to TypeSafe. Under the pie, relevant time
-  by task; beside it, the at-risk apps panel. **Recent sessions** — each
-  session's task outcomes and per-window active time — is folded away
-  underneath, and the build line sits at the foot of the tab.
+  is billed and sends those titles to TypeSafe. Under the pie, the same tasks
+  as bars in the same colours, busiest first. Beside it, **Biggest culprits**:
+  where the day's *not relevant* time went, one bar per thing, busiest first —
+  a website by its site (every LinkedIn page is `linkedin.com`, from the
+  browser's history; a part of a site stays apart, so `docs.google.com` is not
+  `mail.google.com`), a terminal by its tool and project (**Claude Code:
+  intentionality**, **Terminal: Pager**: one verdict, two bars), every Claude
+  Code session outside a project as **Claude Code: other**, an editor as
+  **VS Code: Pager**, and any other app by its installed name (every Discord
+  channel is **Discord**). The **Ignore** dropdown at its top right holds the
+  ignore list: pick an app or site seen that day (busiest first), any installed
+  app (from its `.desktop` file), or type or paste a site. An ignored app or
+  site is never judged anywhere — no request to Jev, no clock, and its time
+  counts as **Not judged** — until you take it off with its ×. Ignoring a site
+  covers its subdomains; ignoring a browser or a terminal app covers every
+  tab or session in it. The list lives in the store's `meta` table
+  (`ignore_list`). The relevance cache's count and **Forget** are on the
+  **Settings** page (the gear at the top right). The build line sits at the
+  foot of the tab.
 - **Analyses** — at randomized intervals (mean `analysis_mean_minutes` in the
   store's `meta` table, default 60) the app runs a **check** on the stretch
   since the last one. Every page of it (the 30 busiest, each window title
@@ -637,12 +754,13 @@ open again while it is already running starts a *second* process, with its own
 analysis timer; if that ever becomes a real annoyance the fix is
 `tauri-plugin-single-instance`.
 
-### At-risk apps: the on-screen timer
+### The on-screen timer
 
-Flag an app or a website you lose time to — `linkedin.com`, `youtube.com`,
-`discord` — from the **At-risk apps** panel on the Dashboard. While a
-flagged one is the window in front, a giant clock sits at the top right of the
-screen with today's **off-task total**, counting up. There is one clock,
+While a page no task in **Doing** needs is the window in front, a giant clock
+sits at the top right of the screen with today's **off-task total**,
+counting up (a day starts at the Dashboard's hour, 4 am by default). (It began as a timer for *at-risk apps* you flagged; the flags
+are still honoured — the `risk_app` table — but the Dashboard no longer has a
+panel for them, so the ignore list and Jev's verdicts are what decide.) There is one clock,
 shared by every app and site: it counts today's time on every page that
 would show it now (a flagged page no Doing task excuses, or any page Jev found
 relevant to none of them), each moment once. So a new off-task site picks up
@@ -655,8 +773,7 @@ means 5 minutes with no keyboard or mouse input (GNOME's screen-blank delay).
 ActivityWatch calls you AFK after 3, but until the screen goes dark you may
 be reading or watching, so the first 5 minutes of every idle stretch count as
 present everywhere: in the clock, on the Dashboard and in the checks
-(`observed::IDLE_GRACE_SECS`). The panel lists today's time on every flag,
-with the total counted once even where two flags overlap.
+(`observed::IDLE_GRACE_SECS`).
 
 **Unless the page is relevant to a task.** Before the clock appears, the page
 is judged against every task in the board's **Doing** column by
@@ -664,7 +781,8 @@ is judged against every task in the board's **Doing** column by
 one yes/no question per task, each answered with a probability. A page that
 at least one task can plausibly need — the job post for *apply to 3 roles* —
 gets no clock at all; the feed gets the clock, captioned **Not relevant to any
-task**, with a small arrow beside the caption. Jev sees each task's title
+task** in red, with a small arrow beside the caption (the other captions, and
+a reply to an appeal, stay amber). Jev sees each task's title
 and its notes, so a note that names the sites or folders a task uses counts.
 Click the arrow and a box opens right under the clock with the cursor already
 in it: say why the page serves a task and press Enter, and Jev re-judges it
@@ -684,9 +802,13 @@ of those pages is asked again, with your case, the next time it is in front;
 until then its time is out of today's off-task total.
 
 **Every other window is judged too.** Any tab or app that stays in front for
-1.5 s is put to Jev the same way, flagged or not. One that is relevant to none
+0.4 s is put to Jev the same way, flagged or not. One that is relevant to none
 of the Doing tasks gets the same clock, the same caption and arrow, and the
-same shared count. **With nothing in Doing**, no open session included,
+same shared count. A page judged before is answered from the cache the
+moment it is in front, so its clock is up 0.4 s after you arrive, and a clock
+already on screen moves to the next off-task page at once. Only a page Jev
+has never seen waits on Jev, usually a fraction of a second. The
+journal line for each clock says how long it took (`… · 0.41s after focus`). **With nothing in Doing**, no open session included,
 nothing is relevant: every window gets the clock, captioned **Nothing in
 Doing** and without an arrow, and all of that time is off task. Nothing else
 ever shows on an unflagged window: with no key or TypeSafe unreachable it
@@ -734,12 +856,19 @@ What counts as one page, so the same thing is judged once
 - **Any other app** is its window title, so each Discord channel and each PDF
   is its own page.
 - **Never judged:** this app's own window (so the board stays reachable
-  without a clock) and file dialogs (`xdg-desktop-portal-*`).
+  without a clock), file dialogs (`xdg-desktop-portal-*`), and everything on
+  the Dashboard's ignore list (`app/src-tauri/src/ignore.rs`). An app there
+  is matched by its window class — its `.desktop` file's id or its
+  `StartupWMClass` (the VS Code flatpak is `com.visualstudio.code`, its
+  windows `code`) — and a site by the host the browser's history gives a
+  tab, or any part of it. A tab the history does not know is matched by its
+  title naming the site, the flags' own whole-word test, for a site with
+  nothing before its name (`linkedin.com`, not `docs.google.com`).
 
 Verdicts are cached in the store (`relevance` table, keyed by the page as
 above and the task's text), so a page seen before is decided without
-a request and an edited task is judged afresh. The at-risk panel's footer
-counts them and offers **Forget**, which costs nothing but the requests to ask
+a request and an edited task is judged afresh. The foot of the Dashboard's
+**Biggest culprits** box counts them and offers **Forget**, which costs nothing but the requests to ask
 again.
 With no TypeSafe key the header says so and
 every flagged page shows the clock captioned **Relevance unchecked**; put the key at
@@ -751,7 +880,7 @@ disagree about a page: a page a check judged is already decided when the
 timer meets it, and an appeal won in either place holds in both.
 
 **What leaves the machine:** for the timer, every window you stay on for
-1.5 s, flagged or not: a browser's tab title, another app's window title, an
+0.4 s that is not already judged against your Doing tasks, flagged or not: a browser's tab title, another app's window title, an
 editor's project folder name (not its file names), a terminal's directory or
 session name. For an editor or terminal whose folder is found, that folder's
 path from `~` (never your user name), the project's name and the first
@@ -761,11 +890,14 @@ tab whose title alone says little, the site's name (not the address) and the
 title of the page it sits under go too; the browser's history is only read
 locally, never sent. With them go the titles and notes of the session's Doing
 tasks, the window, task and text of your newest won appeals (up to 12), and,
-on an appeal, what you typed. This app's own window and file
-dialogs send nothing, and with no open session nothing is sent at all. For each check, the titles of up to 30 windows of its
+on an appeal, what you typed. This app's own window, file
+dialogs and anything on the ignore list send nothing (the installed apps'
+`.desktop` files are only read locally), and with no open session nothing is sent at all. For each check, the titles of up to 30 windows of its
 stretch — flagged or not — with the titles and notes of the session's tasks;
 pages already in the cache are not sent again. For the checkpoint, the
-board's task titles and the check's numbers. For each task added with no
+board's task titles and the check's numbers. For the Dashboard's **Judge**
+button, the same as the timer sends for up to 30 of today's pages, with the
+titles and notes of today's finished tasks beside the Doing ones. For each task added with no
 labels, at the gate or in the app: its title and notes, every label's name and
 up to six titles filed under each. App names travel with the titles. Nothing
 else does, and nothing goes anywhere without a key.
@@ -883,9 +1015,11 @@ the worst a title can do is sway its own page's verdict.
 
 ```
 bin/
-├── gate-login       # console launcher: runs the gate at a text login
-├── resume-gate      # the gate again, on a spare VT after the machine wakes
-└── desktop-session  # starts GNOME via the systemd user bus, logs output
+├── gate-login           # console launcher: runs the gate at a text login
+├── resume-gate          # the gate again, on a spare VT after the machine wakes
+├── graphical-gate.fish  # sourced by both: sway, else the text gate
+├── gate-sway.conf.in    # the kiosk sway config it fills in (no bindings)
+└── desktop-session      # starts GNOME via the systemd user bus, logs output
 
 systemd/
 ├── intentionality-resume.service       # fires on resume, starts the next unit
@@ -902,7 +1036,7 @@ gate/
 ├── store.py       # the only Python module that touches sqlite3; owns migrations
 ├── schema.sql     # session / task / analysis / meta tables (v14)
 ├── ui.py          # the welcome list + questions; terminal by default, or a backend
-├── gui.py         # the WebKit backend, for running under cage
+├── gui.py         # the WebKit backend, for running under sway
 ├── webstate.py    # the welcome screen as data -- pure, no gi, so it is testable
 ├── autolabel.py   # Jev files a typed, unlabelled task under a label (the gate's one request)
 ├── config.py      # paths and env var names
@@ -931,7 +1065,7 @@ tests/
 ├── test_webstate.py # the welcome screen's state, with no display and no gi
 ├── test_autolabel.py # filing by Jev: policy, the request (local stub), the app's twin
 ├── test_resume.py  # the away-time threshold that decides a resume gate
-├── test_units.py   # the systemd units and launchers: no Exec into /home, PAM
+├── test_units.py   # units and launchers: no Exec into /home, PAM, the sway config
 └── test_extension.py # the timer extension: clock arithmetic (under gjs), layout
 ```
 

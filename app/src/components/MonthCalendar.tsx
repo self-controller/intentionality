@@ -10,20 +10,29 @@ import { ISO_DAY, localDate } from "../format";
  *
  *  A separate component from the gate's on purpose. That one is drawn in the
  *  gate's palette and lives where the gate's stylesheet scans; this one is in
- *  the app's. The grid arithmetic is the same dozen lines in both. */
+ *  the app's. The grid arithmetic is the same dozen lines in both.
+ *
+ *  `today` is the day to ring (the calendar date unless the caller reckons
+ *  days otherwise -- the Dashboard's start at 4 am), and days after `max`
+ *  cannot be picked. */
 
 const DAYS = ["M", "T", "W", "T", "F", "S", "S"];
 
 export default function MonthCalendar({
   value,
   onPick,
+  today = localDate(new Date()),
+  max,
+  className,
 }: {
   value: string;
   onPick: (day: string) => void;
+  today?: string;
+  max?: string;
+  className?: string;
 }) {
   const start = ISO_DAY.test(value) ? new Date(`${value}T00:00:00`) : new Date();
   const [cursor, setCursor] = useState(new Date(start.getFullYear(), start.getMonth(), 1));
-  const today = localDate(new Date());
 
   const first = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
   const lead = (first.getDay() + 6) % 7; // Monday-first
@@ -39,7 +48,7 @@ export default function MonthCalendar({
     setCursor(new Date(cursor.getFullYear(), cursor.getMonth() + by, 1));
 
   return (
-    <div className="mt-2 w-64 rounded-lg border border-border bg-background/40 p-2.5">
+    <div className={cn("mt-2 w-64 rounded-lg border border-border bg-background/40 p-2.5", className)}>
       <div className="mb-1.5 flex items-center justify-between">
         <Button variant="ghost" mode="icon" size="sm" onClick={() => shift(-1)} aria-label="Previous month">
           <ChevronLeft />
@@ -66,8 +75,9 @@ export default function MonthCalendar({
             <button
               key={i}
               onClick={() => onPick(day)}
+              disabled={max !== undefined && day > max}
               className={cn(
-                "h-8 rounded-md text-xs tabular-nums transition-colors duration-100",
+                "h-8 rounded-md text-xs tabular-nums transition-colors duration-100 disabled:pointer-events-none disabled:opacity-30",
                 day === value
                   ? "bg-primary font-medium text-primary-foreground"
                   : day === today

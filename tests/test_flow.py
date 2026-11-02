@@ -27,16 +27,17 @@ class Screen:
         self.answers = list(answers)
         self.calls: list[tuple] = []
 
-    def welcome(self, tasks, notes, error, labels):
+    def welcome(self, tasks, notes, error, labels, keybinds="{}"):
         self.calls.append((tasks, notes, error, labels))
+        self.keybinds = keybinds
         return self.answers.pop(0)({t.title: t for t in tasks})
 
 
-def plan(today=(), done=(), delete=(), new=(), minutes=None, edits=None, backlog=()):
+def plan(today=(), done=(), delete=(), new=(), minutes=None, edits=None, backlog=(), doing=()):
     new = [n if isinstance(n, NewTask) else NewTask(n) for n in new]
     backlog = [n if isinstance(n, NewTask) else NewTask(n) for n in backlog]
     return ui.Plan(
-        list(today), list(done), list(delete), new, minutes, backlog, edits or {}
+        list(today), list(done), list(delete), new, minutes, backlog, edits or {}, list(doing)
     )
 
 
@@ -87,6 +88,17 @@ class TestRun(unittest.TestCase):
         self.assertEqual(labels, [])
         self.assertEqual(notes, ["Session 1 ended around 9:00 AM, Sep 17."])
         self.assertEqual(error, "")
+
+    def test_the_screen_gets_the_shortcuts_settings_changed(self):
+        # Stored by the app's Settings; the gate carries the JSON as is.
+        ui.backend = screen = Screen(lambda t: plan(new=["one"]))
+        flow.run(self.conn, [])
+        self.assertEqual(screen.keybinds, "{}")
+
+        store.set_setting(self.conn, "keybinds", '{"gate.start": "Ctrl+KeyS"}')
+        ui.backend = screen = Screen(lambda t: plan(new=["two"]))
+        flow.run(self.conn, [])
+        self.assertEqual(screen.keybinds, '{"gate.start": "Ctrl+KeyS"}')
 
     def test_unticked_backlog_tasks_stay_in_the_backlog(self):
         self.carry("a", "b", "c")
@@ -139,6 +151,20 @@ class TestRun(unittest.TestCase):
         self.assertEqual(session["intended_minutes"], 25)
         self.assertIsNotNone(session["checkpoint_due_at"])
         self.assertIn(f"Session {sid} started — 3 task(s).", self.out.getvalue())
+
+    def test_doing_tasks_reach_the_board_in_doing(self):
+        self.carry("a", "b")
+        ui.backend = Screen(lambda t: plan(
+            today=[t["a"].id, t["b"].id], doing=[t["b"].id],
+            new=[NewTask("c", doing=True), "d"],
+        ))
+
+        sid = flow.run(self.conn)
+
+        self.assertEqual(
+            [(t["title"], t["status"]) for t in store.get_tasks(self.conn, sid)],
+            [("a", "planned"), ("b", "doing"), ("c", "doing"), ("d", "planned")],
+        )
 
     def test_done_and_delete_land(self):
         old = self.carry("finished", "abandoned", "still on")

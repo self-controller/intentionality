@@ -5,16 +5,14 @@ import type {
   AnalysisDetail,
   Arrangement,
   Board,
+  DayTime,
   Health,
   Judgement,
   LabelSummary,
-  Observed,
   Priority,
-  RiskApp,
-  RiskToday,
-  Session,
-  Task,
-  TodayTime,
+  IgnoreKind,
+  IgnoreRule,
+  InstalledApp,
 } from "./types";
 
 export const health = () => invoke<Health>("health");
@@ -50,10 +48,13 @@ export const setLabelColor = (name: string, color: string) =>
   invoke<void>("set_label_color", { name, color });
 // Takes the label off every card that wears it.
 export const deleteLabel = (name: string) => invoke<void>("delete_label", { name });
-// The at-risk apps: what is flagged, and today's time on each.
-export const riskToday = () => invoke<RiskToday>("risk_today");
-export const addRiskApp = (name: string) => invoke<RiskApp>("add_risk_app", { name });
-export const removeRiskApp = (id: number) => invoke<void>("remove_risk_app", { id });
+// The ignore list: apps and sites never judged. Each write returns the list.
+export const ignoreList = () => invoke<IgnoreRule[]>("ignore_list");
+export const addIgnore = (rule: IgnoreRule) => invoke<IgnoreRule[]>("add_ignore", { rule });
+export const removeIgnore = (kind: IgnoreKind, value: string) =>
+  invoke<IgnoreRule[]>("remove_ignore", { kind, value });
+// Every installed app, A to Z, from the .desktop files (scanned afresh).
+export const installedApps = () => invoke<InstalledApp[]>("installed_apps");
 // A page as the relevance cache knows it; asks the model nothing.
 export const pageJudgement = (windowApp: string, title: string) =>
   invoke<Judgement>("page_judgement", { windowApp, title });
@@ -62,18 +63,18 @@ export const appeal = (windowApp: string, title: string, argument: string[]) =>
   invoke<Judgement>("appeal", { windowApp, title, argument });
 // Every cached verdict gone; returns how many there were.
 export const forgetRelevance = () => invoke<number>("forget_relevance");
-// Today for the Dashboard, from the relevance cache alone: free to poll.
-export const todayTime = () => invoke<TodayTime>("today_time");
-// Jev asked about today's busiest unjudged pages (billed), then today again.
-export const judgeToday = () => invoke<TodayTime>("judge_today");
+// A day for the Dashboard ("YYYY-MM-DD"; null = today), from the relevance
+// cache alone: free to poll.
+export const dayTime = (day: string | null) => invoke<DayTime>("day_time", { day });
+// Jev asked about the day's busiest unjudged pages (billed), then the day again.
+export const judgeDay = (day: string | null) => invoke<DayTime>("judge_day", { day });
+// The hour (0-23) a day starts at, for the Dashboard and the clock's total.
+export const dayStartHour = () => invoke<number>("day_start_hour");
+export const setDayStartHour = (hour: number) => invoke<number>("set_day_start_hour", { hour });
 export const deleteTask = (id: number) => invoke<void>("delete_task", { id });
 export const pullTask = (id: number) => invoke<void>("pull_task", { id });
 // A card on the current board back to the end of the backlog, unstarted.
 export const unpullTask = (id: number) => invoke<void>("unpull_task", { id });
-export const listSessions = (limit: number) => invoke<Session[]>("list_sessions", { limit });
-export const getSessionTasks = (sessionId: number) =>
-  invoke<Task[]>("get_session_tasks", { sessionId });
-export const getObserved = (sessionId: number) => invoke<Observed>("get_observed", { sessionId });
 // How far the Analyses tab's history reaches. One constant so the tab and the
 // unread badge always count the same rows.
 export const RECENT_ANALYSES = 50;
@@ -87,3 +88,8 @@ export const pendingCheckpoint = () => invoke<Analysis | null>("pending_checkpoi
 export const extendCheckpoint = (minutes: number) =>
   invoke<string>("extend_checkpoint", { minutes });
 export const runCheckpointNow = () => invoke<number | null>("run_checkpoint_now");
+
+/** Keyboard shortcuts changed from their defaults (keybinds.rs). */
+export const keybinds = () => invoke<Record<string, string>>("keybinds");
+export const setKeybinds = (keybinds: Record<string, string>) =>
+  invoke<Record<string, string>>("set_keybinds", { keybinds });

@@ -19,6 +19,8 @@ import { cn } from "@/lib/utils";
 import * as api from "./api";
 import { addDays, ISO_DAY, localDate } from "./format";
 import type { Label, LabelSummary, Priority } from "./types";
+import { matches } from "./keybinds";
+import { keymap } from "./useKeybinds";
 
 // What the editor starts from: a Task has all of these, and a card that does
 // not exist yet is the same shape with nothing filled in.
@@ -48,7 +50,8 @@ export const PRIORITIES: { value: Priority; label: string; dot: string }[] = [
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-const isSave = (e: { key: string; ctrlKey: boolean; metaKey: boolean }) => e.key === "Enter" && (e.ctrlKey || e.metaKey);
+// Save is Ctrl+Enter unless Settings says otherwise.
+const isSave = (e: KeyboardEvent | ReactKeyboardEvent) => matches(e, keymap()["app.saveTask"]);
 
 /**
  * The whole card, editable — an existing one, or a new one before it exists.

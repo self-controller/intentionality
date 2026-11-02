@@ -248,11 +248,21 @@ pub struct RiskToday {
     pub error: Option<String>,
 }
 
-/// Today since local midnight, across sessions, as the Dashboard leads with
-/// it: where the active time went by the timer's own rule (a page is relevant
-/// when some task of the session it fell in clears the bar).
+/// One day (day.rs: from the day-start hour to the next), across sessions,
+/// as the Dashboard shows it: where the active time went by the timer's own
+/// rule (a page is relevant when one of the tasks it is judged against
+/// clears the bar; today.rs says which tasks those are).
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
-pub struct TodayTime {
+pub struct DayTime {
+    /// The day shown, "YYYY-MM-DD", named by the date it began on.
+    pub day: String,
+    /// Today by the same reckoning, so the Dashboard knows where days end.
+    pub today: String,
+    /// The hour days start at (0-23).
+    pub start_hour: u32,
+    /// The window read: the day's start, and now or the next day's start.
+    pub start: String,
+    pub end: String,
     pub active_seconds: f64,
     pub afk_seconds: f64,
     pub aligned_seconds: f64,
@@ -261,8 +271,10 @@ pub struct TodayTime {
     pub unjudged_seconds: f64,
     /// Active time in no session: no tasks, so nothing to be relevant to.
     pub outside_seconds: f64,
-    /// Relevant time by the task that excused it, most first. Carried copies
-    /// of one task are one row.
+    /// Relevant time by the likeliest task that excused it, in board order:
+    /// Doing, then the tasks finished that day (not sorted by time, so the
+    /// Dashboard's colour per task holds). Carried copies of one task are
+    /// one row.
     pub tasks: Vec<TaskTime>,
     /// Unjudged pages Jev could be asked about now, up to one check's worth.
     pub askable: usize,
@@ -270,6 +282,34 @@ pub struct TodayTime {
     pub threshold: f64,
     /// Why some pages could not be judged on the last ask (no key, Jev down).
     pub error: Option<String>,
+    /// Where the not-relevant time went, busiest first: one row per site,
+    /// tool and project, or app (subject.rs `source`).
+    pub culprits: Vec<Culprit>,
+    /// Every app and site seen that day, busiest first, for the ignore menu.
+    pub seen: Vec<IgnoreChoice>,
+    /// Page–task verdicts in the relevance cache.
+    pub judged: i64,
+}
+
+/// One row of the Dashboard's culprits chart.
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+pub struct Culprit {
+    pub name: String,
+    pub seconds: f64,
+}
+
+/// An app or website the ignore menu offers, with what an ignore rule for
+/// it would hold (ignore.rs `Rule`).
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct IgnoreChoice {
+    pub kind: crate::ignore::Kind,
+    pub value: String,
+    pub name: String,
+    pub classes: Vec<String>,
+    /// Today's active time on it.
+    pub seconds: f64,
+    /// Already on the list.
+    pub ignored: bool,
 }
 
 /// Jev's verdict on one page for one task on the board. `probability` is
@@ -303,4 +343,15 @@ pub struct Judgement {
     /// Why the model could not be asked, when it could not. The verdicts the
     /// cache already held still stand.
     pub error: Option<String>,
+}
+
+impl Judgement {
+    /// Every task in Doing has a verdict on the page, or there is no task to
+    /// have one: nothing is left to ask Jev. The timer can act on a complete
+    /// judgement straight from the cache, and only a complete one counts as
+    /// judged in today's off-task total.
+    pub fn complete(&self) -> bool {
+        self.no_tasks
+            || (!self.verdicts.is_empty() && self.verdicts.iter().all(|v| v.probability.is_some()))
+    }
 }

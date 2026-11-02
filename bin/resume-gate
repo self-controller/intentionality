@@ -19,12 +19,9 @@ set -x INTENTIONALITY_GATE 1
 # a VT, and the graphical front end's PyGObject lives only there.
 set -l py /usr/bin/python3
 
-# No -s, as in gate-login: Ctrl+Alt+F1 does not leave a half-answered gate.
-set -l cage_opts
-
-# What cage and the graphical gate print goes here. The unit's stdout is
+# What sway and the graphical gate print goes here. The unit's stdout is
 # /dev/tty9, where two things go wrong: the console redraws that text the
-# moment cage gives the screen back, and nothing running under the unit is
+# moment sway gives the screen back, and nothing running under the unit is
 # ever seen again, because StandardError=tty keeps it out of the journal too.
 # A graphical gate that dies on VT9 has to leave a record somewhere.
 set -l log ~/.local/state/intentionality/gate.log
@@ -32,33 +29,20 @@ set -l log ~/.local/state/intentionality/gate.log
 cd $repo
 or exit
 
+# How sway is started, the blank console and the log: shared with
+# bin/gate-login, so the two cannot drift. As there, Ctrl+Alt+F1 cannot leave
+# a half-answered graphical gate (srvrkeys:none in gate-sway.conf.in).
+source $repo/bin/graphical-gate.fish
+
 # Graphical when possible. XDG_RUNTIME_DIR is here only when the unit's
-# PAMName= gave this run a logind session, which is also what lets cage open
-# the GPU — so its absence means "text gate", not "try anyway". A non-zero
-# exit from cage (could not start, or the gate failed) falls through to the
-# text gate; the recovery sweep is idempotent, so a half-run costs nothing.
-if command -q cage; and set -q XDG_RUNTIME_DIR
-    # The environment the gate itself needs -- no accessibility bus, no gvfs,
-    # no WebKit sandbox -- is set in gate/gui.py, so that a gate started any
-    # other way gets it too.
-    #
-    # The escape hatch for a first run on real hardware: cage on tty1 drives
-    # KMS directly, and WebKit's DMA-BUF path between its GPU and web
-    # processes is the likeliest thing to come up black there. Set
-    # INTENTIONALITY_GATE_SOFTWARE=1 to take the slow, certain route.
-    if set -q INTENTIONALITY_GATE_SOFTWARE
-        set -x WEBKIT_DISABLE_DMABUF_RENDERER 1
-        set -x LIBGL_ALWAYS_SOFTWARE 1
-    end
-    # A blank console, as at login: whenever cage is not holding the screen,
-    # VT9 shows its own text buffer, and that buffer should hold nothing.
-    isatty stdout; and printf '\e[2J\e[3J\e[H\e[?25l'
-    mkdir -p (dirname $log)
-    echo "=== "(date -Is)" ===" >> $log
-    # Unbuffered, so that a gate which dies mid-sentence still leaves the
-    # sentence: python block-buffers a stdout that is a file, and the lines
-    # lost that way are exactly the ones worth reading.
-    INTENTIONALITY_GATE_UI=gtk PYTHONUNBUFFERED=1 cage $cage_opts -- $py -m gate resume >> $log 2>&1
+# PAMName= gave this run a logind session, which is also what lets sway open
+# the GPU — so its absence means "text gate", not "try anyway"
+# (graphical_gate_possible checks, and that sway is installed). A non-zero
+# status (sway could not run the gate, or the gate failed) falls through to
+# the text gate; the recovery sweep is idempotent, so a half-run costs
+# nothing.
+if graphical_gate_possible
+    graphical_gate $log $py -m gate resume
     and exit
     isatty stdout; and printf '\e[?25h'
     # Said twice on purpose: to the console, where the text gate is about to

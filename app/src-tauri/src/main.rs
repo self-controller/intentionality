@@ -7,11 +7,15 @@ mod aw;
 mod build_info;
 mod check;
 mod commands;
+mod day;
 mod db;
+mod desktop;
 mod error;
 mod folder;
 mod http;
+mod ignore;
 mod jev;
+mod keybinds;
 mod models;
 mod notify;
 mod observed;
@@ -125,6 +129,11 @@ fn main() {
         Ok(()) => adopt_session(&conn),
         Err(_) => None,
     };
+    // Before the timer loop's first look: an ignored window must never get
+    // a clock, not even the one in front at startup.
+    ignore::set(ignore::load(&conn));
+    // Where a day starts, before the clock's first look picks its day.
+    day::put(day::load(&conn));
 
     tauri::Builder::default()
         .manage(AppState::new(conn, session_id))
@@ -147,9 +156,6 @@ fn main() {
             commands::delete_task,
             commands::pull_task,
             commands::unpull_task,
-            commands::list_sessions,
-            commands::get_session_tasks,
-            commands::get_observed,
             commands::list_recent_analyses,
             commands::get_analysis_detail,
             commands::mark_analysis_seen,
@@ -163,8 +169,16 @@ fn main() {
             commands::page_judgement,
             commands::appeal,
             commands::forget_relevance,
-            commands::today_time,
-            commands::judge_today,
+            commands::day_time,
+            commands::judge_day,
+            commands::day_start_hour,
+            commands::set_day_start_hour,
+            commands::keybinds,
+            commands::set_keybinds,
+            commands::ignore_list,
+            commands::add_ignore,
+            commands::remove_ignore,
+            commands::installed_apps,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

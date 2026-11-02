@@ -90,6 +90,10 @@ const LINGER_SECONDS = 2.5;
  *  app gives Jev 10 s). */
 const AWAIT_SECONDS = 15;
 
+// The app's caption for a page no Doing task needs (screen_time.rs
+// OFF_TASK_CAPTION; a test there reads this line): drawn in red.
+const OFF_TASK = 'Not relevant to any task';
+
 const monotonic = () => GLib.get_monotonic_time() / GLib.USEC_PER_SEC;
 
 export default class AtRiskTimer extends Extension {
@@ -380,6 +384,11 @@ export default class AtRiskTimer extends Extension {
     _syncCaption() {
         const text = this._reply || this._appCaption;
         this._caption.text = text;
+        // Red for the app's own off-task caption only; a reply to an
+        // appeal keeps the amber.
+        this._caption.style_class = !this._reply && text === OFF_TASK
+            ? 'at-risk-caption at-risk-caption-off'
+            : 'at-risk-caption';
         this._caption.visible = text !== '';
         this._appeal.visible = this._appealable && !this._asking && !this._reply;
         this._row.visible = this._caption.visible || this._appeal.visible;

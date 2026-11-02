@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { ChartNoAxesColumn, ScanEye, SquareKanban } from "lucide-react";
+import { ChartNoAxesColumn, ScanEye, Settings as SettingsIcon, SquareKanban } from "lucide-react";
 import { SegmentList, SegmentTrigger } from "@/components/SegmentTabs";
+import { Button } from "@/components/ui/button";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 import * as api from "./api";
@@ -11,10 +12,16 @@ import Appeal from "./Appeal";
 import Board from "./Board";
 import Checkpoint from "./Checkpoint";
 import Dashboard from "./Dashboard";
+import Settings from "./Settings";
+import { matches } from "./keybinds";
+import { loadKeybinds, useKeybinds } from "./useKeybinds";
 import type { Analysis, PageRef } from "./types";
 
-type Screen = "board" | "analyses" | "dashboard";
-/** The tabs in header order, for Ctrl+Tab / Ctrl+Shift+Tab. */
+type Screen = "board" | "analyses" | "dashboard" | "settings";
+/** The tabs in header order, for Ctrl+Tab / Ctrl+Shift+Tab. Settings, behind
+ *  the gear at the top right, is not one of them: stepping from it counts
+ *  from just past the last tab, so forward lands on the Board and back on the
+ *  Dashboard. */
 const SCREENS: Screen[] = ["board", "analyses", "dashboard"];
 
 /** Something in the header worth a glance: amber, with a dot. */
@@ -53,9 +60,14 @@ export default function App() {
   // The page an Analyses row is being appealed for, while its appeal is open.
   // (The on-screen clock argues its own case, in the box under it.)
   const [appeal, setAppeal] = useState<PageRef | null>(null);
+  // Ctrl+N requests, counted: the Board acts on each new value once.
+  const [newTask, setNewTask] = useState(0);
   // Stable: Analyses' load effect depends on it, and a fresh function every
   // App render would tear down its listener and refetch its whole list.
   const onSeen = useCallback(() => setUnseen((n) => Math.max(0, n - 1)), []);
+  const keys = useKeybinds();
+
+  useEffect(loadKeybinds, []);
 
   useEffect(() => {
     api
@@ -96,20 +108,31 @@ export default function App() {
     };
   }, []);
 
-  // Ctrl+Tab / Ctrl+Shift+Tab step through the tabs, wrapping at either
-  // end. Not while a checkpoint or an appeal is over the window.
+  // Next / previous tab (Ctrl+Tab / Ctrl+Shift+Tab unless Settings says
+  // otherwise) step through the tabs, wrapping at either end; New task
+  // (Ctrl+N) makes a new task on the board, from any tab (the Board holds
+  // the card for the arrow keys once it is saved). None of them while a
+  // checkpoint or an appeal is over the window.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // `code`, not `key`: on X11/Wayland Shift+Tab is the ISO_Left_Tab
-      // keysym, so `key` need not say "Tab" and the back step never fired.
-      if (!e.ctrlKey || e.code !== "Tab" || checkpoint || appeal) return;
+      if (e.defaultPrevented || checkpoint || appeal) return;
+      if (matches(e, keys["app.newTask"])) {
+        e.preventDefault();
+        setScreen("board");
+        setNewTask((n) => n + 1);
+        return;
+      }
+      const step = matches(e, keys["app.nextTab"]) ? 1 : matches(e, keys["app.prevTab"]) ? -1 : 0;
+      if (!step) return;
       e.preventDefault();
-      const step = e.shiftKey ? -1 : 1;
-      setScreen((s) => SCREENS[(SCREENS.indexOf(s) + step + SCREENS.length) % SCREENS.length]);
+      setScreen((s) => {
+        const at = s === "settings" ? (step > 0 ? SCREENS.length - 1 : 0) : SCREENS.indexOf(s);
+        return SCREENS[(at + step + SCREENS.length) % SCREENS.length];
+      });
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [checkpoint, appeal]);
+  }, [checkpoint, appeal, keys]);
 
   if (error) return <Splash>{error}</Splash>;
   if (!healthState)
@@ -169,10 +192,21 @@ export default function App() {
           {healthState.window_tracking && <Warning>{healthState.window_tracking}</Warning>}
           {healthState.overlay && <Warning>{healthState.overlay}</Warning>}
           {healthState.relevance && <Warning>{healthState.relevance}</Warning>}
+          <Button
+            variant="ghost"
+            mode="icon"
+            size="sm"
+            aria-label="Settings"
+            title="Settings"
+            selected={screen === "settings"}
+            onClick={() => setScreen("settings")}
+          >
+            <SettingsIcon />
+          </Button>
         </div>
       </header>
       <TabsContent value="board" className="tab-in mt-0 flex flex-1 flex-col">
-        <Board />
+        <Board newTask={newTask} />
       </TabsContent>
       <TabsContent value="analyses" className="tab-in mt-0">
         <Analyses
@@ -187,6 +221,9 @@ export default function App() {
         {/* The build line is at the foot of the Dashboard; a build behind
             its source still warns up in the header. */}
         <Dashboard build={build} />
+      </TabsContent>
+      <TabsContent value="settings" className="tab-in mt-0">
+        <Settings />
       </TabsContent>
       {appeal && (
         <Appeal key={appeal.app + "\n" + appeal.title} page={appeal} onClose={() => setAppeal(null)} />

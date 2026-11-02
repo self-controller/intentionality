@@ -1,8 +1,6 @@
 import { useEffect, useState } from "react";
 import {
   animate,
-  domAnimation,
-  LazyMotion,
   m,
   useMotionValue,
   useReducedMotion,
@@ -10,10 +8,10 @@ import {
   useTransform,
   type MotionValue,
 } from "framer-motion";
-// `m` under LazyMotion with domAnimation, not `motion`: everything here is a
-// MotionValue bound through style, which needs none of the gesture or layout
-// features, and that keeps ~50 kB out of a bundle that loads at login. `m`
-// needs the LazyMotion around it -- without it the styles never update.
+// `m`, not `motion`: Gate.tsx wraps every screen in one LazyMotion
+// (domAnimation), and `m` draws its features from that -- without it the
+// styles would never update. That keeps ~50 kB out of a bundle that loads
+// at login.
 
 /** How long the cards take to fly past. Gate.tsx's INTRO_MS waits for this
  *  and then a beat on the title before it fades the intro out. */
@@ -136,8 +134,7 @@ function Tunnel({ titles, date }: { titles: string[]; date: string }) {
   const stage = useStage();
   const pointer = useParallax();
 
-  // Driven by the clock, not the wheel: at the gate scrolling belongs to
-  // gui.py, and there is nothing here to scroll anyway.
+  // Driven by the clock, not the wheel: there is nothing here to scroll.
   const progress = useMotionValue(0);
   useEffect(() => {
     const flight = animate(progress, 1, { duration: FLIGHT_S, ease: [0.45, 0, 0.25, 1] });
@@ -172,10 +169,10 @@ function Tunnel({ titles, date }: { titles: string[]; date: string }) {
       >
         {/* The line is reserved even before the state brings the date, so
             the title does not jump when it lands. */}
-        <p className="mb-[1rem] h-[1.2em] text-[0.95rem] uppercase tracking-[0.4em] text-muted">
+        <p className="mb-[1.1rem] h-[1.2em] font-mono text-[0.8rem] uppercase tracking-[0.35em] text-muted">
           {date}
         </p>
-        <h1 className="intro-title text-[5.2rem] font-bold leading-[0.95] tracking-tighter">
+        <h1 className="intro-title text-[5.4rem] font-semibold leading-[0.95] tracking-[-0.035em]">
           Let&rsquo;s get
           <br />
           to work.
@@ -221,16 +218,14 @@ export default function Intro({
     >
       {reduce ? (
         <div className="flex h-full items-center justify-center">
-          <h1 className="intro-fade intro-title text-center text-[5.2rem] font-bold leading-[0.95] tracking-tighter">
+          <h1 className="intro-fade intro-title text-center text-[5.4rem] font-semibold leading-[0.95] tracking-[-0.035em]">
             Let&rsquo;s get
             <br />
             to work.
           </h1>
         </div>
       ) : (
-        <LazyMotion features={domAnimation}>
-          <Tunnel titles={titles} date={date} />
-        </LazyMotion>
+        <Tunnel titles={titles} date={date} />
       )}
     </div>
   );

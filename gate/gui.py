@@ -1,4 +1,4 @@
-"""A graphical front end for the gate, meant to run under a kiosk compositor.
+"""A graphical front end for the gate, meant to run under sway as a kiosk.
 
 Same gate as the terminal: flow still asks ui.welcome for the session's
 tasks, and debrief (for `gate close`) still calls ui.ask / ui.confirm_choice;
@@ -23,7 +23,7 @@ The window cannot be closed: it has no decorations, a close request (the X a
 compositor would draw, Alt+F4, GTK's own close action) is refused, and Escape
 does nothing. There is no quit button either: the only way off the welcome
 screen is Start, and Start needs a task. SIGINT is the one abort left --
-unreachable from the keyboard under cage, but `kill -INT` over SSH still
+unreachable from the keyboard under sway, but `kill -INT` over SSH still
 works -- and it counts as Ctrl-C did on the terminal: the question being asked
 raises GateAborted, and every question after it does too.
 
@@ -51,20 +51,10 @@ _KNOWN_LABELS = {
 # Device pixels per CSS rem. The bundle authors everything in rem against the
 # browser default of 16, and the webview's zoom is set so that one rem is this
 # many *physical* pixels -- see _zoom(). That is what makes the gate the same
-# size under cage as it is when tested nested inside GNOME, and it is the same
+# size under sway as it is when tested nested inside GNOME, and it is the same
 # knob the console font took in /etc/vconsole.conf.
 DEFAULT_FONT_PX = 26
 REFERENCE_REM_PX = 16
-
-# The cursor theme size the gate asks GTK for: exactly the width of GTK's own
-# built-in cursor images. cage has no cursor-shape protocol, so GTK 4.22 draws
-# the pointer itself from 32x32 textures (/org/gtk/libgdk/cursor/*) whose
-# hotspots are in texture pixels (pointer 14,9; text 14,15). It scales each
-# one by theme_size / 32 but hands the compositor the hotspot unscaled, so at
-# any size but 32 the drawn tip and the real pointer part company: at GNOME's
-# 24 the hand and the I-beam sat ~4.5 px down-right of where a click landed.
-# Under GNOME, mutter draws the cursor and this setting changes nothing.
-CURSOR_PX = 32
 
 # The built bundle. Committed, because login cannot depend on an npm build.
 WEBUI = Path(__file__).resolve().parent / "webui" / "index.html"
@@ -89,8 +79,8 @@ READY_SECONDS = 10.0
 SORT_WAIT = 3.0
 
 # The environment the webview runs in. It lives here, not in the launchers, so
-# that every entry point gets the same one: the login gate under cage, the
-# resume gate under cage on VT9, and a bin/gate-login run by hand from another
+# that every entry point gets the same one: the login gate under sway, the
+# resume gate under sway on VT9, and a bin/gate-login run by hand from another
 # console while GNOME is up.
 #
 # The sandbox switch is the one that matters. WebKit wraps its web process in
@@ -100,12 +90,12 @@ SORT_WAIT = 3.0
 # resume gate from the v1.5 webview until this change aborted in
 # XDGDBusProxy::launch ("Failed to fully launch dbus-proxy: Child process
 # exited with code 1", read out of the coredumps) and fell through to the
-# terminal gate on VT9. It never happens at a login, under cage inside GNOME,
-# or under a systemd user service -- only in the resume unit's own context,
-# so the proxy's own reason is still unknown. What is certain is that the gate
-# needs nothing the sandbox is there to contain: one committed local bundle,
-# no network, no remote content, no second origin, and the only strings in it
-# that anyone typed go through React's escaping.
+# terminal gate on VT9. It never happened at a login, under a compositor
+# nested inside GNOME, or under a systemd user service -- only in the resume
+# unit's own context, so the proxy's own reason is still unknown. What is
+# certain is that the gate needs nothing the sandbox is there to contain: one
+# committed local bundle, no network, no remote content, no second origin, and
+# the only strings in it that anyone typed go through React's escaping.
 #
 # INTENTIONALITY_GATE_SANDBOX=1 puts the sandbox back for a run. That is how
 # to catch the proxy's error message next time the machine wakes, now that
@@ -126,38 +116,6 @@ def webkit_env(env: Mapping[str, str]) -> dict[str, str]:
     if not env.get(KEEP_SANDBOX) and not env.get(SANDBOX_OFF):
         extra[SANDBOX_OFF] = "1"
     return extra
-
-
-# Scrolling. Cage has no natural-scrolling setting, and a page that reverses
-# wheel events itself cannot win: WebKitGTK coasts after the fingers lift
-# (kinetic scrolling) without sending the page a single wheel event, so that
-# coast cannot be prevented or reversed. Measured with a virtual touchpad: the
-# page moved the right way while the fingers did, then jumped back and coasted
-# the wrong way -- the "jitter". So the window takes every scroll before
-# WebKit sees it, and tells the page how far to move (window.__gateScroll).
-#
-# CSS px per GDK unit, matching what WebKit itself scrolls (measured on
-# WebKitGTK 2.52; the same at every zoom level): a touchpad's surface units,
-# and one notch of a mouse wheel.
-TOUCHPAD_PX = 2.5
-WHEEL_PX = 105.0
-# Where the natural-scrolling choices live. Read-only, so it works at a
-# console with no session bus: dconf reads its database file directly.
-NATURAL_SCHEMAS = ("org.gnome.desktop.peripherals.touchpad", "org.gnome.desktop.peripherals.mouse")
-# GNOME's own defaults, for when the settings cannot be read.
-NATURAL_DEFAULTS = (True, False)
-
-
-def scroll_step(dx: float, dy: float, wheel: bool, natural: bool, inverted: bool) -> tuple[float, float]:
-    """CSS px to scroll the page for one GDK scroll event.
-
-    `natural` is the desktop's setting for this kind of device; `inverted`
-    says the compositor has applied it already. GNOME's mutter does, so a gate
-    run inside GNOME passes deltas through; cage never does, so at the console
-    the gate reverses them itself. Pure, so it is testable without a display."""
-    scale = WHEEL_PX if wheel else TOUCHPAD_PX
-    sign = -scale if natural and not inverted else scale
-    return dx * sign, dy * sign
 
 
 def parse_choices(prompt: str, choices: str) -> list[tuple[str, str]]:
@@ -195,12 +153,9 @@ class GtkUI:
         if not Gtk.init_check() or Gdk.Display.get_default() is None:
             raise RuntimeError("no display to open a window on")
         # Before the window exists, so its very first frame is black too.
-        gtk_settings = Gtk.Settings.get_default()
-        gtk_settings.set_property("gtk-application-prefer-dark-theme", True)
-        # Size, then name: GTK passes the size on only when it has a theme
-        # name, and under cage nothing else may give it one. See CURSOR_PX.
-        gtk_settings.set_property("gtk-cursor-theme-size", CURSOR_PX)
-        gtk_settings.set_property("gtk-cursor-theme-name", "Adwaita")
+        # The pointer is not set here: sway draws it, from the shapes GTK
+        # names over cursor-shape-v1.
+        Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", True)
         css = Gtk.CssProvider()
         css.load_from_string(f"window {{ background-color: {BACKGROUND}; }}")
         Gtk.StyleContext.add_provider_for_display(
@@ -244,7 +199,7 @@ class GtkUI:
 
         self.window = Gtk.Window(title="intentionality")
         # GTK 4 draws its own titlebar on Wayland whatever the compositor
-        # does, so this is what removes the close button under cage.
+        # does, so this is what removes the close button.
         self.window.set_decorated(False)
         self.window.set_default_size(1200, 800)
         self.window.set_child(self.web)
@@ -257,17 +212,14 @@ class GtkUI:
         self.window.add_controller(keys)
 
         # Capture phase, the opposite of the keys and just as deliberate: the
-        # window sees each scroll before WebKit does, and claiming it keeps
-        # WebKit from scrolling or coasting at all. See TOUCHPAD_PX.
-        self._natural = self._natural_scroll()
-        self._inverted = False
-        scroll = Gtk.EventControllerScroll.new(
-            Gtk.EventControllerScrollFlags.BOTH_AXES | Gtk.EventControllerScrollFlags.KINETIC
-        )
-        scroll.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-        scroll.connect("scroll-begin", self._on_scroll_begin)
+        # window sees each scroll before WebKit does, and claims only
+        # Ctrl+scroll, which would zoom the page. Every other scroll goes on to
+        # WebKit, which scrolls whatever is under the pointer itself, coast
+        # and all; sway has already applied the desktop's natural-scrolling
+        # choice.
+        scroll = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.BOTH_AXES)
         scroll.connect("scroll", self._on_scroll)
-        scroll.connect("decelerate", self._on_decelerate)
+        scroll.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         self.window.add_controller(scroll)
 
         GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, self._abort)
@@ -282,8 +234,8 @@ class GtkUI:
 
     def _device_scale(self) -> float:
         """Physical pixels per logical pixel, as the compositor reports it.
-        GNOME hands this window 1728x1080 at 1.667; cage does no scaling at
-        all and hands it 2880x1800 at 1."""
+        GNOME hands this window 1728x1080 at 1.667; sway, configured for the
+        gate at scale 2, hands it 1440x900 at 2."""
         display = self.Gdk.Display.get_default()
         monitor = None
         surface = self.window.get_surface()
@@ -307,7 +259,7 @@ class GtkUI:
             except ValueError:
                 pass
         # Hold (zoom x scale) constant and one rem is font_px physical pixels
-        # everywhere: 0.975 x 1.667 under GNOME, 1.625 x 1 under cage.
+        # everywhere: 0.975 x 1.667 under GNOME, 0.8125 x 2 under sway.
         return (self.font_px / REFERENCE_REM_PX) / self._device_scale()
 
     def _apply_zoom(self, *_args) -> None:
@@ -387,8 +339,8 @@ class GtkUI:
     # ----------------------------------------------------------- the log
 
     def write(self, text: str) -> int:
-        # The real stdout first, always: under cage that is gate.log and under
-        # the resume unit it is the journal. A dead page must not cost a line.
+        # The real stdout first, always: under sway that is gate.log, as the
+        # launchers point it. A dead page must not cost a line.
         self._real_stdout.write(text)
         self._log.append(text)
         if self._ready and self._log_pending is None:
@@ -441,8 +393,9 @@ class GtkUI:
         notes: list,
         error: str,
         labels: list = (),
+        keybinds: str = "{}",
     ) -> ui.Plan:
-        screen = webstate.WelcomeScreen(tasks, list(notes), error, list(labels))
+        screen = webstate.WelcomeScreen(tasks, list(notes), error, list(labels), keybinds=keybinds)
         answer: list = []
 
         # Typed rows Jev is being asked about, until each answer lands.
@@ -546,47 +499,11 @@ class GtkUI:
 
     # ------------------------------------------------------------ scrolling
 
-    def _natural_scroll(self) -> tuple[bool, bool]:
-        """(touchpad, mouse): whether the desktop scrolls naturally."""
-        from gi.repository import Gio
-
-        source = Gio.SettingsSchemaSource.get_default()
-        out = []
-        for schema, default in zip(NATURAL_SCHEMAS, NATURAL_DEFAULTS):
-            try:
-                found = source.lookup(schema, True) if source else None
-                out.append(Gio.Settings.new(schema).get_boolean("natural-scroll") if found else default)
-            except Exception:
-                out.append(default)
-        return out[0], out[1]
-
-    def _scroll_page(self, call: str) -> None:
-        self.web.evaluate_javascript(f"window.__gateScroll && window.__gateScroll.{call}", -1)
-
-    def _on_scroll_begin(self, _controller) -> None:
-        # Fingers on the touchpad again: catch a coast that is still running.
-        self._scroll_page("stop()")
-
-    def _on_scroll(self, controller, dx: float, dy: float) -> bool:
+    def _on_scroll(self, controller, _dx: float, _dy: float) -> bool:
+        # True claims the scroll: Ctrl+scroll would zoom the page, and the
+        # zoom is the gate's to set. False lets WebKit have it.
         event = controller.get_current_event()
-        if event is not None and event.get_modifier_state() & self.Gdk.ModifierType.CONTROL_MASK:
-            # Ctrl+scroll would zoom the page; the zoom is the gate's to set.
-            return True
-        wheel = controller.get_unit() == self.Gdk.ScrollUnit.WHEEL
-        inverted = False
-        if event is not None and hasattr(event, "get_relative_direction"):
-            inverted = event.get_relative_direction() == self.Gdk.ScrollRelativeDirection.INVERTED
-        if not wheel:
-            self._inverted = inverted  # for the coast that may follow
-        x, y = scroll_step(dx, dy, wheel, self._natural[1 if wheel else 0], inverted)
-        self._scroll_page(f"by({x:.2f}, {y:.2f})")
-        return True
-
-    def _on_decelerate(self, _controller, vx: float, vy: float) -> None:
-        # Only a touchpad flick ends this way. Velocity is in surface units a
-        # second, so it converts exactly like a delta.
-        x, y = scroll_step(vx, vy, False, self._natural[0], self._inverted)
-        self._scroll_page(f"fling({x:.2f}, {y:.2f})")
+        return event is not None and bool(event.get_modifier_state() & self.Gdk.ModifierType.CONTROL_MASK)
 
     def _on_close(self, _window) -> bool:
         # Every close arrives here, whoever asked for it: True refuses it.

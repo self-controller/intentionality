@@ -1,12 +1,11 @@
 """The graphical front end's seam, without a display.
 
-Seven things are pinned: ui hands exactly the three questions to a backend
+Six things are pinned: ui hands exactly the three questions to a backend
 (and nothing else, so the terminal helpers built on them keep working), the
 prompt-to-button parsing that gives the buttons their words, the environment
-the webview is started in, which way a scroll moves the page, the cursor size
-that keeps the pointer's tip where it clicks, that the window offers no way
-out but SIGINT, and `gate handoff`, the half of the login gate that runs after
-the compositor is gone.
+the webview is started in, that every scroll but a Ctrl+scroll zoom goes on to
+WebKit, that the window offers no way out but SIGINT, and `gate handoff`, the
+half of the login gate that runs after the compositor is gone.
 GTK itself is not exercised here — there is no display in the test run. The
 welcome screen's list rules are ui.WelcomeList, tested in test_welcome.py.
 
@@ -15,7 +14,6 @@ Run with:  python3 -m unittest discover tests
 
 import contextlib
 import io
-import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,7 +32,7 @@ class FakeBackend:
         self.seen.append(("confirm", prompt, choices))
         return self.choices.pop(0)
 
-    def welcome(self, tasks, notes, error, labels):
+    def welcome(self, tasks, notes, error, labels, keybinds="{}"):
         self.seen.append(("welcome", tasks, notes, error, labels))
         return self.plans.pop(0)
 
@@ -115,58 +113,34 @@ class TestWebkitEnv(unittest.TestCase):
         self.assertEqual(gui.webkit_env(env).keys() & env.keys(), set())
 
 
-class TestScrollStep(unittest.TestCase):
-    """Which way the page moves for one scroll. At the console cage never
-    applies natural scrolling, so the gate does; inside GNOME mutter already
-    has, and the gate must not turn it round a second time."""
+class TestScrolling(unittest.TestCase):
+    """WebKit scrolls the page itself -- sway has applied the desktop's
+    natural-scrolling choice already -- so the window claims no scroll but
+    Ctrl+scroll, which would zoom the page. The handler runs on a bare GtkUI
+    with a stand-in controller."""
 
-    def test_console_touchpad_is_turned_natural(self):
-        self.assertEqual(gui.scroll_step(0, 4, wheel=False, natural=True, inverted=False),
-                         (0, -4 * gui.TOUCHPAD_PX))
+    CTRL = 1 << 2
+    SHIFT = 1 << 0
 
-    def test_already_natural_passes_through(self):
-        self.assertEqual(gui.scroll_step(0, -4, wheel=False, natural=True, inverted=True),
-                         (0, -4 * gui.TOUCHPAD_PX))
+    def setUp(self):
+        self.front = gui.GtkUI.__new__(gui.GtkUI)
+        self.front.Gdk = SimpleNamespace(ModifierType=SimpleNamespace(CONTROL_MASK=self.CTRL))
 
-    def test_traditional_setting_is_left_alone(self):
-        self.assertEqual(gui.scroll_step(0, 4, wheel=False, natural=False, inverted=False),
-                         (0, 4 * gui.TOUCHPAD_PX))
+    def controller(self, modifiers=0, event=True):
+        current = SimpleNamespace(get_modifier_state=lambda: modifiers) if event else None
+        return SimpleNamespace(get_current_event=lambda: current)
 
-    def test_a_wheel_follows_its_own_setting_in_notches(self):
-        # GNOME's mouse default is traditional: a notch down scrolls down.
-        self.assertEqual(gui.scroll_step(0, 1, wheel=True, natural=False, inverted=False),
-                         (0, gui.WHEEL_PX))
-        self.assertEqual(gui.scroll_step(0, 1, wheel=True, natural=True, inverted=False),
-                         (0, -gui.WHEEL_PX))
+    def test_a_plain_scroll_goes_on_to_webkit(self):
+        # False: not claimed, so WebKit scrolls and coasts by itself.
+        self.assertFalse(self.front._on_scroll(self.controller(), 0, 3))
+        self.assertFalse(self.front._on_scroll(self.controller(self.SHIFT), 3, 0))
 
-    def test_both_axes_turn_together(self):
-        self.assertEqual(gui.scroll_step(2, 4, wheel=False, natural=True, inverted=False),
-                         (-2 * gui.TOUCHPAD_PX, -4 * gui.TOUCHPAD_PX))
+    def test_ctrl_scroll_is_swallowed(self):
+        self.assertTrue(self.front._on_scroll(self.controller(self.CTRL), 0, 3))
+        self.assertTrue(self.front._on_scroll(self.controller(self.CTRL | self.SHIFT), 0, -1))
 
-
-class TestCursorSize(unittest.TestCase):
-    """Under cage GTK draws the pointer from its own images and gets the
-    hotspot right only when the theme size equals their width (gui.CURSOR_PX).
-    A GTK that ships different images must fail here, not drift off target
-    at the console."""
-
-    def test_cursor_px_is_the_width_of_gtks_own_cursors(self):
-        try:
-            import gi
-
-            gi.require_version("Gtk", "4.0")
-            from gi.repository import Gio, Gtk  # noqa: F401 -- loads the resources
-        except (ImportError, ValueError):
-            self.skipTest("GTK 4 is not importable here")
-        for name in ("default", "pointer", "text"):
-            try:
-                png = Gio.resources_lookup_data(
-                    f"/org/gtk/libgdk/cursor/{name}", Gio.ResourceLookupFlags.NONE
-                ).get_data()
-            except Exception:
-                self.skipTest("this GTK has no built-in cursor images")
-            self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n", name)
-            self.assertEqual(struct.unpack(">II", png[16:24]), (gui.CURSOR_PX, gui.CURSOR_PX), name)
+    def test_a_scroll_with_no_event_is_left_alone(self):
+        self.assertFalse(self.front._on_scroll(self.controller(event=False), 0, 3))
 
 
 class TestNoWayOut(unittest.TestCase):

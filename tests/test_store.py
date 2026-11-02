@@ -1953,6 +1953,44 @@ class TestCommitPlan(StoreCase):
         self.assertEqual([t["id"] for t in store.get_backlog(conn)], [done, gone])
         self.assertEqual(store.get_tasks(conn, old)[0]["status"], "planned")
 
+    def test_doing_tasks_start_in_doing(self):
+        conn = self.fresh()
+        _, (a, b) = self.carried(conn, "a", "b")
+        sid = store.commit_plan(
+            conn, None, [a, b], ["typed now", "typed next"],
+            doing_ids=[b], new_doing=[True, False],
+        )
+        tasks = store.get_tasks(conn, sid)
+        self.assertEqual(
+            [(t["title"], t["status"]) for t in tasks],
+            [("a", "planned"), ("b", "doing"), ("typed now", "doing"), ("typed next", "planned")],
+        )
+        # Entered Doing at the start, the way a drag on the board stamps it;
+        # a To Do task has not started.
+        self.assertEqual([t["started_at"] is not None for t in tasks], [False, True, True, False])
+        # Positions stay the plan's order: the board orders each column by them.
+        self.assertEqual([t["position"] for t in tasks], [1, 2, 3, 4])
+
+    def test_a_doing_task_the_app_took_is_left_alone(self):
+        conn = self.fresh()
+        old, (kept, taken) = self.carried(conn, "kept", "taken")
+        # The desktop app pulled one into the old session while the gate was up.
+        store.pull_from_backlog(conn, old, [taken])
+        sid = store.commit_plan(conn, None, [kept, taken], [], doing_ids=[kept, taken])
+        self.assertEqual([t["status"] for t in store.get_tasks(conn, sid)], ["doing"])
+        moved = next(t for t in store.get_tasks(conn, old) if t["id"] == taken)
+        self.assertEqual((moved["status"], moved["started_at"]), ("planned", None))
+
+    def test_doing_rolls_back_with_an_empty_session(self):
+        conn = self.fresh()
+        old, (kept,) = self.carried(conn, "kept")
+        store.pull_from_backlog(conn, old, [kept])
+        with self.assertRaises(store.EmptyPlan):
+            store.commit_plan(conn, None, [kept], [], doing_ids=[kept])
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM task WHERE status = 'doing'").fetchone()[0], 0
+        )
+
 
 class TestTaskDetails(StoreCase):
     """_set_details, the gate's twin of the app's db::write_details."""

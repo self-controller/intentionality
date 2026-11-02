@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from "react";
-import { Button } from "../src/ui/primitives";
+import { Button, Kbd } from "../src/ui/primitives";
 import { post } from "./bridge";
 import type { Blank, Choice } from "./types";
 
@@ -17,8 +17,8 @@ function Log({ text }: { text: string }) {
     <pre
       ref={box}
       className="max-h-[55vh] flex-1 overflow-y-auto whitespace-pre-wrap break-words
-                 rounded-[0.5rem] border border-line bg-surface p-[1rem]
-                 font-mono text-[0.8rem] leading-relaxed text-muted"
+                 rounded-[0.9rem] border border-line bg-surface p-[1.1rem]
+                 font-mono text-[0.78rem] leading-relaxed text-muted"
     >
       {text}
     </pre>
@@ -28,7 +28,7 @@ function Log({ text }: { text: string }) {
 function Frame({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex flex-1 items-center justify-center">
-      <div className="gate-rise flex w-[40rem] max-w-[calc(100%-4rem)] flex-col gap-[1.2rem]">
+      <div className="gate-rise flex w-[46rem] max-w-[calc(100%-4rem)] flex-col gap-[1.2rem]">
         {children}
       </div>
     </div>
@@ -58,13 +58,13 @@ export function ChoiceScreen({ state }: { state: Choice }) {
     <Frame>
       {state.log && <Log text={state.log} />}
       {state.question && (
-        <p className="text-[1.15rem] font-medium text-text">{state.question}</p>
+        <p className="text-[1.25rem] font-medium tracking-[-0.01em] text-text">{state.question}</p>
       )}
       <div className="flex flex-wrap gap-[0.5rem]">
         {state.choices.map((c) => (
-          <Button key={c.key} onClick={() => post("choose", { key: c.key })}>
+          <Button key={c.key} size="lg" onClick={() => post("choose", { key: c.key })}>
             {c.label}
-            <span className="ml-[0.5em] text-muted">[{c.key}]</span>
+            <Kbd>{c.key}</Kbd>
           </Button>
         ))}
       </div>

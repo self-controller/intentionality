@@ -3,13 +3,13 @@
 
 use crate::error::{AppError, Result};
 use crate::models::{
-    Analysis, AnalysisDetail, Arrangement, Board, Health, Judgement, LabelSummary, Observed,
-    RiskApp, RiskToday, RiskTotal, Session, Task, TodayTime,
+    Analysis, AnalysisDetail, Arrangement, Board, DayTime, Health, Judgement, LabelSummary,
+    RiskApp, RiskToday, RiskTotal,
 };
 use crate::relevance::{self, Page};
 use crate::state::AppState;
 use crate::{
-    analysis, autolabel, aw, build_info, db, jev, observed, overlay, resume_units, scheduler,
+    analysis, autolabel, aw, build_info, day, db, desktop, ignore, jev, keybinds, overlay, resume_units, scheduler,
     screen_time, today,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -113,21 +113,96 @@ pub fn forget_relevance(app: AppHandle, state: State<'_, AppState>) -> Result<us
     Ok(forgotten)
 }
 
-/// Today since midnight for the Dashboard, from the relevance cache alone:
-/// asks Jev nothing, so it can be polled.
+/// The ignore list (ignore.rs): apps and sites never judged.
 #[tauri::command]
-pub async fn today_time(app: AppHandle) -> Result<TodayTime> {
-    today::today(&app, false).await
+pub fn ignore_list(state: State<'_, AppState>) -> Result<Vec<ignore::Rule>> {
+    let conn = state.conn.lock().unwrap();
+    Ok(ignore::load(&conn))
 }
 
-/// The Dashboard's button: Jev asked about the busiest pages today still has
-/// no verdict for (a check's worth), then today again. The timer loop is
-/// poked so a page just excused leaves the screen at once.
+/// Never judge this app or site again. The timer loop is poked so a clock
+/// on the window in front goes at once.
 #[tauri::command]
-pub async fn judge_today(app: AppHandle) -> Result<TodayTime> {
-    let today = today::today(&app, true).await;
+pub fn add_ignore(app: AppHandle, state: State<'_, AppState>, rule: ignore::Rule) -> Result<Vec<ignore::Rule>> {
+    let rules = {
+        let conn = state.conn.lock().unwrap();
+        ignore::add(&conn, rule)?
+    };
     app.state::<AppState>().relevance_changed.notify_one();
-    today
+    Ok(rules)
+}
+
+/// Judge this app or site again.
+#[tauri::command]
+pub fn remove_ignore(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    kind: ignore::Kind,
+    value: String,
+) -> Result<Vec<ignore::Rule>> {
+    let rules = {
+        let conn = state.conn.lock().unwrap();
+        ignore::remove(&conn, kind, &value)?
+    };
+    app.state::<AppState>().relevance_changed.notify_one();
+    Ok(rules)
+}
+
+/// Every installed app, A to Z, scanned afresh: the ignore menu's list.
+#[tauri::command]
+pub async fn installed_apps() -> Result<Vec<desktop::App>> {
+    tauri::async_runtime::spawn_blocking(|| desktop::machine().all(true).as_ref().clone())
+        .await
+        .map_err(|e| AppError::Other(e.to_string()))
+}
+
+/// A day for the Dashboard ("YYYY-MM-DD", none = today), from the relevance
+/// cache alone: asks Jev nothing, so it can be polled.
+#[tauri::command]
+pub async fn day_time(app: AppHandle, day: Option<String>) -> Result<DayTime> {
+    let date = day.as_deref().map(day::parse_date).transpose()?;
+    today::day_time(&app, date, false).await
+}
+
+/// The Dashboard's button: Jev asked about the busiest pages of the day
+/// still without a verdict (a check's worth), then the day again. The timer
+/// loop is poked so a page just excused leaves the screen at once.
+#[tauri::command]
+pub async fn judge_day(app: AppHandle, day: Option<String>) -> Result<DayTime> {
+    let date = day.as_deref().map(day::parse_date).transpose()?;
+    let read = today::day_time(&app, date, true).await;
+    app.state::<AppState>().relevance_changed.notify_one();
+    read
+}
+
+/// The hour a day starts at (day.rs), for Settings.
+#[tauri::command]
+pub fn day_start_hour() -> u32 {
+    day::hour()
+}
+
+/// Settings: days start at `hour` (0-23) from now on, for the Dashboard and
+/// the clock's daily total.
+#[tauri::command]
+pub fn set_day_start_hour(state: State<'_, AppState>, hour: u32) -> Result<u32> {
+    let conn = state.conn.lock().unwrap();
+    day::set(&conn, hour)?;
+    Ok(day::hour())
+}
+
+/// Settings' keyboard shortcuts: the overrides only (keybinds.rs).
+#[tauri::command]
+pub fn keybinds(state: State<'_, AppState>) -> keybinds::Keybinds {
+    let conn = state.conn.lock().unwrap();
+    keybinds::load(&conn)
+}
+
+/// Settings: replace the overrides whole. The gate reads them at its next run.
+#[tauri::command]
+pub fn set_keybinds(state: State<'_, AppState>, keybinds: keybinds::Keybinds) -> Result<keybinds::Keybinds> {
+    let conn = state.conn.lock().unwrap();
+    keybinds::set(&conn, &keybinds)?;
+    Ok(keybinds::load(&conn))
 }
 
 #[tauri::command]
@@ -302,29 +377,6 @@ pub fn unpull_task(state: State<'_, AppState>, id: i64) -> Result<()> {
         .ok_or_else(|| crate::error::AppError::Other("no open session".into()))?;
     let mut conn = state.conn.lock().unwrap();
     db::unpull_task(&mut conn, session_id, id)
-}
-
-#[tauri::command]
-pub fn list_sessions(state: State<'_, AppState>, limit: i64) -> Result<Vec<Session>> {
-    let conn = state.conn.lock().unwrap();
-    db::list_sessions(&conn, limit.clamp(1, 100))
-}
-
-#[tauri::command]
-pub fn get_session_tasks(state: State<'_, AppState>, session_id: i64) -> Result<Vec<Task>> {
-    let conn = state.conn.lock().unwrap();
-    db::session_tasks(&conn, session_id)
-}
-
-#[tauri::command]
-pub async fn get_observed(state: State<'_, AppState>, session_id: i64) -> Result<Observed> {
-    let (start, end) = {
-        let conn = state.conn.lock().unwrap();
-        let session = db::get_session(&conn, session_id)?
-            .ok_or_else(|| crate::error::AppError::Other("no such session".into()))?;
-        (session.started_at, session.ended_at.unwrap_or_else(db::now))
-    };
-    observed::observed(&start, &end).await
 }
 
 /// The Analyses tab reads history across sessions, so it does not take a

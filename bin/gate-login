@@ -23,48 +23,26 @@ or set -x INTENTIONALITY_DESKTOP_CMD $repo/bin/desktop-session
 set -q XDG_SESSION_TYPE; and test $XDG_SESSION_TYPE != tty
 or set -x XDG_SESSION_TYPE wayland
 
-# Cage's options. Deliberately no -s: with it, Ctrl+Alt+F2.. leaves the gate
-# for another console; without it the keyboard belongs to the gate until you
-# answer. SSH and the power button remain, as does the skip file.
-set -l cage_opts
-
-# What cage and the graphical gate print goes here, not to the console.
+# What sway and the graphical gate print goes here, not to the console.
 set -l log ~/.local/state/intentionality/gate.log
 
 cd $repo
 or exit
 
-# The graphical gate, when there is a compositor to draw it. Cage owns the GPU
-# for as long as its client runs, so the desktop cannot be launched from
-# inside it: the conversation runs first, on its own, then `gate handoff`
-# starts GNOME for the session it committed (or nothing, if the gate was
-# interrupted). Cage returns its client's exit status, so a non-zero here means either cage could
-# not start or the gate failed — both fall through to the text gate, whose
+# How sway is started, the blank console and the log: shared with
+# bin/resume-gate, so the two cannot drift.
+source $repo/bin/graphical-gate.fish
+
+# The graphical gate, when sway can draw it. sway owns the GPU for as long as
+# its client runs, so the desktop cannot be launched from inside it: the
+# conversation runs first, on its own, then `gate handoff` starts GNOME for
+# the session it committed (or nothing, if the gate was interrupted).
+# graphical_gate returns the gate's own exit status (it comes back from sway
+# through a file), so a non-zero here means either sway could not run the
+# gate or the gate failed — both fall through to the text gate, whose
 # recovery sweep is idempotent.
-if command -q cage; and set -q XDG_RUNTIME_DIR
-    # A blank console with no cursor. Whenever cage lets go of the screen —
-    # while it starts, and for the seconds GNOME takes to draw after it
-    # exits — the console shows its text buffer again, so that buffer must
-    # hold nothing: not the login text, and not the gate's own output.
-    #
-    # The environment the gate itself needs -- no accessibility bus, no gvfs,
-    # no WebKit sandbox -- is set in gate/gui.py, so that a gate started any
-    # other way gets it too.
-    #
-    # The escape hatch for a first run on real hardware: cage on tty1 drives
-    # KMS directly, and WebKit's DMA-BUF path between its GPU and web
-    # processes is the likeliest thing to come up black there. Set
-    # INTENTIONALITY_GATE_SOFTWARE=1 to take the slow, certain route.
-    if set -q INTENTIONALITY_GATE_SOFTWARE
-        set -x WEBKIT_DISABLE_DMABUF_RENDERER 1
-        set -x LIBGL_ALWAYS_SOFTWARE 1
-    end
-    isatty stdout; and printf '\e[2J\e[3J\e[H\e[?25l'
-    mkdir -p (dirname $log)
-    echo "=== "(date -Is)" ===" >> $log
-    # Unbuffered, so that a gate which dies mid-sentence still leaves the
-    # sentence: python block-buffers a stdout that is a file.
-    if INTENTIONALITY_GATE_UI=gtk INTENTIONALITY_DESKTOP_CMD= PYTHONUNBUFFERED=1 cage $cage_opts -- $py -m gate >> $log 2>&1
+if graphical_gate_possible
+    if graphical_gate $log $py -m gate
         $py -m gate handoff
         set -l code $status
         # Only reached when there was nothing to start (an interrupted gate)

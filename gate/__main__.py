@@ -107,7 +107,7 @@ def handoff_cmd(conn) -> int:
 
     A kiosk compositor holds the GPU for as long as its client lives, so the
     desktop cannot be that client's child the way gate() makes it: the
-    conversation runs under cage, cage exits, and then this launches the
+    conversation runs under sway, sway exits, and then this launches the
     desktop for whatever the conversation committed. "Whatever" is exact:
     the recovery sweep just closed every other open session, so an open one
     now is the one just stated, and none means the gate was interrupted.

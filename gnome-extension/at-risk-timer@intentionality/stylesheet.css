@@ -45,6 +45,12 @@
     text-align: right;
 }
 
+/* "Not relevant to any task": the one caption that says the time is
+   being lost, in red. */
+.at-risk-caption-off {
+    color: rgba(255, 92, 92, 0.95);
+}
+
 .at-risk-appeal {
     background-color: rgba(255, 255, 255, 0.12);
     border: 1px solid rgba(255, 255, 255, 0.18);

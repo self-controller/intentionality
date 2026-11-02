@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 // Types only: the runtime import is the lazy one below, so three.js stays out
 // of the main chunk and loads with the Board tab.
@@ -9,6 +9,7 @@ import type {
   KanbanColumnData,
   KanbanMount,
   KanbanTheme,
+  NudgeDirection,
 } from "threejs-elements/kanban";
 import type { KanbanBoard3DHandle } from "threejs-elements/react";
 import LabelFilter, { NO_LABEL, labelOptions, matches } from "@/components/LabelFilter";
@@ -69,6 +70,24 @@ const CHIP_WITH_NAME = 112;
 // The backlog's label filter (a LabelFilter key; null = every card). Kept out
 // here because Board is unmounted whenever another tab is chosen.
 let rememberedFilter: string | null = null;
+
+// The board's bottom gap (see fitGap) and the size of the box it was measured
+// for, kept out here like the filter: measured afresh on every mount, the board
+// would be re-framed each time the tab is chosen again.
+let rememberedGap: { box: string; gap: number } | null = null;
+
+// The last Ctrl+N request (App's counter) a Board acted on. Module-level like
+// the filter: a ref would start at zero on every mount, and the tab's board
+// would open a new card each time the tab was chosen again.
+let handledNewTask = 0;
+
+// What the arrow keys do to a held card.
+const ARROWS: Record<string, NudgeDirection> = {
+  ArrowUp: "up",
+  ArrowDown: "down",
+  ArrowLeft: "left",
+  ArrowRight: "right",
+};
 
 const sameRect = (a: FocusRect | null, b: FocusRect | null) =>
   a === b ||
@@ -172,6 +191,15 @@ function dayOf(iso: string): Date {
   return new Date(y, m - 1, d);
 }
 
+/** One key in the held-card legend. */
+function Key({ children }: { children: ReactNode }) {
+  return (
+    <kbd className="mx-px inline-block min-w-[1.5em] rounded border border-border bg-secondary px-1 text-center font-mono text-[11px] leading-[1.6] text-foreground">
+      {children}
+    </kbd>
+  );
+}
+
 // High first. Within a level the user's own order stands: Array.sort is
 // stable, and the tasks arrive in position order.
 const RANK: Record<Priority, number> = { high: 0, medium: 1, low: 2 };
@@ -211,10 +239,11 @@ function arrangement(tasks: Task[]) {
 
 // The card in front of the camera: one being read (a click opens it this
 // way), one being edited (its Edit button), or one being made from a lane's
-// "+". `shown` while the face is on it -- at once, as cards open instantly;
-// `leaving` once Close, Save, Cancel or Delete has sent it back, until it
-// lands.
-type Open = ({ kind: "view" | "edit"; task: Task } | { kind: "new"; lane: Lane }) & {
+// "+" or from Ctrl+N. `shown` while the face is on it -- at once, as cards
+// open instantly; `leaving` once Close, Save, Cancel or Delete has sent it
+// back, until it lands. A new card made from the keyboard is `hold`: saved,
+// it hovers over the board for the arrow keys instead of landing.
+type Open = ({ kind: "view" | "edit"; task: Task } | { kind: "new"; lane: Lane; hold: boolean }) & {
   shown: boolean;
   leaving: boolean;
 };
@@ -238,7 +267,8 @@ function placeInBacklog(id: number, index: number) {
   });
 }
 
-export default function Board() {
+/** `newTask` is App's Ctrl+N counter: each new value opens one new card. */
+export default function Board({ newTask }: { newTask: number }) {
   const [board, setBoard] = useState<BoardData | null>(null);
   const [open, setOpen] = useState<Open | null>(null);
   const boardRef = useRef<KanbanBoard3DHandle>(null);
@@ -255,8 +285,17 @@ export default function Board() {
   const [slot, setSlot] = useState<FocusRect | null>(null);
   // CSS px kept clear under the board. fillHeight fits the board to the box's
   // height, so its bottom margin is a few px while its sides keep a wider one;
-  // this makes up the difference.
-  const [bottom, setBottom] = useState(0);
+  // this makes up the difference. The ref is what the observers read.
+  const [bottom, setBottomState] = useState(() => rememberedGap?.gap ?? 0);
+  const bottomRef = useRef(bottom);
+  const setBottom = useCallback((px: number) => {
+    bottomRef.current = px;
+    setBottomState(px);
+  }, []);
+  // The 3D board has mounted (its ref answers), so a Ctrl+N request can be met.
+  const [ready, setReady] = useState(false);
+  // The card held for keyboard placement, while the arrow keys move it.
+  const [held, setHeld] = useState<number | null>(null);
 
   // Read once: the board takes its theme on mount only.
   const theme = useMemo(boardTheme, []);
@@ -332,44 +371,131 @@ export default function Board() {
   // re-frames (a resize, a layoutchange) or redraws the header (its count).
   // Measured a frame later, once the board has caught up.
   const box = useRef<HTMLDivElement>(null);
-  const measureFrame = useRef(0);
-  const measure = useCallback(() => {
-    cancelAnimationFrame(measureFrame.current);
-    measureFrame.current = requestAnimationFrame(() => {
+  const slotFrame = useRef(0);
+  const measureSlot = useCallback(() => {
+    cancelAnimationFrame(slotFrame.current);
+    slotFrame.current = requestAnimationFrame(() => {
       const next = boardRef.current?.getHeaderSlot("backlog") ?? null;
       setSlot((prev) => (sameRect(prev, next) ? prev : next));
+    });
+  }, []);
+
+  // The bottom gap, once per size of the box. It changes the canvas's height,
+  // and a canvas being resized is a blank frame and a re-framed board, so it
+  // must never move with the cards: this is the flicker it used to cause, when
+  // every drop, landing and reload measured it again. Measured with a gap in
+  // place, the answer depends on that gap and asks for another (30, 33, 36 …
+  // px at the default window size), so it is measured only from the board
+  // framed to the whole box: a gap still in place is let go first, and the
+  // canvas observer comes back here once the board has re-framed without it.
+  const gapBox = useRef<string | null>(rememberedGap?.box ?? null);
+  const gapFrame = useRef(0);
+  const fitGap = useCallback(() => {
+    cancelAnimationFrame(gapFrame.current);
+    gapFrame.current = requestAnimationFrame(() => {
+      const el = box.current;
+      if (!el || !el.clientWidth || !el.clientHeight) return;
+      const key = `${el.clientWidth}x${el.clientHeight}`;
+      if (gapBox.current === key) return;
+      if (bottomRef.current !== 0) return setBottom(0);
+      const next = boardRef.current?.getHeaderSlot("backlog");
+      if (!next || next.height <= 0) return;
       // The header's on-screen height gives px per board unit; from that, the
       // gap beside the (centered) board and the one above it, which the camera
       // mirrors below. Near overhead, so foreshortening is negligible.
-      const width = box.current?.clientWidth;
-      if (!next || !width || next.height <= 0) return;
       const unit = next.height / LAYOUT.headerDepth;
-      const side = (width - BOARD_WIDTH * unit) / 2;
+      const side = (el.clientWidth - BOARD_WIDTH * unit) / 2;
       const top = next.top - COLUMN.padding * unit;
       const gap = Math.max(0, Math.round(side - top));
-      setBottom((prev) => (Math.abs(prev - gap) < 1 ? prev : gap));
+      gapBox.current = key;
+      rememberedGap = { box: key, gap };
+      setBottom(gap);
     });
-  }, []);
+  }, [setBottom]);
+
+  // Watches the canvas itself, which the gap resizes without the box changing:
+  // the slot moves with it, and a gap let go of is measured again from here.
+  const canvasObserver = useRef<ResizeObserver | null>(null);
   const onReady = useCallback(
     (mount: KanbanMount) => {
-      mount.board.addEventListener("layoutchange", measure);
-      mount.board.addEventListener("dragend", measure);
-      mount.board.addEventListener("focusclose", measure);
-      measure();
+      mount.board.addEventListener("layoutchange", measureSlot);
+      mount.board.addEventListener("dragend", measureSlot);
+      mount.board.addEventListener("focusclose", measureSlot);
+      // Only a keyboard hold sets `held`; a pointer drag leaves it null.
+      mount.board.addEventListener("dragstart", () => {
+        const id = mount.board.held;
+        setHeld(id == null ? null : Number(id));
+      });
+      mount.board.addEventListener("dragend", () => setHeld(null));
+      // Made after the board's own observer, so it runs after the re-framing.
+      canvasObserver.current?.disconnect();
+      canvasObserver.current = new ResizeObserver(() => {
+        measureSlot();
+        fitGap();
+      });
+      canvasObserver.current.observe(mount.renderer.domElement);
+      measureSlot();
+      fitGap();
+      setReady(true);
     },
-    [measure],
+    [measureSlot, fitGap],
   );
   const loaded = board != null;
   useEffect(() => {
     if (!box.current) return;
-    const ro = new ResizeObserver(measure);
+    const ro = new ResizeObserver(() => {
+      measureSlot();
+      fitGap();
+    });
     ro.observe(box.current);
     return () => {
       ro.disconnect();
-      cancelAnimationFrame(measureFrame.current);
+      cancelAnimationFrame(slotFrame.current);
+      cancelAnimationFrame(gapFrame.current);
     };
-  }, [measure, loaded]);
-  useEffect(() => measure(), [columns, measure]);
+  }, [measureSlot, fitGap, loaded]);
+  useEffect(() => () => canvasObserver.current?.disconnect(), []);
+  useEffect(() => measureSlot(), [columns, measureSlot]);
+
+  // A new card from a lane's "+" (it lands when saved) or from Ctrl+N (`hold`:
+  // it hovers for the arrow keys instead).
+  const openNewTask = useCallback((lane: Lane, hold: boolean) => {
+    if (boardRef.current?.openNew(lane, undefined, { instant: true }))
+      setOpen({ kind: "new", lane, hold, shown: true, leaving: false });
+  }, []);
+
+  // Ctrl+N: in To Do while a session is open, in the Backlog between sessions.
+  // A held card goes down first; with an editor already up the request is
+  // dropped. Each value of App's counter is acted on once.
+  useEffect(() => {
+    if (newTask === handledNewTask || !ready || !board) return;
+    handledNewTask = newTask;
+    if (open) return;
+    boardRef.current?.drop();
+    openNewTask(board.session ? "planned" : "backlog", true);
+  }, [newTask, ready, board, open, openNewTask]);
+
+  // The arrow keys move the held card, Enter puts it down, Esc puts it back.
+  // Inert while an editor is up (the form owns the keyboard then). From the
+  // Backlog with no session, left is ignored here rather than previewing a
+  // move the backend would refuse.
+  useEffect(() => {
+    if (held == null || open || !board) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      const dir = ARROWS[e.key];
+      if (dir) {
+        e.preventDefault();
+        if (dir === "left" && !board.session && board.backlog.some((t) => t.id === held)) return;
+        boardRef.current?.nudge(dir);
+      } else if (e.key === "Enter" || e.key === "Escape") {
+        e.preventDefault();
+        if (!e.repeat) boardRef.current?.drop(e.key === "Escape");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [held, open, board]);
 
   if (err) return <div className="p-12 text-center text-muted-foreground">{err}</div>;
   if (!board) return null;
@@ -468,21 +594,17 @@ export default function Board() {
       setOpen({ kind: "view", task, shown: true, leaving: false });
   };
 
-  const onAddClick = (lane: Lane) => {
-    if (boardRef.current?.openNew(lane, undefined, { instant: true }))
-      setOpen({ kind: "new", lane, shown: true, leaving: false });
-  };
-
   const leave = () => setOpen((o) => o && { ...o, leaving: true });
 
   // The card lands with what the store now holds (label colours included),
   // then the board takes the same read. The 3D board holds the new columns
-  // until the card is down, so nothing reflows under it mid-slam.
-  const land = (id: number) =>
+  // until the card is down, so nothing reflows under it mid-slam. With `hold`
+  // it comes down only to a hover, and the board holds it for the arrow keys.
+  const land = (id: number, hold = false) =>
     api.getBoard().then((b) => {
       const task = b.tasks.find((t) => t.id === id) ?? b.backlog.find((t) => t.id === id);
       leave();
-      boardRef.current?.closeCard(task ? { data: toCard(task, palette, today) } : { remove: true });
+      boardRef.current?.closeCard(task ? { data: toCard(task, palette, today), hold } : { remove: true });
       setNotice(null);
       setBoard(b);
     });
@@ -519,13 +641,32 @@ export default function Board() {
           {/* Says why only the Backlog has a "+". */}
           {!session && <p className="text-xs text-muted-foreground">{NO_SESSION}</p>}
         </div>
+        {/* The keys while a card is held, under the board. */}
+        {held != null && (
+          <p className="pointer-events-none absolute inset-x-0 bottom-3 z-[5] flex items-center justify-center gap-4 text-xs text-muted-foreground">
+            <span>
+              <Key>↑</Key>
+              <Key>↓</Key>
+              <Key>←</Key>
+              <Key>→</Key> move
+            </span>
+            <span>
+              <Key>Enter</Key> place
+            </span>
+            <span>
+              <Key>Esc</Key> back
+            </span>
+          </p>
+        )}
         <Suspense fallback={null}>
           {fontReady && (
             <KanbanBoard3D
               // As a style, not a class: the component's own inline
               // `position: relative` would override an `absolute` class, and the
               // box would then size itself from the canvas instead of filling in.
-              style={bottom ? { ...FILL, bottom } : FILL}
+              // `bottom` always given, 0 too: React takes a style it drops off
+              // with `bottom = ""`, which leaves it auto, not the `inset` 0.
+              style={{ ...FILL, bottom }}
               columns={columns}
               theme={theme}
               // Near overhead, so the board faces the user with just a hint of
@@ -542,7 +683,7 @@ export default function Board() {
               // Columns lengthen until the board fills the box's height too.
               fillHeight
               addButtons
-              onAddClick={(id) => onAddClick(id as Lane)}
+              onAddClick={(id) => openNewTask(id as Lane, false)}
               onCardMove={onCardMove}
               onCardClick={onCardClick}
               ref={boardRef}
@@ -592,7 +733,7 @@ export default function Board() {
                       keep(id);
                       return (
                         open.lane === "backlog" || open.lane === "planned" ? Promise.resolve() : place(id, open.lane)
-                      ).then(() => land(id));
+                      ).then(() => land(id, open.hold));
                     })
                 }
                 onClose={cancel}

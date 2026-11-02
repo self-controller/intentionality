@@ -12,6 +12,7 @@ finished text, so there is exactly one implementation of each and the front
 end cannot disagree with the terminal about what a button means.
 """
 
+import json
 from dataclasses import replace
 from datetime import date, datetime
 
@@ -19,6 +20,19 @@ from . import autolabel, ui
 
 # What a marked row says instead of its details.
 MARK_WORDS = {ui.DONE: "done", ui.DELETE: "will be deleted"}
+
+
+def parse_keybinds(raw: str) -> dict[str, str]:
+    """The shortcuts changed in the app's Settings, as action id -> combo.
+    Anything that is not a JSON object of strings is no changes at all: a
+    hand edit gone wrong must leave the default keys working, not none."""
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str)}
 
 
 class WelcomeScreen:
@@ -31,8 +45,10 @@ class WelcomeScreen:
         error: str,
         labels: list[ui.Label],
         now: datetime | None = None,
+        keybinds: str = "{}",
     ):
         self.rows = ui.WelcomeList(tasks)
+        self.keys = parse_keybinds(keybinds)
         self.notes = " ".join(notes)
         self.error = error
         self.known = list(labels)
@@ -76,7 +92,15 @@ class WelcomeScreen:
             "title": row.title,
             "mark": row.mark,
             "today": row.today,
+            # Starts in Doing rather than To Do (only ever on a ticked row).
+            "doing": row.doing,
             "detail": detail,
+            # The pieces of that line the front end lays out itself: the due
+            # date in words (blank on a marked row, whose line is the mark's
+            # word) and whether there are notes. `detail` stays whole, for
+            # the terminal's twin and for a bundle older than this file.
+            "due": "" if row.mark else ui.due_label(row.details.due_date, self._today()),
+            "notes": bool(row.details.notes),
             "can_finish": bool(row.task and row.task.can_finish),
             "typed": row.task is None,
             # The front end groups rows by these, so a saved edit moves the row.
@@ -123,6 +147,7 @@ class WelcomeScreen:
             "start_enabled": self.counted() > 0,
             "added": self.added,
             "add_error": self.add_error,
+            "keys": self.keys,
         }
 
     # -------------------------------------------------------------- sorting
@@ -188,12 +213,13 @@ class WelcomeScreen:
         self.add_error = ""
 
     def _op_add(self, msg: dict) -> None:
-        self._add(str(msg.get("title", "")), msg.get("details"))
+        self._add(str(msg.get("title", "")), msg.get("details"), msg.get("doing") is True)
 
-    def _add(self, title: str, fields) -> bool:
-        """The add box's task, with whatever its details editor holds. False =
-        nothing landed: blank, or the details were refused (add_error says
-        why), and either way the box keeps what was typed."""
+    def _add(self, title: str, fields, doing: bool = False) -> bool:
+        """The add box's task, with whatever its details editor holds, in
+        Doing if its switch is on. False = nothing landed: blank, or the
+        details were refused (add_error says why), and either way the box
+        keeps what was typed."""
         details = None
         if isinstance(fields, dict):
             try:
@@ -204,6 +230,8 @@ class WelcomeScreen:
         if not self.rows.add(title):
             return False
         index = len(self.rows.rows) - 1
+        if doing:
+            self.rows.toggle_doing(index)
         if details is not None:
             # A row typed a moment ago carries no mark, so only the due date
             # could be refused, and _details_from has checked it already.
@@ -221,6 +249,12 @@ class WelcomeScreen:
         if index is None:
             return
         self.rows.toggle_today(index)
+
+    def _op_doing(self, msg: dict) -> None:
+        index = self._index(msg)
+        if index is None:
+            return
+        self.rows.toggle_doing(index)
 
     def _op_mark(self, msg: dict) -> None:
         index = self._index(msg)
@@ -304,7 +338,9 @@ class WelcomeScreen:
         # The add box's task keeps its details, and a refusal there stops the
         # start just as the panel's does.
         add_text = str(msg.get("add_text", ""))
-        if add_text.strip() and not self._add(add_text, msg.get("add_details")):
+        if add_text.strip() and not self._add(
+            add_text, msg.get("add_details"), msg.get("add_doing") is True
+        ):
             return
         self.add_text = ""
         if not self.rows.today_count():

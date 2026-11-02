@@ -5,6 +5,8 @@ import { cn } from "@/lib/utils";
 import { dueInfo } from "./format";
 import { PRIORITIES } from "./TaskEditor";
 import type { Task } from "./types";
+import { matches } from "./keybinds";
+import { keymap } from "./useKeybinds";
 
 // "- " and "* " count too, so notes typed before the editor had bullets read
 // as the lists they were meant to be.
@@ -74,12 +76,11 @@ export function TaskView({
   onEdit: () => void;
   onClose: () => void;
 }) {
-  // Esc closes, as everywhere; E edits.
+  // Esc closes, as everywhere; Edit (E unless Settings says otherwise) edits.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if (e.key === "Escape") onClose();
-      else if (e.key === "e" || e.key === "E") {
+      if (e.key === "Escape" && !e.ctrlKey && !e.metaKey && !e.altKey) onClose();
+      else if (matches(e, keymap()["app.editTask"])) {
         e.preventDefault();
         onEdit();
       }

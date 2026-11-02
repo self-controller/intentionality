@@ -2,7 +2,7 @@
 #
 # Its one job is pam_systemd: registering a logind session on tty9 for the
 # unit's User=. Without a session, nothing running as that user may open the
-# GPU or the input devices, so a compositor (cage) cannot start there and the
+# GPU or the input devices, so the compositor (sway) cannot start there and the
 # graphical gate falls back to the text one. The session is on the VT the unit
 # has already switched to, so logind makes it the active one and hands the
 # devices over; switching back pauses it again, exactly as it does for GNOME.

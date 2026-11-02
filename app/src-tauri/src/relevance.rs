@@ -22,7 +22,7 @@ use crate::{jev, state::AppState, subject};
 use rusqlite::Connection;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
@@ -105,7 +105,7 @@ pub fn state(page: &Page, argument: Option<&[String]>, precedents: &[Precedent])
             .iter()
             .map(|p| {
                 json!({
-                    "window": page_title(&p.app, &p.title),
+                    "window": precedent_window(&p.app, &p.title),
                     "task": p.task_title,
                     "user_explained": p.argument.chars().take(PRECEDENT_CHARS).collect::<String>(),
                 })
@@ -113,6 +113,38 @@ pub fn state(page: &Page, argument: Option<&[String]>, precedents: &[Precedent])
             .collect();
     }
     state
+}
+
+/// A won appeal's window as Jev is shown it: its `page_title`, worked out
+/// once per window for the life of the app. Naming a window can read the
+/// machine (a browser's history, Claude Code's records of its sessions), and
+/// twelve precedents ride along with every question, so doing it afresh each
+/// time held every ask back by up to a quarter of a second.
+fn precedent_window(app: &str, title: &str) -> String {
+    static NAMES: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
+    let names = NAMES.get_or_init(Mutex::default);
+    let key = (app.to_string(), title.to_string());
+    if let Some(name) = names.lock().unwrap().get(&key) {
+        return name.clone();
+    }
+    // Named without the lock: it reads files.
+    let name = page_title(app, title);
+    names.lock().unwrap().insert(key, name.clone());
+    name
+}
+
+/// Names the won appeals that ride along with every question, so the first
+/// page asked about after launch does not wait on it. Blocking: it reads
+/// the store and the machine.
+pub fn warm_precedents(app: &AppHandle) {
+    let precedents = {
+        let state = app.state::<AppState>();
+        let conn = state.conn.lock().unwrap();
+        db::relevance_precedents(&conn, db::relevance_min(&conn), PRECEDENTS).unwrap_or_default()
+    };
+    for p in &precedents {
+        precedent_window(&p.app, &p.title);
+    }
 }
 
 /// A window as named fields, per TypeSafe's guidance on state: what sort of
@@ -502,6 +534,8 @@ mod tests {
                 about: Some("A gate that sits between login and your desktop.".into()),
             }),
             place: None,
+            source: "Claude Code: intentionality".into(),
+            site: None,
         };
         assert_eq!(
             describe("org.gnome.Ptyxis", &s),
@@ -538,6 +572,8 @@ mod tests {
                 site: "rutgers.instructure.com".into(),
                 part_of: Some("2026FA - INTRO DATA SCIENCE 01:198:439:09".into()),
             }),
+            source: "rutgers.instructure.com".into(),
+            site: Some("rutgers.instructure.com".into()),
         };
         assert_eq!(
             describe("app.zen_browser.zen", &s),

@@ -4,8 +4,9 @@
 //! (relevance.rs), in which case nothing is shown. The Dashboard shows
 //! today's time on each flag.
 //!
-//! Every other window is judged too, once it has been in front for DWELL:
-//! one Jev finds relevant to none of the Doing tasks gets the same clock
+//! Every other window is judged too: from the cache the moment it comes to
+//! the front, by Jev once it has stayed there for ASK. One Jev finds
+//! relevant to none of the Doing tasks gets the same clock
 //! (subject.rs says what a window is: a tab, an editor's project folder, a
 //! terminal's directory). So does every window while nothing is in Doing,
 //! no open session included: with no task, nothing is relevant. Otherwise
@@ -17,10 +18,11 @@
 //! that goes up while the clock is on screen, whichever page it is on, and
 //! never down. A new off-task site carries on from it, and so do coming back
 //! from being away, a change to Doing and a restart (it is kept in the
-//! store's meta). It starts over at local midnight, seeded once from
-//! ActivityWatch (`off_task_seconds`) when the day has no total yet. Time
-//! without input counts for observed::IDLE_GRACE_SECS before it is away,
-//! here as everywhere.
+//! store's meta). It starts over when a new day starts (day.rs: 4 am unless
+//! Settings says otherwise), seeded once from ActivityWatch
+//! (`off_task_seconds`) when the day has no total yet. Time without input
+//! counts for observed::IDLE_GRACE_SECS before it is away, here as
+//! everywhere.
 //!
 //! ActivityWatch stays the tracker and the source of today's total. Which
 //! window is in front comes from the GNOME Shell extension behind
@@ -39,23 +41,32 @@ use crate::error::{AppError, Result};
 use crate::models::{Judgement, RiskApp, RiskToday, RiskTotal};
 use crate::observed::{self, Events};
 use crate::relevance::{self, Page};
-use crate::{db, overlay, state::AppState, subject};
-use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
+use crate::{day, db, overlay, state::AppState, subject};
+use chrono::{DateTime, NaiveDate, Utc};
 use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
 /// The keepalive pace: a Show a second keeps the clock up and its count
-/// honest, and a window that has dwelt long enough is judged within one.
-/// Changes of window do not wait for it.
+/// honest. Changes of window do not wait for it, and nor does a window
+/// crossing SETTLE or ASK (`wake_in`).
 const TICK: Duration = Duration::from_secs(1);
 /// AW unreachable: nothing to show, check back slowly.
 const IDLE_TICK: Duration = Duration::from_secs(5);
-/// How long a window nobody flagged must stay in front before it is judged:
-/// alt-tabbing or Ctrl-Tabbing past windows asks Jev nothing and flashes no
-/// clock. A flagged window is judged at once, as it always was.
-const DWELL: Duration = Duration::from_millis(1500);
+/// How long a window nobody flagged must stay in front before its clock
+/// comes up from hidden: passing through windows, or a title that holds only
+/// while a page loads, flashes no clock. A clock already up moves to the
+/// next off-task window at once (nothing to flash), and a flagged window
+/// shows at once, as it always did.
+const SETTLE: Duration = Duration::from_millis(400);
+/// How long a window nobody flagged must stay in front before Jev is asked
+/// about it: flicking past windows bills nothing. Its cached verdicts are
+/// read the moment it is in front, so a page judged before never waits on
+/// this. A flagged window is asked at once.
+const ASK: Duration = Duration::from_millis(400);
+/// Slack on a wake set for SETTLE or ASK, so the pass it starts is past it.
+const WAKE_SLACK: Duration = Duration::from_millis(2);
 /// How often the day's total is written to the store while the clock is up
 /// (and once more as it goes down): a crash loses at most this much.
 const SAVE: Duration = Duration::from_secs(30);
@@ -97,10 +108,9 @@ fn is_domain(s: &str) -> bool {
         && labels.last().is_some_and(|tld| tld.len() >= 2 && tld.chars().all(char::is_alphabetic))
 }
 
-/// What a flag is looked for by: a website's name ("linkedin.com" ->
-/// "linkedin", "https://www.bbc.co.uk/news" -> "bbc"), or the text itself,
-/// lowercased ("Discord" -> "discord"). Empty when nothing is left to match.
-pub fn keyword(name: &str) -> String {
+/// The website a text names, lowercased and without "www.":
+/// "https://www.bbc.co.uk/news" -> "bbc.co.uk". None when it names none.
+pub(crate) fn host(name: &str) -> Option<String> {
     let lowered = name.trim().to_lowercase();
     let mut rest = lowered.as_str();
     for scheme in ["https://", "http://"] {
@@ -108,9 +118,14 @@ pub fn keyword(name: &str) -> String {
     }
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
     let host = host.strip_prefix("www.").unwrap_or(host);
-    if !is_domain(host) {
-        return lowered;
-    }
+    is_domain(host).then(|| host.to_string())
+}
+
+/// What a flag is looked for by: a website's name ("linkedin.com" ->
+/// "linkedin", "https://www.bbc.co.uk/news" -> "bbc"), or the text itself,
+/// lowercased ("Discord" -> "discord"). Empty when nothing is left to match.
+pub fn keyword(name: &str) -> String {
+    let Some(host) = host(name) else { return name.trim().to_lowercase() };
     let labels: Vec<&str> = host.split('.').collect();
     let mut name_at = labels.len() - 2;
     if name_at > 0 && SECOND_LEVELS.contains(&labels[name_at]) {
@@ -122,7 +137,7 @@ pub fn keyword(name: &str) -> String {
 /// `needle` inside `hay` as a whole word: not run into letters or digits on
 /// either side. Case-insensitive. Whole words are what keep a short flag
 /// honest: x.com's "x" must not match xdg-desktop-portal-gtk.
-fn contains_word(hay: &str, needle: &str) -> bool {
+pub(crate) fn contains_word(hay: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
     }
@@ -225,17 +240,6 @@ pub fn totals(
     Ok(RiskToday { apps, total, judged: 0, error: None })
 }
 
-/// Local midnight today, which is where "today" starts for a person.
-pub(crate) fn today_start(now: DateTime<Local>) -> DateTime<Utc> {
-    let midnight = now.date_naive().and_hms_opt(0, 0, 0).expect("midnight exists");
-    Local
-        .from_local_datetime(&midnight)
-        .earliest()
-        .map(|t| t.with_timezone(&Utc))
-        // A zone that skips midnight for DST: count from the naive time.
-        .unwrap_or_else(|| midnight.and_utc())
-}
-
 /// The store's one timestamp format (db::now), which is what AW is queried in.
 pub(crate) fn iso(t: DateTime<Utc>) -> String {
     t.format("%Y-%m-%dT%H:%M:%S+00:00").to_string()
@@ -244,7 +248,7 @@ pub(crate) fn iso(t: DateTime<Utc>) -> String {
 /// Today so far on every flag, from ActivityWatch.
 pub async fn today(apps: &[RiskApp]) -> Result<RiskToday> {
     let now = Utc::now();
-    let start = today_start(Local::now());
+    let start = day::today_start();
     let events = observed::fetch(&iso(start), &iso(now)).await?;
     totals(&events, apps, start, now)
 }
@@ -275,10 +279,8 @@ pub fn off_task_seconds(
             Some(k) => *k,
             None => {
                 let j = verdict(a.app, a.title)?;
-                // Nothing in Doing: every page is off task.
-                let judged = j.no_tasks
-                    || (!j.verdicts.is_empty() && j.verdicts.iter().all(|v| v.probability.is_some()));
-                let k = (j.relevant.is_some(), judged);
+                // Nothing in Doing counts as judged: every page is off task.
+                let k = (j.relevant.is_some(), j.complete());
                 known.insert(key, k);
                 k
             }
@@ -296,7 +298,7 @@ pub fn off_task_seconds(
 /// earlier ones drops out of it.
 async fn day_off_task(app: &AppHandle, apps: &[RiskApp]) -> Result<f64> {
     let now = Utc::now();
-    let start = today_start(Local::now());
+    let start = day::today_start();
     let events = observed::fetch(&iso(start), &iso(now)).await?;
     let state = app.state::<AppState>();
     let conn = state.conn.lock().unwrap();
@@ -419,7 +421,7 @@ impl Watch {
     /// Today's off-task total for the clock, whichever page is in front:
     /// the store's, or a seed from ActivityWatch for a day without one.
     async fn count(&mut self, app: &AppHandle, apps: &[RiskApp]) -> Result<f64> {
-        let day = Local::now().date_naive();
+        let day = day::today();
         if self.ledger.as_ref().is_none_or(|l| l.day != day) {
             let stored = {
                 let state = app.state::<AppState>();
@@ -456,9 +458,46 @@ impl Watch {
     }
 }
 
-/// Has a window been in front long enough to be judged?
-fn ready(flagged: bool, in_front: Duration) -> bool {
-    flagged || in_front >= DWELL
+/// May the clock show for a window that has been in front this long? `up`:
+/// a clock was on screen a pass ago, so this one only relabels it.
+fn may_show(flagged: bool, up: bool, in_front: Duration) -> bool {
+    flagged || up || in_front >= SETTLE
+}
+
+/// Has a window been in front long enough for Jev to be asked about it?
+fn may_ask(flagged: bool, in_front: Duration) -> bool {
+    flagged || in_front >= ASK
+}
+
+/// When the loop must look again for a window in front this long: the
+/// moment it crosses SETTLE or ASK, not the next keepalive tick. None once
+/// it is past both.
+fn wake_in(in_front: Duration) -> Option<Duration> {
+    [SETTLE, ASK]
+        .into_iter()
+        .filter(|at| *at > in_front)
+        .min()
+        .map(|at| (at - in_front + WAKE_SLACK).min(TICK))
+}
+
+/// Logs the task that excuses a page, once per page and task: a page read
+/// again every REJUDGE says it once.
+fn note_excused(
+    excused: &mut Option<((String, String), i64)>,
+    key: &(String, String),
+    label: &str,
+    judgement: &Judgement,
+) {
+    let Some(v) = judgement.relevant.map(|i| &judgement.verdicts[i]) else { return };
+    let said = (key.clone(), v.task_id);
+    if excused.as_ref() != Some(&said) {
+        eprintln!(
+            "intentionality: at risk: {label} excused by task \"{}\" (p={:.2})",
+            v.task_title,
+            v.probability.unwrap_or(0.0)
+        );
+        *excused = Some(said);
+    }
 }
 
 /// A judgement in flight for one page.
@@ -499,6 +538,11 @@ struct Display {
     unexcused: bool,
 }
 
+/// The caption of a page judged against every Doing task and relevant to
+/// none. The extension draws it in red, so it compares the text: its
+/// extension.js declares the same string (tested below).
+pub const OFF_TASK_CAPTION: &str = "Not relevant to any task";
+
 fn display(label: &str, flagged: bool, j: &Judgement) -> Option<Display> {
     if j.relevant.is_some() {
         return None;
@@ -514,7 +558,7 @@ fn display(label: &str, flagged: bool, j: &Judgement) -> Option<Display> {
     } else if unjudged {
         "Relevance unchecked"
     } else {
-        "Not relevant to any task"
+        OFF_TASK_CAPTION
     };
     Some(Display {
         label: label.into(),
@@ -541,6 +585,13 @@ async fn run(app: AppHandle) {
     {
         eprintln!("intentionality: {warning}");
     }
+    // Done now, not while the first page Jev is asked about waits: the
+    // won appeals sent with every question are named once (that read the
+    // machine and held a rig's first ask back 0.24 s), and the shared
+    // client sets up its TLS.
+    let warm = app.clone();
+    tauri::async_runtime::spawn_blocking(move || relevance::warm_precedents(&warm));
+    let _ = crate::http::remote();
     let (mut source, focus) = probe().await;
     eprintln!(
         "intentionality: focused window from {}",
@@ -548,7 +599,7 @@ async fn run(app: AppHandle) {
     );
     let state = app.state::<AppState>();
     let mut watch = Watch { buckets: None, ledger: None, focus };
-    // The page in front and since when, for DWELL.
+    // The page in front and since when, for SETTLE and ASK.
     let mut in_front: Option<((String, String), Instant)> = None;
     // The last "excused by" line, so a page re-read every REJUDGE logs once.
     let mut excused: Option<((String, String), i64)> = None;
@@ -581,17 +632,7 @@ async fn run(app: AppHandle) {
             result = finished(&mut pending) => {
                 let p = pending.take().expect("a judgement finished");
                 if let Ok(judgement) = result {
-                    if let Some(i) = judgement.relevant {
-                        let v = &judgement.verdicts[i];
-                        let said = (p.key.clone(), v.task_id);
-                        if excused.as_ref() != Some(&said) {
-                            eprintln!(
-                                "intentionality: at risk: {} excused by task \"{}\" (p={:.2})",
-                                p.label, v.task_title, v.probability.unwrap_or(0.0)
-                            );
-                            excused = Some(said);
-                        }
-                    }
+                    note_excused(&mut excused, &p.key, &p.label, &judgement);
                     decided = Some(Decided { key: p.key, judgement, at: Instant::now() });
                 }
             }
@@ -646,32 +687,47 @@ async fn run(app: AppHandle) {
             }
             Some(seen) => {
                 let key = seen.key.clone();
+                let flagged = seen.flag.is_some();
                 let fresh = decided.as_ref().is_some_and(|d| {
                     let ttl = if d.judgement.error.is_some() { RETRY } else { REJUDGE };
                     d.key == key && d.at.elapsed() < ttl
                 });
                 let dwelt = in_front.as_ref().map_or(Duration::ZERO, |(_, since)| since.elapsed());
                 let stale = !fresh && !pending.as_ref().is_some_and(|p| p.key == key);
-                if stale && !ready(seen.flag.is_some(), dwelt) {
-                    // Still passing through: drop a judgement of the page before.
+                if stale {
+                    // Anything still in flight was about the page before.
                     if let Some(p) = pending.take() {
                         p.handle.abort();
                     }
-                } else if stale {
-                    if let Some(p) = pending.take() {
-                        p.handle.abort();
+                    // The store first, the moment the page is in front: one
+                    // judged before needs no request and no wait for ASK.
+                    let known = {
+                        let conn = state.conn.lock().unwrap();
+                        relevance::cached(&conn, state.session_id(), &seen.page)
+                    };
+                    match known {
+                        Ok(judgement) if judgement.complete() => {
+                            note_excused(&mut excused, &key, &seen.name, &judgement);
+                            decided = Some(Decided { key: key.clone(), judgement, at: Instant::now() });
+                        }
+                        // Still passing through: Jev is asked nothing yet. An
+                        // incomplete read is not kept -- it would count as
+                        // fresh and hold the question back for REJUDGE.
+                        _ if !may_ask(flagged, dwelt) => {}
+                        _ => {
+                            let handle = tokio::spawn(relevance::judge(app.clone(), seen.page.clone()));
+                            pending = Some(Pending { key: key.clone(), label: seen.name.clone(), handle });
+                        }
                     }
-                    let handle = tokio::spawn(relevance::judge(app.clone(), seen.page.clone()));
-                    pending = Some(Pending { key: key.clone(), label: seen.name.clone(), handle });
                 }
-                // Not judged yet: nothing on screen until the verdict. A cache
-                // hit lands before the next tick; the model takes a moment.
-                // A verdict still held from an earlier visit waits out the
-                // dwell too, so passing back through a window flashes nothing.
+                // Not judged yet: nothing on screen until the verdict. A
+                // verdict in hand still waits out SETTLE, unless a clock is
+                // already up and only moves to this page -- so passing
+                // through windows, or back through one, flashes nothing.
                 decided
                     .as_ref()
-                    .filter(|d| d.key == key && ready(seen.flag.is_some(), dwelt))
-                    .and_then(|d| display(&seen.name, seen.flag.is_some(), &d.judgement))
+                    .filter(|d| d.key == key && may_show(flagged, shown.is_some(), dwelt))
+                    .and_then(|d| display(&seen.name, flagged, &d.judgement))
             }
         };
 
@@ -697,12 +753,14 @@ async fn run(app: AppHandle) {
         failing = aw_error.is_some();
         let display = display.filter(|_| seconds.is_some());
 
-        // Logged on change only, so the journal says what was on screen when.
+        // Logged on change only, so the journal says what was on screen when,
+        // and how long after the page came to the front it got there.
         if display != shown {
+            let after = in_front.as_ref().map_or(0.0, |(_, since)| since.elapsed().as_secs_f64());
             match (&display, seconds) {
                 (Some(d), Some(seconds)) => eprintln!(
-                    "intentionality: at risk: {} ({:.0}s off task today) — {}",
-                    d.label, seconds, d.caption
+                    "intentionality: at risk: {} ({:.0}s off task today) — {} · {:.2}s after focus",
+                    d.label, seconds, d.caption, after
                 ),
                 _ => eprintln!("intentionality: at risk: none"),
             }
@@ -731,7 +789,13 @@ async fn run(app: AppHandle) {
         }
         shown = display;
 
-        wait = if watch.buckets.is_none() { IDLE_TICK } else { TICK };
+        wait = if watch.buckets.is_none() {
+            IDLE_TICK
+        } else {
+            // A page waiting on SETTLE or ASK is looked at again the moment
+            // it crosses one, not up to a tick later.
+            in_front.as_ref().and_then(|(_, since)| wake_in(since.elapsed())).unwrap_or(TICK)
+        };
     }
 }
 
@@ -905,13 +969,6 @@ mod tests {
         assert_eq!(day.total, 680.0);
     }
 
-    #[test]
-    fn today_starts_at_local_midnight() {
-        let now = Local.with_ymd_and_hms(2026, 10, 19, 15, 30, 0).unwrap();
-        let start = today_start(now).with_timezone(&Local);
-        assert_eq!(start, Local.with_ymd_and_hms(2026, 10, 19, 0, 0, 0).unwrap());
-    }
-
     fn judgement(verdicts: Vec<(Option<f64>, &str)>, relevant: Option<usize>, no_tasks: bool) -> Judgement {
         Judgement {
             app: ZEN.into(),
@@ -933,6 +990,21 @@ mod tests {
             no_tasks,
             error: None,
         }
+    }
+
+    /// The extension paints this caption red by its text, so the two
+    /// languages must agree on it.
+    #[test]
+    fn the_extension_knows_the_off_task_caption() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../gnome-extension/at-risk-timer@intentionality/extension.js");
+        let source = std::fs::read_to_string(path).unwrap();
+        let declared = source
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("const OFF_TASK = '"))
+            .and_then(|rest| rest.strip_suffix("';"))
+            .expect("extension.js declares const OFF_TASK = '<caption>';");
+        assert_eq!(declared, OFF_TASK_CAPTION);
     }
 
     #[test]
@@ -989,11 +1061,51 @@ mod tests {
     }
 
     #[test]
-    fn a_flagged_window_is_judged_at_once_and_any_other_after_a_dwell() {
-        assert!(ready(true, Duration::ZERO));
-        assert!(!ready(false, Duration::ZERO));
-        assert!(!ready(false, DWELL - Duration::from_millis(1)));
-        assert!(ready(false, DWELL));
+    fn a_flagged_window_is_asked_about_at_once_and_any_other_after_ask() {
+        assert!(may_ask(true, Duration::ZERO));
+        assert!(!may_ask(false, Duration::ZERO));
+        assert!(!may_ask(false, ASK - Duration::from_millis(1)));
+        assert!(may_ask(false, ASK));
+    }
+
+    /// From hidden, an unflagged window's clock waits out SETTLE; a clock
+    /// already up moves to it at once, as does a flagged window's.
+    #[test]
+    fn a_clock_comes_up_after_settle_unless_one_is_up_already() {
+        assert!(may_show(true, false, Duration::ZERO));
+        assert!(may_show(false, true, Duration::ZERO));
+        assert!(!may_show(false, false, Duration::ZERO));
+        assert!(!may_show(false, false, SETTLE - Duration::from_millis(1)));
+        assert!(may_show(false, false, SETTLE));
+    }
+
+    /// The loop looks again as a window crosses SETTLE or ASK -- just past
+    /// it, never more than a tick away -- and not at all once past both.
+    #[test]
+    fn the_loop_wakes_as_a_window_crosses_settle_or_ask() {
+        let first = SETTLE.min(ASK);
+        let last = SETTLE.max(ASK);
+        assert_eq!(wake_in(Duration::ZERO), Some((first + WAKE_SLACK).min(TICK)));
+        let halfway = first / 2;
+        assert_eq!(wake_in(halfway), Some((first - halfway + WAKE_SLACK).min(TICK)));
+        // A wake lands past the threshold it was set for.
+        assert!(halfway + wake_in(halfway).unwrap() > first);
+        assert_eq!(wake_in(last), None);
+        assert_eq!(wake_in(last + Duration::from_secs(5)), None);
+        for ms in (0..2000).step_by(50) {
+            assert!(wake_in(Duration::from_millis(ms)).is_none_or(|w| w <= TICK));
+        }
+    }
+
+    /// Complete = nothing left to ask: every Doing task has a verdict, or
+    /// there is no task at all.
+    #[test]
+    fn a_judgement_is_complete_when_no_task_is_left_to_ask() {
+        assert!(judgement(vec![(Some(0.1), "a"), (Some(0.9), "b")], Some(1), false).complete());
+        assert!(!judgement(vec![(Some(0.1), "a"), (None, "b")], None, false).complete());
+        assert!(judgement(vec![], None, true).complete());
+        // Tasks, yet no verdict rows: never judged.
+        assert!(!judgement(vec![], None, false).complete());
     }
 
     fn verdicts(probabilities: &[Option<f64>], relevant: Option<usize>) -> Judgement {
